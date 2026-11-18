@@ -1,0 +1,271 @@
+// Factory for the private `neo:fs` wrapper.
+//
+// The native callbacks are supplied only to this closure during runtime
+// construction; they are never placed on the global object under a callable
+// name. Every intrinsic this wrapper later calls is captured here, before user
+// code runs. The API object has a null prototype and only own data properties,
+// so a replaced global, a polluted `Object.prototype`, or a hostile getter
+// cannot intercept a result. The module and the `fs` global share one API
+// instance, while `neo:fs` exports a separate pristine object holding the same
+// function values; replacing a property on `fs` cannot change an import.
+(function () {
+  'use strict';
+
+  const defineProperty = Object.defineProperty;
+  const createObject = Object.create;
+  const ownKeys = Reflect.ownKeys;
+  const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const bindCall = Function.prototype.bind.bind(Function.prototype.call);
+  const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+  const typedArrayTag = bindCall(getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag).get);
+  const typedArrayBuffer = bindCall(getOwnPropertyDescriptor(typedArrayPrototype, 'buffer').get);
+  const typedArrayByteLength = bindCall(getOwnPropertyDescriptor(typedArrayPrototype, 'byteLength').get);
+  const hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+  const parseJson = JSON.parse;
+  const isWellFormed = Function.prototype.call.bind(String.prototype.isWellFormed);
+  const charCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
+  const NativeError = Error;
+  const NativeTypeError = TypeError;
+  const lengthOf = (value) => value.length;
+
+  function defineValue(target, key, value) {
+    defineProperty(target, key, {
+      __proto__: null,
+      value: value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  return function (native, config) {
+    const limits = config.limits;
+    const messages = config.messages;
+
+    class FsError extends NativeError {
+      constructor(code, message) {
+        super(
+          typeof message === 'string' && message.length > 0
+            ? message
+            : (messages[code] || 'filesystem operation failed'),
+        );
+        defineProperty(this, 'name', {
+          __proto__: null,
+          value: 'FsError',
+          writable: true,
+          enumerable: false,
+          configurable: true,
+        });
+        defineProperty(this, 'code', {
+          __proto__: null,
+          value: code,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+      }
+    }
+
+    function requireString(value, name) {
+      if (typeof value !== 'string') {
+        throw new NativeTypeError(name + ' must be a string');
+      }
+      return value;
+    }
+
+    function requirePath(value) {
+      requireString(value, 'path');
+      const maximum = limits.MAX_PATH_BYTES;
+      if (lengthOf(value) > maximum) throw new FsError('FS_LIMIT');
+      if (!isWellFormed(value)) throw new FsError('FS_ENCODING');
+      let bytes = 0;
+      for (let index = 0; index < lengthOf(value); index++) {
+        const unit = charCodeAt(value, index);
+        if (unit <= 0x7f) {
+          bytes += 1;
+        } else if (unit <= 0x7ff) {
+          bytes += 2;
+        } else if (unit >= 0xd800 && unit <= 0xdbff) {
+          // `isWellFormed` guarantees the following code unit is a low
+          // surrogate, so this pair encodes as one four-byte scalar.
+          bytes += 4;
+          index++;
+        } else {
+          bytes += 3;
+        }
+        if (bytes > maximum) throw new FsError('FS_LIMIT');
+      }
+      if (lengthOf(value) === 0) throw new FsError('FS_PATH');
+      return value;
+    }
+
+    function requireOptions(value, allowedKeys) {
+      if (value === undefined) return null;
+      if (value === null || typeof value !== 'object') {
+        throw new NativeTypeError('options must be an object');
+      }
+      const keys = ownKeys(value);
+      if (keys.length > allowedKeys.length) {
+        throw new NativeTypeError('options contains an unsupported property');
+      }
+      const snapshot = createObject(null);
+      for (let index = 0; index < keys.length; index++) {
+        const key = keys[index];
+        if (typeof key !== 'string' || allowedKeys[0] !== key) {
+          throw new NativeTypeError('options contains an unsupported property');
+        }
+        const descriptor = getOwnPropertyDescriptor(value, key);
+        if (
+          descriptor === undefined ||
+          !hasOwn(descriptor, 'value') ||
+          descriptor.enumerable !== true
+        ) {
+          throw new NativeTypeError('options properties must be own enumerable data properties');
+        }
+        defineValue(snapshot, key, descriptor.value);
+      }
+      return snapshot;
+    }
+
+    function requireBoolean(value, name) {
+      if (typeof value !== 'boolean') {
+        throw new NativeTypeError(name + ' must be a boolean');
+      }
+      return value;
+    }
+
+    function unwrap(response) {
+      if (response.ok !== true) {
+        throw new FsError(response.code, response.message);
+      }
+      return response.value;
+    }
+
+    function readText(path) {
+      requirePath(path);
+      const snapshot = unwrap(native.snapshotPath(path));
+      return unwrap(native.readText(snapshot));
+    }
+
+    function writeText(path, data) {
+      requirePath(path);
+      requireString(data, 'data');
+      // Native code validates and snapshots text before resolving the path.
+      unwrap(native.writeText(path, data));
+    }
+
+    function readFile(path) {
+      requirePath(path);
+      const snapshot = unwrap(native.snapshotPath(path));
+      return unwrap(native.readFile(snapshot));
+    }
+
+    function writeFile(path, data, options) {
+      requirePath(path);
+      // These captured getters read internal slots, not properties of data.
+      // The tag getter rejects proxies and other brands without invoking them.
+      if (typedArrayTag(data) !== 'Uint8Array') {
+        throw new NativeTypeError('data must be a Uint8Array');
+      }
+      // Snapshot the live view before option reflection or any filesystem I/O.
+      const bytes = unwrap(native.copyData(data, typedArrayBuffer(data), typedArrayByteLength(data)));
+      const snapshot = unwrap(native.snapshotPath(path));
+      const opts = requireOptions(options, ['overwrite']);
+      let overwrite = true;
+      if (opts !== null) {
+        if (hasOwn(opts, 'overwrite')) {
+          overwrite = requireBoolean(opts.overwrite, 'options.overwrite');
+        }
+      }
+      unwrap(native.writeFile(snapshot, bytes, overwrite));
+    }
+
+    function stat(path) {
+      requirePath(path);
+      const snapshot = unwrap(native.snapshotPath(path));
+      return unwrap(native.stat(snapshot));
+    }
+
+    function lstat(path) {
+      requirePath(path);
+      const snapshot = unwrap(native.snapshotPath(path));
+      return unwrap(native.lstat(snapshot));
+    }
+
+    function exists(path) {
+      requirePath(path);
+      const snapshot = unwrap(native.snapshotPath(path));
+      return unwrap(native.exists(snapshot));
+    }
+
+    function readDir(path) {
+      requirePath(path);
+      const snapshot = unwrap(native.snapshotPath(path));
+      return parseJson(unwrap(native.readDir(snapshot)));
+    }
+
+    function mkdir(path, options) {
+      requirePath(path);
+      const snapshot = unwrap(native.snapshotPath(path));
+      const opts = requireOptions(options, ['recursive']);
+      let recursive = false;
+      if (opts !== null) {
+        if (hasOwn(opts, 'recursive')) {
+          recursive = requireBoolean(opts.recursive, 'options.recursive');
+        }
+      }
+      unwrap(native.mkdir(snapshot, recursive));
+    }
+
+    function remove(path, options) {
+      requirePath(path);
+      // Reject ambiguous terminal components before cwd resolution. The
+      // resolved absolute path is captured before proxy reflection can run JS.
+      const snapshot = unwrap(native.snapshotRemovePath(path));
+      const opts = requireOptions(options, ['recursive']);
+      let recursive = false;
+      if (opts !== null) {
+        if (hasOwn(opts, 'recursive')) {
+          recursive = requireBoolean(opts.recursive, 'options.recursive');
+        }
+      }
+      unwrap(native.remove(snapshot, recursive));
+    }
+
+    function rename(source, destination) {
+      requirePath(source);
+      requirePath(destination);
+      unwrap(native.rename(source, destination));
+    }
+
+    function copyFile(source, destination) {
+      requireString(source, 'source');
+      requireString(destination, 'destination');
+      requirePath(source);
+      requirePath(destination);
+      unwrap(native.copyFile(source, destination));
+    }
+
+    const api = createObject(null);
+    defineValue(api, 'readText', readText);
+    defineValue(api, 'writeText', writeText);
+    defineValue(api, 'readFile', readFile);
+    defineValue(api, 'writeFile', writeFile);
+    defineValue(api, 'stat', stat);
+    defineValue(api, 'lstat', lstat);
+    defineValue(api, 'exists', exists);
+    defineValue(api, 'readDir', readDir);
+    defineValue(api, 'mkdir', mkdir);
+    defineValue(api, 'remove', remove);
+    defineValue(api, 'rename', rename);
+    defineValue(api, 'copyFile', copyFile);
+    defineValue(api, 'FsError', FsError);
+    defineValue(api, 'MAX_PATH_BYTES', limits.MAX_PATH_BYTES);
+    defineValue(api, 'MAX_READ_BYTES', limits.MAX_READ_BYTES);
+    defineValue(api, 'MAX_WRITE_BYTES', limits.MAX_WRITE_BYTES);
+    defineValue(api, 'MAX_LIST_ENTRIES', limits.MAX_LIST_ENTRIES);
+    defineValue(api, 'MAX_LIST_NAME_BYTES', limits.MAX_LIST_NAME_BYTES);
+    defineValue(api, 'MAX_LIST_TOTAL_BYTES', limits.MAX_LIST_TOTAL_BYTES);
+    return api;
+  };
+})();

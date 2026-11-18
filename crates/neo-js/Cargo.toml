@@ -1,0 +1,124 @@
+[package]
+name = "neo-js"
+description = "Configurable QuickJS runtime for NeoTales automation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rquickjs = { version = "0.14", features = ["loader"] }
+# Oxc 0.81 is the newest release whose full dependency graph compiles on the
+# workspace's Rust 1.87. See README.md, "TypeScript".
+oxc_allocator = "0.81.0"
+oxc_ast = "0.81.0"
+oxc_ast_visit = "0.81.0"
+oxc_codegen = "0.81.0"
+oxc_diagnostics = "0.81.0"
+oxc_parser = "0.81.0"
+oxc_semantic = "0.81.0"
+oxc_span = "0.81.0"
+oxc_transformer = "0.81.0"
+# Neither crate is used directly. These exact pins hold two transitive
+# dependencies at Rust 1.87-compatible versions for downstream consumers, which
+# do not share this workspace's `Cargo.lock`: `textwrap` 0.16.4 would pull
+# `icu_*` 2.4 (Rust 1.88), and `oxc_sourcemap` 4.2 would pull
+# `json-escape-simd` 1.x (Rust 1.89). Recheck the Rust 1.87 build when changing
+# either pin.
+oxc_sourcemap = "=4.1.0"
+textwrap = "=0.16.2"
+semver = "1"
+sha2 = "0.10"
+sha3 = "0.10"
+blake2 = "0.10"
+blake3 = "1"
+hex = "0.4"
+serde_json = "1"
+# `neo:toml` delegates TOML syntax to the maintained `toml` parser. Only its
+# parse feature is enabled, which uses toml_edit 0.22. Exact because 0.8.23 is
+# the version resolved and checked offline with this workspace's Rust 1.87
+# toolchain; recheck that toolchain before changing the pin. `toml_edit` has an
+# internal nesting limit of 80; the module adds a shallower conversion limit so
+# policy does not depend on that implementation detail.
+toml = { version = "=0.8.23", default-features = false, features = ["parse"] }
+# The event preflight for `neo:toml`. It consumes the maintained toml-rs
+# lexer/parser and lets the module enforce depth and node budgets before `toml`
+# builds a value tree. Exact because the low-level event API is not the stable
+# value API; 1.1.2 is the cached release checked with the workspace's Rust 1.87
+# toolchain. `winnow` 1.0.5 is its cached dependency.
+toml_parser = "=1.1.2"
+# `neo:yaml` uses the maintained YAML 1.2 event parser behind `saphyr`, not the
+# higher-level `saphyr` crate: the loader there expands aliases by cloning
+# before a caller can reject them. Exact because 0.0.x has no compatibility
+# promise. 0.0.12 declares Rust 1.85 and builds on this workspace's Rust 1.87.
+saphyr-parser = "=0.0.12"
+# AES-256-GCM from RustCrypto. 0.10.3 is the newest release whose dependency
+# graph (aes 0.8, aead 0.5) builds on Rust 1.87; aes-gcm 0.11 requires aes 0.9,
+# which needs Rust 1.89. Keep this pin when updating. `getrandom` is used
+# directly for nonces and key generation rather than through aes-gcm's
+# default-features, so the RNG is explicit and no other RNG is pulled in.
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes"] }
+getrandom = "0.4"
+libc = "0.2"
+# age file encryption for `neo:age`. Default features are off, so the build gets
+# the X25519 format implementation without the CLI, async, SSH, or plugin
+# layers. age 0.12 would also work, but 0.11 is the maintenance line whose
+# declared MSRV (1.65) is comfortably below this workspace's Rust 1.87.
+# Exact: 0.11.5 is the tested release. A later 0.11.x could change
+# transitive requirements without a major-version signal.
+age = { version = "=0.11.5", default-features = false }
+# Neither `rust-embed` nor its helper crates are used directly. They are exact
+# pins for downstream consumers, which do not share this workspace's
+# `Cargo.lock`: age's translations pull `rust-embed` 8.x, and 8.12.0 and later
+# pull `rust-embed-utils` 8.12+ which requires `sha2` 0.11 (Rust 1.88). The
+# 8.11.0 line uses `sha2` 0.10 and builds on Rust 1.87. Recheck the 1.87 build
+# when changing any of these pins.
+rust-embed = "=8.11.0"
+rust-embed-impl = "=8.11.0"
+rust-embed-utils = "=8.11.0"
+
+# Explicitly disable every decoder on the client, even if downstream crates
+# unify compression features. Force rustls and bundled roots in the builder.
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls-webpki-roots", "rustls-tls-native-roots"] }
+# Used to validate the URL before any network or file activity, and to reject
+# schemes other than http and https. Exact for the same Rust 1.87 reason.
+url = "=2.5.8"
+
+# None of these crates is used directly. They are exact pins for downstream
+# consumers, which do not share this workspace's `Cargo.lock`: `url` 2.5.8
+# pulls `idna_adapter` 1.2.2, whose `icu_*` requirements allow ICU 2.4, and
+# ICU 2.4 requires Rust 1.88. ICU 2.2 builds on Rust 1.86. Recheck the Rust
+# 1.87 build when changing any pin.
+icu_collections = "=2.2.0"
+icu_locale_core = "=2.2.0"
+icu_normalizer = { version = "=2.2.0", default-features = false }
+icu_normalizer_data = "=2.2.0"
+icu_properties = { version = "=2.2.0", default-features = false }
+icu_properties_data = "=2.2.0"
+icu_provider = "=2.2.0"
+
+# Identity comparison for the temporary file on non-Unix hosts. Unix compares
+# device and inode directly. 1.0.6 is the current release and is already in the
+# lock file as a transitive dependency; it is target-gated so Unix builds do
+# not compile it. Windows behavior of the surrounding publish path is
+# unverified.
+[target.'cfg(not(unix))'.dependencies]
+same-file = "=1.0.6"
+
+# Windows Registry access for `neo:winregistry`. `windows-sys` 0.61 is the
+# maintained Microsoft binding crate, used directly so every query has an
+# explicit, bounded buffer and retry loop. It is target-specific: on a
+# non-Windows host the crate is not built and the module reports unsupported.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+reqwest = { version = "=0.12.28", default-features = false, features = ["gzip", "brotli"] }
+brotli = "=9.1.1"
+tokio = { version = "=1.54.1", features = ["rt"] }
