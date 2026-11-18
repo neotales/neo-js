@@ -2,3 +2,7 @@
 .env
 .env.*
 !.env.example
+
+# Local OpenCode goal state and locks
+.opencode/goals/
+.opencode/goal-locks/
