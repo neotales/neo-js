@@ -1424,8 +1424,10 @@ dependencies = [
  "clap",
  "neojs-core",
  "neojs-sqlite",
+ "same-file",
  "serde_json",
  "tempfile",
+ "toml 0.8.23",
 ]
 
 [[package]]

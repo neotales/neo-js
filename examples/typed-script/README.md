@@ -6,11 +6,17 @@ language support, or use an editor whose TypeScript language server reads
 Code you can check the active version with **TypeScript: Select TypeScript
 Version** while `main.mts` is open. Try completion on `os.` or hover over
 `stdout.write`. The config lists `../../types/neo-js.d.ts` as an input so the
-editor sees both the ambient globals and the `neo:` modules. Keep the checkout
-layout, or copy the declaration into your own project and update `files` to
-match.
+editor sees both the ambient globals and the `neo:` modules. That file is the
+generated CLI composition: core declarations plus the optional modules the CLI
+links, currently `neo:sqlite`. A host built without `neojs-sqlite` should use
+`../../types/neo-js.core.d.ts` instead, where the import is a type error. See
+`../../types/README.md` for the fragments and regeneration command. Keep the
+checkout layout, or copy the declaration into your own project and update
+`files` to match.
 
-The config checks ES2022 without loading DOM or automatic `@types` packages.
+The config checks ES2022 plus `ESNext.Disposable` without loading DOM or
+automatic `@types` packages. `ESNext.Disposable` supplies `Symbol.dispose`,
+which the `neo:sqlite` declarations use.
 Keep scripts in `.ts` or `.mts`, use `import type` for type-only imports, and
 keep explicit file extensions in relative imports. The config is not a runtime
 compatibility check: neo-js strips types, does not support every TypeScript
@@ -38,7 +44,8 @@ Use an already installed `tsc`, or use Deno's bundled checker as a fallback:
 ```sh
 tsc -p examples/typed-script/tsconfig.json
 # Fallback if tsc is not available:
-deno check --cached-only --no-config types/neo-js.d.ts types/path.test.ts types/schedulers.test.ts \
+deno check --cached-only --no-config types/neo-js.d.ts types/path.test.ts \
+  types/schedulers.test.ts types/sqlite.test.ts types/synchronous-callbacks.test.ts \
   examples/typed-script/main.mts examples/typed-script/types.test.mts
 ```
 
@@ -47,10 +54,18 @@ project. Use it only for checking; run the example with neo-js. The
 `types.test.mts`, `types/path.test.ts`, and `types/schedulers.test.ts` fixtures
 are checked, not run: they require the checker to reject invalid types. The
 path fixture covers the file-only `FileURL` type without requiring a DOM
-global declaration.
+global declaration. Deno cannot check the core-only negative fixture: it
+resolves an unknown `scheme:` specifier as external and types it as `any`. The
+smoke test proves the composed SQLite fixture is not accepted that way by
+pointing it at a core-only composition; its `@ts-expect-error` assertions then
+become unused and fail.
 
-Run `./examples/typed-script/smoke.sh` from a POSIX shell to check the types,
-run the example, and verify the missing permission causes a failure. With `tsc`
-on `PATH`, the smoke test also checks for declaration collisions with the DOM
-and WebWorker libs separately. Without `tsc`, it reports that those checks were
-not run and uses cached-only Deno instead. No command installs dependencies.
+Run `./examples/typed-script/smoke.sh` from a POSIX shell to verify the
+checked-in composition, check the types, run the example, and verify the
+missing permission causes a failure. With `tsc` on `PATH`, the smoke test also
+checks for declaration collisions with the DOM and WebWorker libs separately,
+checks that the composed entry admits `neo:sqlite`, checks that the core entry
+rejects it with exactly `TS2307`, and checks that the positive fixture fails
+when the fragment is removed. Without `tsc`, it reports that the tsc-only
+absence check was not run, uses cached-only Deno, and still runs the
+fragment-removal mutation. No command installs dependencies.

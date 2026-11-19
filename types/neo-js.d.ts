@@ -1,3 +1,12 @@
+// Generated declarations for the selected compiled modules. Do not edit.
+// Inputs: types/neo-js.core.d.ts, crates/neojs-sqlite/types/neo-sqlite.d.ts
+// Selection: core, sqlite
+// See types/README.md for the compose-types command.
+
+// Core declarations for neojs-core. Optional modules owned by separate crates
+// are added by composition; see types/README.md. This file deliberately omits
+// `neo:sqlite`, because neojs-core does not compile or register it.
+
 /**
  * Host OS information. `platform` and `arch` identify the Rust compilation
  * target, not necessarily a separately detected host. Optional fields follow
@@ -3021,6 +3030,11 @@ declare module "neo:age" {
    */
   export function decrypt(identity: string, ciphertext: Uint8Array): Uint8Array;
 }
+
+// Type fragment owned by neojs-sqlite. The CLI composition includes it because
+// the CLI links this crate. Declaring `neo:sqlite` records compiled
+// availability; it does not grant `Permissions::sqlite` or admit the module
+// through a runtime allowlist. types/neo-js.core.d.ts omits this module.
 
 /** Synchronous SQLite for private in-memory databases. Requires the host's SQLite grant. */
 declare module "neo:sqlite" {

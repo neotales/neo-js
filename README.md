@@ -1649,7 +1649,13 @@ this module.
 `neo:sqlite` is synchronous and is supplied by the optional `neojs-sqlite`
 package, not by `neojs-core`. The CLI includes that package, so
 `--allow-sqlite` still enables the same module; the Rust package for a custom
-embedder must add it explicitly. Registration and permission are independent:
+embedder must add it explicitly. The TypeScript declarations follow the same
+split: the crate owns
+`crates/neojs-sqlite/types/neo-sqlite.d.ts`, and the CLI entry
+`types/neo-js.d.ts` composes it with `types/neo-js.core.d.ts`. A build that
+links only the core crate uses the core file, where `neo:sqlite` is absent.
+Declaring the module records that the host compiled it in; it never grants the
+permission. Registration and permission are independent:
 the module is importable only when the extension is registered, the runtime
 allowlist admits the exact name `neo:sqlite`, and `Permissions::sqlite` is
 granted. Without the permission the import is denied before the module loads;
@@ -2410,6 +2416,17 @@ For editor completion and offline type checking, open the
 [typed script example](examples/typed-script/) in VS Code or another
 TypeScript language server. Its `tsconfig.json` loads the checked-in
 `types/neo-js.d.ts` declarations without installing a package.
+
+`types/neo-js.d.ts` is the deterministic, checked-in CLI composition of the
+core declarations in `types/neo-js.core.d.ts` and the declarations owned by
+each optional crate the CLI links. The CLI links `neojs-sqlite`, so the composed
+entry declares `neo:sqlite`. A host built without that crate should use
+`types/neo-js.core.d.ts`, where the import is a type error. Declarations record
+compiled availability, not permissions: a type-checked import still needs
+`Permissions::sqlite` and allowlist admission at run time. See
+[`types/README.md`](types/README.md) for selection, the offline regeneration
+command, declaration checks, and the composer's file-identity and
+manifest-check rules.
 
 A `.ts` or `.mts` entry, and any relative `.ts` or `.mts` import, is stripped
 to JavaScript before QuickJS sees it. Stripping erases type syntax; it does
