@@ -14,6 +14,7 @@ cargo run -p neo-js-cli -- --allow-env --allow-fs script.js
 cargo run -p neo-js-cli -- --allow-run script.js
 cargo run -p neo-js-cli -- --allow-stdio script.js
 cargo run -p neo-js-cli -- --allow-registry script.js
+cargo run -p neo-js-cli -- --allow-user script.js
 cargo run -p neo-js-cli -- --allow-net --allow-fs script.js
 cargo run -p neo-js-cli -- --third-party-notices
 ```
@@ -33,6 +34,9 @@ trust. On a non-Windows host the module can be imported with this permission,
 but `isAvailable()` is `false` and every operation reports that registry access
 is unsupported. Without the flag the module and all of its functions are
 absent.
+
+`--allow-user` enables [`neo:os/user`](#account-and-process-identity). Grant
+it only to scripts you trust with host account and process identity.
 
 `--allow-run` permits the synchronous `neo:exec` module, including its
 owned-child `spawn` handles. The child process runs with the current user's
@@ -1721,6 +1725,73 @@ behave the same. The differences are deliberate:
   data properties. They are still mutable, but replacement of a global
   property does not change an already-imported function.
 
+## Account and process identity
+
+`neo:os/user` is synchronous and off by default. The CLI requires
+`--allow-user`; embedders must set `Permissions::user` to `true`. If the
+runtime has a module allowlist, it must also admit `RuntimeModule::OsUser`
+(`"neo:os/user"`). Permission and allowlist admission are independent of
+`neo:os`. Importing the module installs no global and performs no identity lookup.
+Operations are available on Linux and macOS; on Windows and other platforms
+the module can be imported, but its operations throw `USER_UNSUPPORTED`.
+
+| Function | Result |
+| --- | --- |
+| `currentUserSync()` | `{ uid, primaryGid, username, homeDir }` from the OS account record for the caller's **real** UID, not the effective user or interactive login account. |
+| `homeDirSync()` | That account's profile directory. Unlike Go's `os.UserHomeDir()`, this does not consult environment variables or check that the path exists. |
+| `processIdsSync()` | `{ realUid, effectiveUid, realGid, effectiveGid }` for the caller, sampled separately without an account lookup. |
+| `accountGroupIdsSync()` | OS-reported group memberships for the real user's **account**, including its primary GID, sorted numerically and deduplicated. These are not the live process's group credentials. |
+
+Account names, profile paths, and user and group IDs are sensitive. Grant access
+only to trusted scripts, avoid logging returned values, and do not use account
+information as an authorization check. IDs are exact unsigned 32-bit numbers
+on Linux and macOS. The account's primary GID need not match either process
+GID. The module does not cache results, and lookups are not atomic.
+
+The OS account service (NSS on Linux) can consult local or remote sources
+and block without a deadline. neo-js limits only its own buffers and
+retries: up to 256 KiB and seven attempts for an account record, and one
+group query with room for 4,096 entries. Those limits do not bound the OS
+account service's work or latency. The module does not launch a subprocess,
+read environment variables directly, or change credentials.
+
+A temporary-directory API is **pending**. There is no `tempDirSync()` in
+this release: selecting the OS temp directory may disclose environment
+values, which `--allow-user` does not grant.
+
+Lookup failures throw an `Error` with a stable `code` and fixed message,
+without account data, paths, OS error strings, or a stack.
+
+| Code | Meaning |
+| --- | --- |
+| `USER_NOT_FOUND` | The OS reported no account for the real UID. |
+| `USER_ENCODING` | A returned username or home directory was not valid UTF-8. |
+| `USER_LIMIT` | A lookup exceeded a buffer or allocation limit. |
+| `USER_LOOKUP` | The OS lookup failed or returned malformed data. |
+| `USER_UNSUPPORTED` | No backend exists for this platform, including Windows. |
+
+Save this as `check-profile.js` and run
+`cargo run -p neo-js-cli -- --allow-user check-profile.js`. The script
+reports the outcome without printing identity data. Without the permission,
+the import fails before the example runs.
+
+```js
+import { homeDirSync } from "neo:os/user";
+
+try {
+  homeDirSync();
+  console.log("Account profile is available.");
+} catch (error) {
+  if (error instanceof Error && error.code === "USER_NOT_FOUND") {
+    console.log("No account record is available.");
+  } else if (error instanceof Error && error.code === "USER_UNSUPPORTED") {
+    console.log("Account lookup is unsupported on this platform.");
+  } else {
+    console.error("Account profile lookup failed.");
+  }
+}
+```
+
 ## Network downloads
 
 `neo:fetch` provides one synchronous function, `download(url, path, options?)`.
@@ -2235,13 +2306,13 @@ dependency-license inventory.
 
 neo-js is pre-1.0. Adding the `process` field to `Permissions` was a
 source-breaking change for code that constructed the struct with a complete
-literal. Adding `registry` is the same kind of change, and so is adding
-`network`; adding `stdio` is the same kind of change. Migrate by setting the
-fields you need and adding `..Permissions::default()`, or by naming every field
-explicitly, including `process`, `stdio`, `registry`, and `network`. CLI users
-opt in with `--allow-net` and `--allow-stdio`. Adding `neo:exec.spawn` is
-additive: the module exports one more function, existing `exec` calls and
-permissions are unchanged, and the host installs two additional host
+literal. The `registry`, `network`, `stdio`, and `user` fields are the same
+kind of change. Migrate by setting the fields you need and adding
+`..Permissions::default()`, or by naming every field explicitly, including
+`process`, `stdio`, `registry`, `network`, and `user`.
+CLI users opt in with `--allow-net`, `--allow-stdio`, and `--allow-user`.
+Adding `neo:exec.spawn` is additive: the module exports one more function,
+existing `exec` calls and permissions are unchanged, and the host installs two additional host
 callbacks only when `process` is granted. `neo:semver` is additive for its
 documented exports: `valid` and `compare` keep their behavior, and `parse`,
 `format`, `increment`, `satisfies`, `validRange`, and `SemVerError` are new.

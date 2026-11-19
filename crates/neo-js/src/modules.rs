@@ -83,6 +83,9 @@ pub enum RuntimeModule {
     SchedulerSystemd,
     /// `neo:os/schedulers/windows` — Windows Task Scheduler XML text generation.
     SchedulerWindows,
+    /// `neo:os/user` — host account and process identity; also requires
+    /// [`crate::Permissions::user`].
+    OsUser,
 }
 
 impl RuntimeModule {
@@ -91,7 +94,7 @@ impl RuntimeModule {
     /// The array grows when host modules are added. Iterate with
     /// `RuntimeModule::ALL.into_iter()` rather than naming its length in a
     /// type. To build an allowlist of all modules, use [`ModuleAllowlist::all`].
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Age,
         Self::Ansi,
         Self::Assert,
@@ -115,6 +118,7 @@ impl RuntimeModule {
         Self::Yaml,
         Self::SchedulerSystemd,
         Self::SchedulerWindows,
+        Self::OsUser,
     ];
 
     /// The canonical `neo:` name of this module.
@@ -132,6 +136,7 @@ impl RuntimeModule {
             Self::Fs => "neo:fs",
             Self::Hash => "neo:hash",
             Self::Os => "neo:os",
+            Self::OsUser => "neo:os/user",
             Self::Path => "neo:path",
             Self::Process => "neo:process",
             Self::Scheduler => "neo:scheduler",
@@ -164,6 +169,7 @@ impl RuntimeModule {
             "neo:fs" => Self::Fs,
             "neo:hash" => Self::Hash,
             "neo:os" => Self::Os,
+            "neo:os/user" => Self::OsUser,
             "neo:path" => Self::Path,
             "neo:process" => Self::Process,
             "neo:scheduler" => Self::Scheduler,

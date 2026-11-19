@@ -9,7 +9,7 @@
 //!
 //! * [`Permissions`] (capabilities) decide what a granted host function may do.
 //!   `neo:fs` needs [`Permissions::filesystem`], `neo:env` needs
-//!   [`Permissions::environment`], and so on. These are the historical flags.
+//!   [`Permissions::environment`], and `neo:os/user` needs [`Permissions::user`].
 //! * [`RuntimeOptions`] can carry an explicit [`ModuleAllowlist`] of the host
 //!   `neo:` modules this runtime constructs. It is checked before permissions.
 //!
@@ -55,6 +55,7 @@ mod js_text;
 mod loader;
 mod modules;
 mod os;
+mod os_user;
 mod process;
 mod semver;
 mod stdio;
@@ -83,10 +84,10 @@ use rquickjs::{Context, Function, Module, Object, Persistent, Runtime, function:
 /// module allowlist".
 ///
 /// This type is not `#[non_exhaustive]`. Before 1.0, adding a field such as
-/// `Permissions::process`, `Permissions::stdio`, `Permissions::registry`, or
-/// `Permissions::network` is a source-breaking change for complete struct
-/// literals. Construct values with `..Permissions::default()` or name every
-/// field explicitly.
+/// `Permissions::process`, `Permissions::stdio`, `Permissions::registry`,
+/// `Permissions::network`, or `Permissions::user` is a source-breaking change
+/// for complete struct literals. Construct values with `..Permissions::default()`
+/// or name every field explicitly.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Permissions {
     /// Allow synchronous filesystem access through `neo:fs`, plus file reads
@@ -144,6 +145,16 @@ pub struct Permissions {
     /// [`Self::filesystem`]; without it `neo:fetch.download` reports
     /// `FETCH_PERMISSION` before any file or network activity.
     pub network: bool,
+    /// Allow `neo:os/user` to disclose the host process's user and group IDs
+    /// and the real user's account name, profile directory, and account group
+    /// memberships. Does not grant filesystem or environment access.
+    ///
+    /// This is off by default and the module also needs allowlist admission.
+    /// The CLI flag is `--allow-user`. Grant it only to scripts you trust with
+    /// this identity information; the results are not authorization checks.
+    /// Available on Linux and macOS. On other platforms the module imports
+    /// with this permission but operations fail with `USER_UNSUPPORTED`.
+    pub user: bool,
 }
 
 /// An isolated QuickJS runtime and its single context.
@@ -550,6 +561,10 @@ impl NeoJs {
                 let winregistry_factory = winregistry::factory(&ctx)?;
                 winregistry.borrow_mut().factory =
                     Some(Persistent::save(&ctx, winregistry_factory));
+            }
+
+            if permissions.user && allowed.allows(RuntimeModule::OsUser) {
+                os_user::prepare(&ctx)?;
             }
 
             // `neo:fetch` uses the same private-factory pattern. It is only

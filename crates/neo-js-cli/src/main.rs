@@ -35,6 +35,9 @@ struct Args {
     /// downloading a file also requires --allow-fs.
     #[arg(long)]
     allow_net: bool,
+    /// Permit neo:os/user to disclose host account and process identity information.
+    #[arg(long)]
+    allow_user: bool,
     /// Print embedded third-party source notices and exit. The text covers
     /// adapted source code, not every dependency. No script is read and no
     /// permission is required.
@@ -106,6 +109,7 @@ fn execute(requested_script: &Path, args: &Args) -> Result<(), Vec<String>> {
         process: args.allow_run,
         registry: args.allow_registry,
         network: args.allow_net,
+        user: args.allow_user,
     })
     .map_err(|error| vec![error.to_string()])?;
     let identity = script

@@ -16,6 +16,7 @@ fn everything() -> Permissions {
         process: true,
         registry: true,
         network: true,
+        user: true,
     }
 }
 
@@ -47,6 +48,7 @@ fn default_runtime_keeps_the_historical_behavior() {
          import 'neo:fs';
          import 'neo:hash';
          import 'neo:os';
+         import 'neo:os/user';
          import 'neo:os/schedulers/systemd';
          import 'neo:os/schedulers/windows';
          import 'neo:path';
@@ -82,6 +84,81 @@ fn explicit_allowlist_of_every_module_also_admits_every_module() {
         )
         .unwrap();
     }
+}
+
+#[test]
+fn os_user_needs_both_gates_and_never_installs_a_global() {
+    let user_only = Permissions {
+        user: true,
+        ..Permissions::default()
+    };
+    let denied_module = runtime(user_only, &[RuntimeModule::Os]);
+    assert!(import_error(&denied_module, "deny-user-list.js", "neo:os/user").contains("allowlist"));
+    let denied_permission = runtime(
+        Permissions {
+            user: false,
+            ..everything()
+        },
+        &[RuntimeModule::OsUser],
+    );
+    let error = import_error(&denied_permission, "deny-user-permission.js", "neo:os/user");
+    assert!(error.contains("neo:os/user") && !error.contains("allowlist"));
+    for (idx, js) in [&denied_module, &denied_permission].into_iter().enumerate() {
+        js.run_module(
+            &format!("deny-user-dynamic-{idx}.js"),
+            "let available = true;
+             try { await import('neo:os/user'); } catch { available = false; }
+             if (available) throw Error('unexpected identity authority');",
+        )
+        .unwrap();
+    }
+
+    // Inspect only the export surface, never the test runner's identity.
+    let allowed = runtime(user_only, &[RuntimeModule::OsUser]);
+    let before = allowed
+        .eval("JSON.stringify(Object.getOwnPropertyNames(globalThis).sort())")
+        .unwrap();
+    allowed
+        .run_module(
+            "allow-user.js",
+            "import * as api from 'neo:os/user';
+             if (Object.keys(api).sort().join() !==
+                 'accountGroupIdsSync,currentUserSync,homeDirSync,processIdsSync') {
+                 throw Error('unexpected identity exports');
+             }
+             if (Object.values(api).some(fn => typeof fn !== 'function')) {
+                 throw Error('identity exports must be functions');
+             }",
+        )
+        .unwrap();
+    assert_eq!(
+        before,
+        allowed
+            .eval("JSON.stringify(Object.getOwnPropertyNames(globalThis).sort())")
+            .unwrap()
+    );
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn os_user_operations_fail_explicitly_on_unsupported_hosts() {
+    let js = NeoJs::new(Permissions {
+        user: true,
+        ..Permissions::default()
+    })
+    .unwrap();
+    js.run_module(
+        "unsupported-user.js",
+        "import * as api from 'neo:os/user';
+         for (const operation of Object.values(api)) {
+             let unsupported = false;
+             try { operation(); } catch (error) {
+                 unsupported = error instanceof Error && error.code === 'USER_UNSUPPORTED';
+             }
+             if (!unsupported) throw Error('operation did not report unsupported');
+         }",
+    )
+    .unwrap();
 }
 
 #[test]

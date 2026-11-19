@@ -228,6 +228,7 @@ impl ModuleLoader {
             RuntimeModule::Fs => self.permissions.filesystem,
             RuntimeModule::Process => self.permissions.process || self.permissions.stdio,
             RuntimeModule::WinRegistry => self.permissions.registry,
+            RuntimeModule::OsUser => self.permissions.user,
         }
     }
 }
@@ -379,6 +380,9 @@ impl Loader for ModuleLoader {
                 name,
                 crate::os::module_source(&self.os_metadata),
             );
+        }
+        if name == "neo:os/user" {
+            return Module::declare_def::<crate::os_user::UserModule, _>(ctx.clone(), name);
         }
         if let Some(source) = self.builtin(name) {
             return Module::declare(ctx.clone(), name, source);
