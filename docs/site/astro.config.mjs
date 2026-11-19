@@ -10,7 +10,7 @@ export default defineConfig({
 				{ label: "Runtime", items: [{ autogenerate: { directory: "runtime" } }] },
 				{ label: "Module guides", items: [{ autogenerate: { directory: "guides/modules" } }] },
 				{ label: "API reference", slug: "api" },
-				{ label: "Globals", slug: "api/globals" },
+				{ label: "Public host globals", slug: "api/globals" },
 				{
 					label: "Module declarations",
 					collapsed: true,

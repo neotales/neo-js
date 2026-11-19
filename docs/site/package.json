@@ -8,7 +8,8 @@
 		"check": "pnpm fmt:check && pnpm build",
 		"fmt:check": "oxfmt --check",
 		"reference:generate": "node scripts/reference.mjs",
-		"reference:check": "node scripts/reference.mjs --check"
+		"reference:check": "node scripts/reference.mjs --check && node scripts/runtime-inventory.mjs",
+		"reference:test": "node --test scripts/reference.test.mjs"
 	},
 	"dependencies": {
 		"@astrojs/markdown-remark": "7.3.9",

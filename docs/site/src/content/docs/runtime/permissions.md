@@ -68,6 +68,6 @@ you trust with the user's network reachability.
 
 `neo:hash` is importable without a permission flag. Without `--allow-fs` the module does not export `digestFile`; `digest` remains available. Without `--allow-net`, `neo:fetch` is not importable. With `--allow-net` but not `--allow-fs`, `neo:fetch` is importable but `download` throws `FETCH_PERMISSION`.
 
-The globals `os`, `env`, and `fs` are present only if the allowlist admits their matching modules. `env` and `fs` also require their corresponding permissions. `os` needs no flag but discloses bounded host OS metadata. `console` always exists. See [Host globals](/api/globals/) for signatures.
+The globals `os`, `env`, and `fs` are present only if the allowlist admits their matching modules. `env` and `fs` also require their corresponding permissions. `os` needs no flag but discloses bounded host OS metadata. `console` always exists. See [Public host globals](/api/globals/) for signatures.
 
 Other built-in modules require no permission flag. The allowlist still applies to every module. TypeScript does not check runtime permissions or allowlists.

@@ -11,7 +11,7 @@ A declaration does not grant access. See [Host permissions and module access](/r
 
 ## Globals
 
-[Host globals](/api/globals/), including `console`, which is not in the current declaration file.
+[Public host globals](/api/globals/), including `console`, which is not in the current declaration file.
 
 ## Modules
 
