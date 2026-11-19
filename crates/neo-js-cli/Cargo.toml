@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 neojs-core = { path = "../neo-js" }
+neojs-os = { path = "../neojs-os" }
 neojs-sqlite = { path = "../neojs-sqlite" }
 
 [dev-dependencies]

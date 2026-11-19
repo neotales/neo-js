@@ -186,10 +186,18 @@ registers the exact name `neo:sqlite` with `ExtensionPermission::Sqlite`,
 keeps `rusqlite` with its `bundled`, `hooks`, and `limits` features, and
 creates its native state in the init hook. Core no longer contains the built-in
 SQLite variant or loader and no longer depends on `rusqlite` or
-`libsqlite3-sys`, so registering this name now succeeds. Every other built-in
-name remains reserved while the built-in exists, and registration still reports
-a core collision for it. Core still owns the permission and allowlist gates,
+`libsqlite3-sys`, so registering this name now succeeds. Built-in names remain
+reserved while the built-in exists, and registration still reports a core
+collision for it. Core still owns the permission and allowlist gates,
 resolution, the module cache, and teardown.
+
+`neo:os` has moved to the optional `neojs-os` crate. That crate registers the
+exact name `neo:os` with `ExtensionPermission::None`, installs the writable `os`
+global in its init hook, and owns the bounded metadata probes. Core no longer
+contains the built-in OS variant, loader, or global installation, so a core-only
+runtime has no `neo:os` import and no `os` global. The CLI links `neojs-os`, so
+its module and global are unchanged. Neither module needs a permission flag;
+an explicit allowlist still decides whether it exists.
 
 `--third-party-notices` prints the third-party copyright and permission notices
 embedded in neo-js and exits. It reads no script and needs no permission flag.
@@ -200,8 +208,9 @@ constructing a runtime by calling `neojs_core::third_party_notices()`. The notic
 file is part of the crate source and is included in the Cargo package.
 
 The `os` global and `neo:os` need no permission flag, but they disclose basic
-host operating-system metadata and are present only when the `neo:os` module is
-admitted by the runtime allowlist. `platform` and `arch` are Rust's compilation
+host operating-system metadata and are present only when the optional
+`neojs-os` crate is linked and the `neo:os` module is admitted by the runtime
+allowlist. `platform` and `arch` are Rust's compilation
 target constants, not a separate host-detection result. On Linux, `version` is
 the distribution's `VERSION_ID` (not the kernel version), while `codename` is
 `VERSION_CODENAME` with `UBUNTU_CODENAME` as a fallback and `variant` is
@@ -236,7 +245,8 @@ use `env.get(name)`, `env.has(name)`, and the `fs` API described under
 non-Unicode value; `env.has` tests presence. The declarations in
 `types/neo-js.d.ts` describe these globals.
 
-The CLI evaluates its entry file as an ECMAScript module. `neo:os` exports
+The CLI evaluates its entry file as an ECMAScript module. The CLI links
+`neojs-os`, so `neo:os` exports
 `platform`, `arch`, `version`, `codename`, and `variant`. Its three optional
 metadata exports use the same meanings and availability rules as the global;
 named exports use the runtime snapshot, independent of global object mutation.
@@ -1644,6 +1654,68 @@ system after resolving the real path and checking the opened object, under
 the process's existing permissions. `neo:fs` and `neo:exec` do not consult
 this module.
 
+## Operating-system metadata
+
+`neo:os` and the `os` global are supplied by the optional `neojs-os` package,
+not by `neojs-core`. The CLI includes that package, so its module and global are
+unchanged. A custom embedder must add and register it explicitly. The
+TypeScript declarations follow the same split: the crate owns
+`crates/neojs-os/types/neo-os.d.ts`, including the `os` global, and the CLI
+entry `types/neo-js.d.ts` composes it with `types/neo-js.core.d.ts`. A build
+that links only the core crate uses the core file, where both are absent.
+
+`neo:os` needs no permission flag. The runtime allowlist is still independent:
+without registration the import fails, and an explicit allowlist that omits the
+exact name `neo:os` denies it and withholds the `os` global. The reverse is also
+true: registration alone does not admit the module when the allowlist omits it.
+
+```toml
+[dependencies]
+neojs-core = { path = "../neo-js/crates/neo-js" }
+neojs-os = { path = "../neo-js/crates/neojs-os" }
+```
+
+```rust
+use neojs_core::{NeoJs, Permissions, RuntimeOptions};
+use neojs_os::{MODULE_NAME, with_os};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let options = with_os(RuntimeOptions::new())?.module_names([MODULE_NAME])?;
+    let runtime = NeoJs::new_with_options(Permissions::default(), options)?;
+    runtime.run_module(
+        "main.js",
+        "import {platform} from 'neo:os'; if (platform !== os.platform) throw Error('os');",
+    )?;
+    Ok(())
+}
+```
+
+`RuntimeModule::Os` is gone. An explicit allowlist used to name that variant;
+now it must name the registered extension module exactly:
+
+```rust
+use neojs_core::RuntimeOptions;
+use neojs_os::{MODULE_NAME, with_os};
+
+fn os_options() -> Result<RuntimeOptions, Box<dyn std::error::Error>> {
+    // Before, with the removed built-in variant:
+    // RuntimeOptions::new().modules([RuntimeModule::Os])
+    Ok(with_os(RuntimeOptions::new())?.module_names([MODULE_NAME])?)
+}
+```
+
+`ModuleAllowlist::all()` contains built-in modules only, so it does not include
+the external OS module. Use `ModuleAllowlist::all_with_extensions` with the
+`ExtensionRegistry` from the options that registered the extension, or add
+`neojs_os::MODULE_NAME` to an existing allowlist. `RuntimeOptions::default()`
+remains unrestricted and admits a registered extension. `os_extension()`
+returns the descriptor for hosts that assemble extension registries themselves.
+
+Registration takes one private metadata snapshot and installs the writable `os`
+global before user code runs. The named exports never reread the global. The
+`neo:os/schedulers/systemd` and `neo:os/schedulers/windows` modules remain built
+into core and are unaffected.
+
 ## SQLite
 
 `neo:sqlite` is synchronous and is supplied by the optional `neojs-sqlite`
@@ -2419,11 +2491,14 @@ TypeScript language server. Its `tsconfig.json` loads the checked-in
 
 `types/neo-js.d.ts` is the deterministic, checked-in CLI composition of the
 core declarations in `types/neo-js.core.d.ts` and the declarations owned by
-each optional crate the CLI links. The CLI links `neojs-sqlite`, so the composed
-entry declares `neo:sqlite`. A host built without that crate should use
-`types/neo-js.core.d.ts`, where the import is a type error. Declarations record
-compiled availability, not permissions: a type-checked import still needs
-`Permissions::sqlite` and allowlist admission at run time. See
+each optional crate the CLI links. The CLI links `neojs-os` and
+`neojs-sqlite`, so the composed entry declares `neo:os`, the `os` global, and
+`neo:sqlite`. A host built without those crates should use
+`types/neo-js.core.d.ts`, where the imports are type errors and `os` is
+undeclared. Declarations record compiled availability, not permissions or
+allowlists: a type-checked `neo:sqlite` import still needs `Permissions::sqlite`
+and allowlist admission at run time, and `neo:os` still needs the runtime
+allowlist to admit it. See
 [`types/README.md`](types/README.md) for selection, the offline regeneration
 command, declaration checks, and the composer's file-identity and
 manifest-check rules.
@@ -2654,6 +2729,17 @@ add `neojs_sqlite::MODULE_NAME` explicitly. The JavaScript `neo:sqlite` API,
 `--allow-sqlite`, default-deny behavior, trusted-SQL requirement, authorizer,
 and limits are unchanged.
 
+Removing `RuntimeModule::Os` is source-breaking in the same way. `neo:os` and
+the `os` global are now supplied by the optional `neojs-os` package; core no
+longer contains the module, loader, or global installation. Replace
+`RuntimeModule::Os` in an allowlist with the exact registered name `neo:os`
+after registering `neojs_os::os_extension()` (or `neojs_os::with_os`).
+`ModuleAllowlist::all()` no longer admits `neo:os`; use
+`ModuleAllowlist::all_with_extensions` or add `neojs_os::MODULE_NAME`
+explicitly. No permission flag is involved, and the CLI behavior, exports,
+platform-specific rules, and writable-global/private-snapshot split are
+unchanged because the CLI registers the crate.
+
 Adding `neo:exec.spawn` is
 additive: the module exports one more function, existing `exec` calls and
 permissions are unchanged, and the host installs two additional host
@@ -2678,9 +2764,10 @@ JavaScript API and the `neo-js` executable name do not change.
 | package `neo-js`, import root `neo_js` | package `neojs-core`, import root `neojs_core` |
 | package `neo-js-cli` | package `neojs` |
 
-`neojs-sqlite` is a new optional package, not a rename. Its import root is
-`neojs_sqlite`. Add it only when the program registers `neo:sqlite`; the core
-package does not compile or link SQLite.
+`neojs-sqlite` and `neojs-os` are new optional packages, not renames. Their
+import roots are `neojs_sqlite` and `neojs_os`. Add `neojs-sqlite` only when the
+program registers `neo:sqlite`; add `neojs-os` only when it registers `neo:os`
+and the `os` global. The core package does not compile or link either module.
 
 Replace `-p neo-js-cli` with `-p neojs` and `-p neo-js` with `-p neojs-core`
 in workspace commands. Rename the dependency key and every Rust path. For a
@@ -2701,6 +2788,14 @@ For SQLite, keep the core dependency and add the optional package:
 [dependencies]
 neojs-core = { path = "../neo-js/crates/neo-js" }
 neojs-sqlite = { path = "../neo-js/crates/neojs-sqlite" }
+```
+
+For operating-system metadata, keep the core dependency and add:
+
+```toml
+[dependencies]
+neojs-core = { path = "../neo-js/crates/neo-js" }
+neojs-os = { path = "../neo-js/crates/neojs-os" }
 ```
 
 Workspace package selection uses the new names. The CLI package still defines

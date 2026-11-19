@@ -182,7 +182,7 @@ fn builtin_names_cannot_be_used_as_entry_identities() {
     }
     js.run_module(
         "valid.js",
-        "import {platform} from 'neo:os'; if (!platform) throw Error('missing builtin');",
+        "import {valid} from 'neo:semver'; if (!valid('1.2.3')) throw Error('missing builtin');",
     )
     .unwrap();
 }

@@ -26,7 +26,7 @@ Core declarations are always included; optional fragments are selected with
 
 Options:
   --with <NAME>          Include an optional fragment (repeatable).
-                         Available: sqlite.
+                         Available: os, sqlite.
   --output <PATH>        Write the composition to PATH. Use - for stdout.
   --check <PATH>         Fail if PATH differs from the composition.
   --check-cli-manifest   Verify the selection against crates/neo-js-cli/Cargo.toml.
@@ -53,11 +53,18 @@ const CORE: Fragment = Fragment {
     dependency: "neojs-core",
 };
 
-const OPTIONAL: &[Fragment] = &[Fragment {
-    name: "sqlite",
-    path: "crates/neojs-sqlite/types/neo-sqlite.d.ts",
-    dependency: "neojs-sqlite",
-}];
+const OPTIONAL: &[Fragment] = &[
+    Fragment {
+        name: "os",
+        path: "crates/neojs-os/types/neo-os.d.ts",
+        dependency: "neojs-os",
+    },
+    Fragment {
+        name: "sqlite",
+        path: "crates/neojs-sqlite/types/neo-sqlite.d.ts",
+        dependency: "neojs-sqlite",
+    },
+];
 
 enum Output {
     Stdout,

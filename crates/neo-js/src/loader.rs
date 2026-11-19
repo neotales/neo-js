@@ -62,7 +62,6 @@ const LEGACY_SCHEDULER_MODULE: &str = scheduler_module!(
 pub(crate) struct ModuleLoader {
     pub permissions: Permissions,
     pub formats: Rc<RefCell<ModuleFormats>>,
-    pub os_metadata: crate::os::Metadata,
     /// Optional fail-closed module allowlist. `None` bits are unrestricted.
     pub allowed: AllowedModules,
     /// Registered extension descriptors, used only for exact name lookup.
@@ -215,7 +214,6 @@ impl ModuleLoader {
             | RuntimeModule::Crypto
             | RuntimeModule::Dotenv
             | RuntimeModule::Hash
-            | RuntimeModule::Os
             | RuntimeModule::Path
             | RuntimeModule::Scheduler
             | RuntimeModule::SchedulerSystemd
@@ -413,13 +411,6 @@ impl Loader for ModuleLoader {
         }
         if name == "neo:assert" {
             return Module::declare_def::<AssertModule, _>(ctx.clone(), name);
-        }
-        if name == "neo:os" {
-            return Module::declare(
-                ctx.clone(),
-                name,
-                crate::os::module_source(&self.os_metadata),
-            );
         }
         if let Some(source) = self.builtin(name) {
             return Module::declare(ctx.clone(), name, source);

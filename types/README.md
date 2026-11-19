@@ -6,26 +6,29 @@ optional crate uses a composition of the core file and that crate's fragment.
 
 | File | Role |
 | --- | --- |
-| `neo-js.core.d.ts` | Hand-written declarations for `neojs-core`. It omits every optional module, including `neo:sqlite`. |
-| `neo-js.d.ts` | Generated entry for the CLI build. It is core plus the optional modules the CLI links, currently `neo:sqlite`. Do not edit it by hand. |
+| `neo-js.core.d.ts` | Hand-written declarations for `neojs-core`. It omits every optional module, including `neo:os` and `neo:sqlite`, and the `os` global. |
+| `neo-js.d.ts` | Generated entry for the CLI build. It is core plus the optional modules the CLI links, currently `neo:os` and `neo:sqlite`. Do not edit it by hand. |
+| `crates/neojs-os/types/neo-os.d.ts` | Hand-written `neo:os` fragment, including the `os` global, owned by the `neojs-os` crate. |
 | `crates/neojs-sqlite/types/neo-sqlite.d.ts` | Hand-written `neo:sqlite` fragment owned by the `neojs-sqlite` crate. |
 
 The declarations describe **compiled availability**, not permission. Declaring
-`neo:sqlite` means the host links `neojs-sqlite` and can register the module; it
-does not grant `Permissions::sqlite`, and a runtime allowlist can still deny the
-import. The reverse is also true: a script can type-check against the core file,
-where the module is absent, even on a CLI that would admit it at run time with
-`--allow-sqlite`. The checker models the build, while the runtime enforces
-permissions.
+`neo:os` means the host links `neojs-os` and can register the module; it grants
+no permission because none is needed, and a runtime allowlist can still deny
+the import. Declaring `neo:sqlite` means the host links `neojs-sqlite` and can
+register the module; it does not grant `Permissions::sqlite`, and a runtime
+allowlist can still deny the import. The reverse is also true: a script can
+type-check against the core file, where both modules are absent, even on a CLI
+that would admit them at run time. The checker models the build, while the
+runtime enforces permissions and allowlists.
 
 ## Select
 
 - Core-only embedder, or a script checked against the core API only:
   reference `types/neo-js.core.d.ts`.
-- CLI build, which links `neojs-core` and `neojs-sqlite`: reference
-  `types/neo-js.d.ts`. This is the existing public entry and keeps the previous
-  module set. Consumers that relied on `neo:sqlite` through this file need no
-  change.
+- CLI build, which links `neojs-core`, `neojs-os`, and `neojs-sqlite`:
+  reference `types/neo-js.d.ts`. This is the existing public entry and keeps the
+  previous module set. Consumers that relied on `neo:os` or `neo:sqlite`
+  through this file need no change.
 
 `examples/typed-script/tsconfig.json` lists the composed entry, so the example
 and its editor completion continue to describe the CLI.
@@ -43,15 +46,15 @@ cargo run --offline -p neojs --example compose-types
 
 # CLI selection, printed to stdout.
 cargo run --offline -p neojs --example compose-types -- \
-  --with sqlite --check-cli-manifest
+  --with os --with sqlite --check-cli-manifest
 
 # Regenerate the checked-in CLI entry.
 cargo run --offline -p neojs --example compose-types -- \
-  --with sqlite --check-cli-manifest --output types/neo-js.d.ts
+  --with os --with sqlite --check-cli-manifest --output types/neo-js.d.ts
 
 # Verify it without writing.
 cargo run --offline -p neojs --example compose-types -- \
-  --with sqlite --check-cli-manifest --check types/neo-js.d.ts
+  --with os --with sqlite --check-cli-manifest --check types/neo-js.d.ts
 ```
 
 `--with` is repeatable. Unknown or duplicate selections are errors. `--output -`
@@ -115,10 +118,12 @@ tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler
   types/neo-js.d.ts types/sqlite.test.ts
 tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler \
   --skipLibCheck false types/neo-js.core.d.ts types/sqlite-absent.test.ts
+tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler \
+  --skipLibCheck false types/neo-js.core.d.ts types/os-absent.test.ts
 ```
 
-The last command must fail with exactly one
-`TS2307: Cannot find module 'neo:sqlite' or its corresponding type declarations.`
+The last two commands must each fail with exactly one `TS2307` for `neo:sqlite`
+and `neo:os` respectively.
 `examples/typed-script/smoke.sh` rejects any other diagnostic and reports when
 `tsc` is unavailable.
 
@@ -137,10 +142,11 @@ deno check --cached-only --no-config types/neo-js.d.ts types/path.test.ts \
 ```
 
 Deno resolves an unknown `scheme:` specifier as external and types it as `any`,
-so it cannot show that core-only declarations reject `neo:sqlite`. That absence
-check is `tsc`-only. Deno does prove the positive fixture is not accepted as
-`any`, through the same mutation the smoke test runs: the fixture fails without
-its fragment because its negative assertions become unused directives.
+so it cannot show that core-only declarations reject `neo:os` or `neo:sqlite`.
+Those absence checks are `tsc`-only. Deno does prove the positive fixture is not
+accepted as `any`, through the same mutation the smoke test runs: the fixture
+fails without its fragment because its negative assertions become unused
+directives.
 
 ## Add another optional module
 

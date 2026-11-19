@@ -115,10 +115,13 @@ fn execute(requested_script: &Path, args: &Args) -> Result<(), Vec<String>> {
         network: args.allow_net,
         sqlite: args.allow_sqlite,
     };
-    // Compose the optional SQLite crate explicitly. Core does not link SQLite;
-    // this registration only makes the exact `neo:sqlite` name available, and
-    // the permission above still gates every import.
-    let options = neojs_sqlite::with_sqlite(RuntimeOptions::new())
+    // Compose the optional crates explicitly. Core links neither one: this
+    // registration only makes the exact `neo:os` and `neo:sqlite` names
+    // available, and the permission above still gates every SQLite import.
+    // `neo:os` needs no permission flag and installs the `os` global exactly
+    // when the runtime admits the module.
+    let options = neojs_os::with_os(RuntimeOptions::new())
+        .and_then(neojs_sqlite::with_sqlite)
         .map_err(|error| vec![error.to_string()])?;
     let js =
         NeoJs::new_with_options(permissions, options).map_err(|error| vec![error.to_string()])?;

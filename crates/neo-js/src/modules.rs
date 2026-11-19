@@ -52,9 +52,6 @@ pub enum RuntimeModule {
     /// `neo:hash` — digests. `digestFile` additionally requires
     /// [`crate::Permissions::filesystem`].
     Hash,
-    /// `neo:os` — target platform, architecture, and optional OS-release
-    /// metadata. It needs no permission flag, but discloses host OS metadata.
-    Os,
     /// `neo:path` — lexical path helpers and a global file-only `URL` class.
     /// Reading the runtime working directory also requires admitted
     /// filesystem or process/stdio authority.
@@ -95,7 +92,7 @@ impl RuntimeModule {
     /// The array grows when host modules are added. Iterate with
     /// `RuntimeModule::ALL.into_iter()` rather than naming its length in a
     /// type. To build an allowlist of all modules, use [`ModuleAllowlist::all`].
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 22] = [
         Self::Age,
         Self::Ansi,
         Self::Assert,
@@ -107,7 +104,6 @@ impl RuntimeModule {
         Self::Fetch,
         Self::Fs,
         Self::Hash,
-        Self::Os,
         Self::Path,
         Self::Process,
         Self::Scheduler,
@@ -135,7 +131,6 @@ impl RuntimeModule {
             Self::Fetch => "neo:fetch",
             Self::Fs => "neo:fs",
             Self::Hash => "neo:hash",
-            Self::Os => "neo:os",
             Self::Path => "neo:path",
             Self::Process => "neo:process",
             Self::Scheduler => "neo:scheduler",
@@ -167,7 +162,6 @@ impl RuntimeModule {
             "neo:fetch" => Self::Fetch,
             "neo:fs" => Self::Fs,
             "neo:hash" => Self::Hash,
-            "neo:os" => Self::Os,
             "neo:path" => Self::Path,
             "neo:process" => Self::Process,
             "neo:scheduler" => Self::Scheduler,
@@ -439,10 +433,11 @@ impl ModuleAllowlist {
 /// the other permission flags or module selections.
 ///
 /// Withdrawing a module also withdraws the global or native callback that only
-/// it uses: `neo:os` owns `os`, `neo:env` owns `env`, `neo:fs` owns `fs`,
-/// `neo:hash` owns `__neoHash` (and `__neoHashFile` with filesystem
-/// permission), and `neo:exec` owns the `__neoExec*` callbacks. `neo:hash`'s
-/// `digestFile` remains part of `neo:hash`; it additionally needs
+/// it uses: the optional `neo:os` extension installs `os`, `neo:env` owns
+/// `env`, `neo:fs` owns `fs`, `neo:hash` owns `__neoHash` (and
+/// `__neoHashFile` with filesystem permission), and `neo:exec` owns the
+/// `__neoExec*` callbacks. `neo:hash`'s `digestFile` remains part of
+/// `neo:hash`; it additionally needs
 /// [`crate::Permissions::filesystem`] but not the `neo:fs` module.
 ///
 /// This is not a sandbox. It does not limit CPU or memory, and `console`

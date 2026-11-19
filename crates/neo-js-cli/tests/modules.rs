@@ -31,7 +31,7 @@ fn cli_sqlite_requires_its_own_explicit_permission() {
 }
 
 #[test]
-fn cli_exposes_os_metadata_through_the_builtin_module() {
+fn cli_exposes_os_metadata_through_the_linked_optional_module() {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("os.js");
     std::fs::write(
