@@ -181,13 +181,15 @@ runtime's. See
 [`neojs_core::extension`](https://docs.rs/neojs-core/latest/neojs_core/extension/index.html)
 for the native `ModuleDef` example and the full hook contract.
 
-A built-in name stays reserved while the built-in exists. Moving `neo:sqlite`
-to an external crate therefore requires removing the built-in SQLite variant and
-loader first; until then registration reports a core collision. The external
-crate would register exact name `neo:sqlite` with
-`ExtensionPermission::Sqlite`, keep `rusqlite` with its `bundled`, `hooks`, and
-`limits` features, and create its native state in the init hook. This boundary
-does not claim SQLite is already removable.
+`neo:sqlite` has moved to the optional `neojs-sqlite` crate. That crate
+registers the exact name `neo:sqlite` with `ExtensionPermission::Sqlite`,
+keeps `rusqlite` with its `bundled`, `hooks`, and `limits` features, and
+creates its native state in the init hook. Core no longer contains the built-in
+SQLite variant or loader and no longer depends on `rusqlite` or
+`libsqlite3-sys`, so registering this name now succeeds. Every other built-in
+name remains reserved while the built-in exists, and registration still reports
+a core collision for it. Core still owns the permission and allowlist gates,
+resolution, the module cache, and teardown.
 
 `--third-party-notices` prints the third-party copyright and permission notices
 embedded in neo-js and exits. It reads no script and needs no permission flag.
@@ -1644,11 +1646,69 @@ this module.
 
 ## SQLite
 
-`neo:sqlite` is synchronous. The CLI requires `--allow-sqlite`; a Rust
-embedder must grant `Permissions::sqlite` and include `RuntimeModule::Sqlite`
-if it sets an explicit module allowlist. This opts into the host's in-process
-SQLite engine, **not a sandbox**. Run only SQL you trust. It adds no API for
-files, the network, shells, other processes, or extension loading.
+`neo:sqlite` is synchronous and is supplied by the optional `neojs-sqlite`
+package, not by `neojs-core`. The CLI includes that package, so
+`--allow-sqlite` still enables the same module; the Rust package for a custom
+embedder must add it explicitly. Registration and permission are independent:
+the module is importable only when the extension is registered, the runtime
+allowlist admits the exact name `neo:sqlite`, and `Permissions::sqlite` is
+granted. Without the permission the import is denied before the module loads;
+an allowlist that omits the name denies it even when the permission is granted.
+
+```toml
+[dependencies]
+neojs-core = { path = "../neo-js/crates/neo-js" }
+neojs-sqlite = { path = "../neo-js/crates/neojs-sqlite" }
+```
+
+```rust
+use neojs_core::{NeoJs, Permissions, RuntimeOptions};
+use neojs_sqlite::{MODULE_NAME, with_sqlite};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let options = with_sqlite(RuntimeOptions::new())?.module_names([MODULE_NAME])?;
+    let runtime = NeoJs::new_with_options(
+        Permissions {
+            sqlite: true,
+            ..Permissions::default()
+        },
+        options,
+    )?;
+    runtime.run_module(
+        "main.js",
+        "import {openMemory} from 'neo:sqlite'; openMemory().close();",
+    )?;
+    Ok(())
+}
+```
+
+`RuntimeModule::Sqlite` is gone. An explicit allowlist used to name that variant;
+now it must name the registered extension module exactly:
+
+```rust
+use neojs_core::RuntimeOptions;
+use neojs_sqlite::{MODULE_NAME, with_sqlite};
+
+fn sqlite_options() -> Result<RuntimeOptions, Box<dyn std::error::Error>> {
+    // Before, with the removed built-in variant:
+    // RuntimeOptions::new().modules([RuntimeModule::Sqlite])
+    Ok(with_sqlite(RuntimeOptions::new())?.module_names([MODULE_NAME])?)
+}
+```
+
+`ModuleAllowlist::all()` contains built-in modules only, so it does not include
+the external SQLite module. Use `ModuleAllowlist::all_with_extensions` with the
+`ExtensionRegistry` from the options that registered the extension, or add
+`neojs_sqlite::MODULE_NAME` to an existing allowlist.
+`RuntimeOptions::default()` remains unrestricted and admits a registered
+extension when its permission is granted. `sqlite_extension()` returns the
+descriptor for hosts that assemble extension registries themselves.
+
+Registering and granting the module opts into the host's in-process SQLite
+engine, **not a sandbox**. Run only SQL you trust. It adds no API for
+files, the network, shells, other processes, or extension loading. The
+JavaScript API, default-deny behavior, `--allow-sqlite` flag, trusted-SQL
+requirement, authorizer, and limits below are unchanged.
 
 ```js
 import { openMemory } from "neo:sqlite";
@@ -2566,6 +2626,17 @@ literal. Adding `registry` is the same kind of change, and so is adding
 fields you need and adding `..Permissions::default()`, or by naming every field
 explicitly, including `process`, `stdio`, `registry`, `network`, and `sqlite`.
 CLI users opt in with `--allow-net`, `--allow-stdio`, and `--allow-sqlite`.
+Removing `RuntimeModule::Sqlite` is source-breaking. `neo:sqlite` is now an
+optional module supplied by the `neojs-sqlite` package and registered through
+the extension API; core no longer links SQLite. Replace `RuntimeModule::Sqlite`
+in an allowlist with the exact registered name `neo:sqlite` after registering
+`neojs_sqlite::sqlite_extension()` (or `neojs_sqlite::with_sqlite`), and grant
+`Permissions::sqlite`. `ModuleAllowlist::all()` contains built-in modules only,
+so it no longer admits SQLite; use `ModuleAllowlist::all_with_extensions` or
+add `neojs_sqlite::MODULE_NAME` explicitly. The JavaScript `neo:sqlite` API,
+`--allow-sqlite`, default-deny behavior, trusted-SQL requirement, authorizer,
+and limits are unchanged.
+
 Adding `neo:exec.spawn` is
 additive: the module exports one more function, existing `exec` calls and
 permissions are unchanged, and the host installs two additional host
@@ -2590,6 +2661,10 @@ JavaScript API and the `neo-js` executable name do not change.
 | package `neo-js`, import root `neo_js` | package `neojs-core`, import root `neojs_core` |
 | package `neo-js-cli` | package `neojs` |
 
+`neojs-sqlite` is a new optional package, not a rename. Its import root is
+`neojs_sqlite`. Add it only when the program registers `neo:sqlite`; the core
+package does not compile or link SQLite.
+
 Replace `-p neo-js-cli` with `-p neojs` and `-p neo-js` with `-p neojs-core`
 in workspace commands. Rename the dependency key and every Rust path. For a
 checkout next to your crate:
@@ -2601,6 +2676,14 @@ neojs-core = { path = "../neo-js/crates/neo-js" }
 
 ```rust
 use neojs_core::{NeoJs, Permissions};
+```
+
+For SQLite, keep the core dependency and add the optional package:
+
+```toml
+[dependencies]
+neojs-core = { path = "../neo-js/crates/neo-js" }
+neojs-sqlite = { path = "../neo-js/crates/neojs-sqlite" }
 ```
 
 Workspace package selection uses the new names. The CLI package still defines

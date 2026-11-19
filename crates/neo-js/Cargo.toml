@@ -34,9 +34,6 @@ blake2 = "0.10"
 blake3 = "1"
 hex = "0.4"
 serde_json = "1"
-# Bundled SQLite with authorizer, progress and runtime limits. Do not enable
-# rusqlite's extension loading or virtual-table interfaces.
-rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled", "hooks", "limits"] }
 # `neo:toml` delegates TOML syntax to the maintained `toml` parser. Only its
 # parse feature is enabled, which uses toml_edit 0.22. Exact because 0.8.23 is
 # the version resolved and checked offline with this workspace's Rust 1.87

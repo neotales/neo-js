@@ -1,7 +1,95 @@
-//! Synchronous, private in-memory SQLite. Native handles never retain a JS
-//! value, and SQLite callbacks never call into JavaScript.
+//! Optional synchronous, private in-memory SQLite for `neojs-core`.
+//!
+//! This crate supplies the exact `neo:sqlite` module and registers it through
+//! [`neojs_core::extension`]. `neojs-core` itself does not depend on SQLite, does
+//! not compile `rusqlite` or `libsqlite3-sys`, and contains no built-in
+//! `neo:sqlite` implementation. Native handles never retain a JS value, and
+//! SQLite callbacks never call into JavaScript.
+//!
+//! # Registration
+//!
+//! Register [`sqlite_extension`] on the runtime options, grant
+//! [`neojs_core::Permissions::sqlite`], and name the exact module in any
+//! explicit allowlist:
+//!
+//! ```rust
+//! use neojs_core::{NeoJs, Permissions, RuntimeOptions};
+//! use neojs_sqlite::{MODULE_NAME, with_sqlite};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let options = with_sqlite(RuntimeOptions::new())?.module_names([MODULE_NAME])?;
+//! let runtime = NeoJs::new_with_options(
+//!     Permissions {
+//!         sqlite: true,
+//!         ..Permissions::default()
+//!     },
+//!     options,
+//! )?;
+//! runtime.run_module(
+//!     "main.js",
+//!     "import {openMemory} from 'neo:sqlite'; openMemory().close();",
+//! )?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Registration alone grants nothing: without `Permissions::sqlite` the
+//! resolver denies the import before the module is loaded. An explicit
+//! allowlist is also independent, and must name `neo:sqlite` exactly. Use
+//! [`neojs_core::ModuleAllowlist::from_names_with`] or
+//! [`RuntimeOptions::module_names`] after registering this extension, or
+//! [`neojs_core::ModuleAllowlist::all_with_extensions`] to admit every
+//! registered name.
+//!
+//! # Migration from the built-in module
+//!
+//! `neo:sqlite` was previously a [`neojs_core::RuntimeModule`] variant compiled
+//! into `neojs-core` with `rusqlite`. That variant no longer exists, so code
+//! that named `RuntimeModule::Sqlite` does not compile. Migrate as follows:
+//!
+//! ```rust,compile_fail
+//! # use neojs_core::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
+//! # fn before() -> Result<NeoJs, Box<dyn std::error::Error>> {
+//! // Before: this no longer compiles, because RuntimeModule::Sqlite is gone.
+//! let js = NeoJs::new_with_options(
+//!     Permissions {
+//!         sqlite: true,
+//!         ..Permissions::default()
+//!     },
+//!     RuntimeOptions::new().modules([RuntimeModule::Sqlite]),
+//! )?;
+//! # Ok(js)
+//! # }
+//! ```
+//!
+//! Replace the built-in selection with an exact extension name:
+//!
+//! ```rust
+//! # use neojs_core::{NeoJs, Permissions, RuntimeOptions};
+//! # use neojs_sqlite::{MODULE_NAME, with_sqlite};
+//! # fn after() -> Result<NeoJs, Box<dyn std::error::Error>> {
+//! let options = with_sqlite(RuntimeOptions::new())?.module_names([MODULE_NAME])?;
+//! let js = NeoJs::new_with_options(
+//!     Permissions {
+//!         sqlite: true,
+//!         ..Permissions::default()
+//!     },
+//!     options,
+//! )?;
+//! # Ok(js)
+//! # }
+//! ```
+//!
+//! A dependency on the `neojs` CLI is unchanged: it registers this extension
+//! itself and keeps `--allow-sqlite` as the explicit opt-in. Embedders that
+//! used `ModuleAllowlist::all()` must add the registered name explicitly, for
+//! example with [`neojs_core::ModuleAllowlist::all_with_extensions`], because
+//! a fixed built-in allowlist cannot acquire an extension module on its own.
+//! [`neojs_core::RuntimeOptions::default`] remains unrestricted and admits a
+//! registered extension when its permission is granted.
 
 use std::{
+    any::Any,
     cell::{Cell, RefCell},
     mem::MaybeUninit,
     rc::Rc,
@@ -12,14 +100,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rquickjs::{
-    Array, BigInt, Class, Ctx, Error, Function, IntoJs, JsLifetime, Object, Persistent,
+use neojs_core::rquickjs::{
+    Array, BigInt, Class, Ctx, Error, Function, IntoJs, JsLifetime, Module, Object, Persistent,
     Result as JsResult, TypedArray, Value,
     class::{JsClass, Trace, Tracer, Writable},
     function::{Constructor, Opt, This},
-    module::{Declarations, Exports, ModuleDef},
+    module::{Declarations, Declared, Exports, ModuleDef},
     object::Property,
     qjs,
+};
+use neojs_core::{
+    ExtensionDescriptor, ExtensionPermission, ExtensionRegistrationError, RuntimeOptions,
 };
 use rusqlite::{
     Connection, OpenFlags, PrepFlags, Statement,
@@ -42,6 +133,40 @@ const PROGRESS_CALLS: usize = 2_000;
 const PROGRESS_TIME: Duration = Duration::from_millis(250);
 const PREP_FLAGS: PrepFlags =
     PrepFlags::SQLITE_PREPARE_NO_VTAB.union(PrepFlags::SQLITE_PREPARE_DONT_LOG);
+/// The exact `neo:` module name supplied by this crate.
+///
+/// Use this constant when constructing an explicit
+/// [`neojs_core::ModuleAllowlist`] or calling
+/// [`RuntimeOptions::module_names`], so the name is not retyped.
+pub const MODULE_NAME: &str = "neo:sqlite";
+
+/// Build the static extension descriptor that supplies `neo:sqlite`.
+///
+/// The descriptor gates the module on [`neojs_core::Permissions::sqlite`],
+/// installs its native state during runtime construction, and releases that
+/// state during runtime teardown. Register it with
+/// [`RuntimeOptions::with_extension`], [`RuntimeOptions::with_extensions`], or
+/// [`with_sqlite`].
+///
+/// Registering the same extension twice is rejected by core like any duplicate
+/// extension or module name.
+pub fn sqlite_extension() -> ExtensionDescriptor {
+    ExtensionDescriptor::new("neojs-sqlite", load)
+        .with_module(MODULE_NAME, ExtensionPermission::Sqlite)
+        .with_init(init)
+        .with_teardown(teardown)
+}
+
+/// Register `neo:sqlite` on `options` and return the updated options.
+///
+/// This is [`RuntimeOptions::with_extension`] with [`sqlite_extension`]. It
+/// does not grant [`neojs_core::Permissions::sqlite`] and does not change an
+/// explicit allowlist; call [`RuntimeOptions::module_names`] with
+/// [`MODULE_NAME`] when the options carry one. A duplicate registration is an
+/// error and produces no options value.
+pub fn with_sqlite(options: RuntimeOptions) -> Result<RuntimeOptions, ExtensionRegistrationError> {
+    options.with_extension(sqlite_extension())
+}
 
 #[derive(Clone, Copy)]
 enum Failure {
@@ -121,20 +246,21 @@ impl From<rusqlite::Error> for Failure {
 }
 
 #[derive(Default)]
-pub(crate) struct SqliteState {
+struct SqliteState {
     blob_validator: Option<Persistent<Function<'static>>>,
     error_class: Option<qjs::JSClassID>,
     live: Rc<Cell<usize>>,
 }
 
-// The persistent validator is explicitly released in NeoJs::drop.
+// The persistent validator is released by the extension teardown hook before
+// the context and runtime are dropped.
 unsafe impl<'js> JsLifetime<'js> for SqliteState {
     type Changed<'to> = Self;
 }
 
 impl SqliteState {
     /// Capture only pristine intrinsics, before evaluating any user code.
-    pub(crate) fn install(ctx: &Ctx<'_>, state: &Rc<RefCell<Self>>) -> JsResult<()> {
+    fn install(ctx: &Ctx<'_>, state: &Rc<RefCell<Self>>) -> JsResult<()> {
         let factory: Function = ctx.eval(
             r#"(isArrayBuffer => {
                 const descriptor = Object.getOwnPropertyDescriptor;
@@ -163,7 +289,7 @@ impl SqliteState {
     }
 
     /// Release persistent values before the context and runtime are dropped.
-    pub(crate) fn clear(&mut self) {
+    fn clear(&mut self) {
         self.blob_validator = None;
     }
 }
@@ -177,6 +303,89 @@ fn sqlite_state(ctx: &Ctx<'_>) -> JsResult<Rc<RefCell<SqliteState>>> {
 fn is_array_buffer(value: Value<'_>) -> bool {
     // SAFETY: this operation only tests the engine's native backing-store brand.
     unsafe { qjs::JS_IsArrayBuffer(value.as_raw()) }
+}
+
+/// Per-runtime native state owned by the extension runtime.
+struct SqliteExtensionState {
+    /// The same value stored in context userdata, retained for teardown.
+    state: Rc<RefCell<SqliteState>>,
+}
+
+/// Create and install the interpreter state before any user code runs.
+fn init(ctx: &Ctx<'_>, _allowed: &[&str]) -> JsResult<Box<dyn Any>> {
+    let state = Rc::new(RefCell::new(SqliteState::default()));
+    SqliteState::install(ctx, &state)?;
+    Ok(Box::new(SqliteExtensionState { state }))
+}
+
+/// Declare the native module after core has checked its permission and
+/// allowlist. The state was installed by [`init`] for this runtime.
+fn load<'js>(ctx: &Ctx<'js>, state: &mut dyn Any, name: &str) -> JsResult<Module<'js, Declared>> {
+    if state.downcast_ref::<SqliteExtensionState>().is_none()
+        || ctx.userdata::<Rc<RefCell<SqliteState>>>().is_none()
+    {
+        return Err(Error::new_loading_message(
+            name,
+            "SQLite extension state is unavailable",
+        ));
+    }
+    Module::declare_def::<SqliteModule, _>(ctx.clone(), name)
+}
+
+/// Release the persistent validator before the context is dropped.
+fn teardown(state: &mut dyn Any) {
+    if let Some(state) = state.downcast_mut::<SqliteExtensionState>() {
+        if let Ok(mut state) = state.state.try_borrow_mut() {
+            state.clear();
+        }
+    }
+}
+
+/// Read a primitive string's UTF-16 length through QuickJS's own special-case
+/// for string length. No JavaScript hook runs.
+fn string_length(ctx: &Ctx<'_>, value: &Value<'_>) -> JsResult<usize> {
+    let raw = unsafe {
+        qjs::JS_GetPropertyStr(ctx.as_raw().as_ptr(), value.as_raw(), c"length".as_ptr())
+    };
+    if unsafe { qjs::JS_IsException(raw) } {
+        unsafe { qjs::JS_FreeValue(ctx.as_raw().as_ptr(), raw) };
+        return Err(Error::Exception);
+    }
+    let tag = unsafe { qjs::JS_VALUE_GET_TAG(raw) };
+    let length = if tag == qjs::JS_TAG_INT {
+        usize::try_from(unsafe { qjs::JS_VALUE_GET_INT(raw) }).map_err(|_| Error::Unknown)?
+    } else {
+        unsafe { qjs::JS_FreeValue(ctx.as_raw().as_ptr(), raw) };
+        return Err(Error::Unknown);
+    };
+    unsafe { qjs::JS_FreeValue(ctx.as_raw().as_ptr(), raw) };
+    Ok(length)
+}
+
+/// Exact UTF-8 byte length of UTF-16 input. A lone surrogate is counted as
+/// three bytes, matching the decoder that rejects it.
+fn utf8_len(units: &[u16]) -> usize {
+    let mut length = 0usize;
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if unit < 0x80 {
+            length += 1;
+        } else if unit < 0x800 {
+            length += 2;
+        } else if (0xD800..=0xDBFF).contains(&unit)
+            && units
+                .get(index + 1)
+                .is_some_and(|low| (0xDC00..=0xDFFF).contains(low))
+        {
+            length += 4;
+            index += 1;
+        } else {
+            length += 3;
+        }
+        index += 1;
+    }
+    length
 }
 
 struct Slot(Rc<Cell<usize>>);
@@ -413,7 +622,7 @@ fn text<'js>(ctx: &Ctx<'js>, value: &Value<'js>, max: usize) -> JsResult<String>
     if !value.is_string() {
         return Err(Failure::Argument.throw(ctx));
     }
-    if crate::js_text::string_length(ctx, value)? > max {
+    if string_length(ctx, value)? > max {
         return Err(Failure::Limit.throw(ctx));
     }
     let raw = ctx.as_raw().as_ptr();
@@ -425,7 +634,7 @@ fn text<'js>(ctx: &Ctx<'js>, value: &Value<'js>, max: usize) -> JsResult<String>
         return Err(Error::Exception);
     }
     let units = unsafe { std::slice::from_raw_parts(ptr, count as usize) };
-    let decoded = if crate::js_text::utf8_len(units) > max {
+    let decoded = if utf8_len(units) > max {
         Err(Failure::Limit)
     } else {
         String::from_utf16(units).map_err(|_| Failure::Encoding)
@@ -759,8 +968,8 @@ fn query<'js>(
     Ok(result)
 }
 
-/// Native module declaration; the loader checks permission and allowlist.
-pub(crate) struct SqliteModule;
+/// Native module declaration; core checks permission and allowlist first.
+struct SqliteModule;
 
 impl ModuleDef for SqliteModule {
     fn declare<'js>(decl: &Declarations<'js>) -> JsResult<()> {

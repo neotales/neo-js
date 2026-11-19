@@ -5,7 +5,7 @@ use std::{
 };
 
 use clap::Parser;
-use neojs_core::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions, RuntimeOptions};
 
 #[derive(Parser)]
 #[command(
@@ -106,7 +106,7 @@ fn execute(requested_script: &Path, args: &Args) -> Result<(), Vec<String>> {
     let script =
         std::fs::canonicalize(requested_script).map_err(|error| vec![error.to_string()])?;
     let source = std::fs::read_to_string(&script).map_err(|error| vec![error.to_string()])?;
-    let js = NeoJs::new(Permissions {
+    let permissions = Permissions {
         filesystem: args.allow_fs,
         environment: args.allow_env,
         stdio: args.allow_stdio,
@@ -114,8 +114,14 @@ fn execute(requested_script: &Path, args: &Args) -> Result<(), Vec<String>> {
         registry: args.allow_registry,
         network: args.allow_net,
         sqlite: args.allow_sqlite,
-    })
-    .map_err(|error| vec![error.to_string()])?;
+    };
+    // Compose the optional SQLite crate explicitly. Core does not link SQLite;
+    // this registration only makes the exact `neo:sqlite` name available, and
+    // the permission above still gates every import.
+    let options = neojs_sqlite::with_sqlite(RuntimeOptions::new())
+        .map_err(|error| vec![error.to_string()])?;
+    let js =
+        NeoJs::new_with_options(permissions, options).map_err(|error| vec![error.to_string()])?;
     let identity = script
         .to_str()
         .ok_or_else(|| vec!["canonical script path is not valid UTF-8".to_owned()])?;

@@ -1423,6 +1423,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "neojs-core",
+ "neojs-sqlite",
  "serde_json",
  "tempfile",
 ]
@@ -1458,7 +1459,6 @@ dependencies = [
  "oxc_transformer",
  "reqwest",
  "rquickjs",
- "rusqlite",
  "rust-embed",
  "rust-embed-impl",
  "rust-embed-utils",
@@ -1475,6 +1475,16 @@ dependencies = [
  "toml_parser",
  "url",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "neojs-sqlite"
+version = "0.1.0"
+dependencies = [
+ "neojs-core",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

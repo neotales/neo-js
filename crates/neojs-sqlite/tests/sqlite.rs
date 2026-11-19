@@ -1,6 +1,7 @@
 //! Public API and authority checks for the synchronous SQLite module.
 
-use neojs_core::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
+use neojs_core::{ModuleAllowlist, NeoJs, Permissions, RuntimeOptions};
+use neojs_sqlite::{MODULE_NAME, with_sqlite};
 
 const SETUP: &str = r#"
 import { openMemory } from 'neo:sqlite';
@@ -20,42 +21,80 @@ fn permitted() -> Permissions {
     }
 }
 
+fn sqlite_options() -> RuntimeOptions {
+    with_sqlite(RuntimeOptions::new()).unwrap()
+}
+
 fn script(body: &str) {
-    NeoJs::new(permitted())
+    NeoJs::new_with_options(permitted(), sqlite_options())
         .unwrap()
         .run_module("sqlite.js", &format!("{SETUP}\n{body}"))
         .unwrap();
 }
 
 #[test]
-fn sqlite_needs_permission_and_allowlist_for_static_and_dynamic_imports() {
-    let js = NeoJs::new(Permissions::default()).unwrap();
+fn sqlite_needs_permission_registration_and_its_exact_allowlist_name() {
+    // Registration alone does not grant the permission.
+    let js = NeoJs::new_with_options(Permissions::default(), sqlite_options()).unwrap();
     assert!(js.run_module("denied.js", "import 'neo:sqlite';").is_err());
-    let js = NeoJs::new_with_options(
-        Permissions::default(),
-        RuntimeOptions::new().modules([RuntimeModule::Sqlite]),
-    )
-    .unwrap();
+
+    // Permission alone does not register the module.
+    let js = NeoJs::new(permitted()).unwrap();
     assert!(
-        js.run_module("allowlisted.js", "import 'neo:sqlite';")
+        js.run_module("unregistered.js", "import 'neo:sqlite';")
             .is_err()
     );
-    let js = NeoJs::new_with_options(permitted(), RuntimeOptions::new().modules([])).unwrap();
+
+    // An explicit allowlist omitting the exact name denies static and dynamic
+    // imports even when both registration and permission are present.
+    let js = NeoJs::new_with_options(
+        permitted(),
+        with_sqlite(RuntimeOptions::new().modules([])).unwrap(),
+    )
+    .unwrap();
     assert!(js.run_module("omitted.js", "import 'neo:sqlite';").is_err());
     assert!(
         js.run_module("dynamic.js", "await import('neo:sqlite');")
             .is_err()
     );
-    let js = NeoJs::new_with_options(
-        permitted(),
-        RuntimeOptions::new().module_names(["neo:sqlite"]).unwrap(),
-    )
-    .unwrap();
+
+    // The exact registered name, not a prefix or another module, admits it.
+    let options = with_sqlite(RuntimeOptions::new())
+        .unwrap()
+        .module_names([MODULE_NAME])
+        .unwrap();
+    assert!(options.is_module_name_allowed(MODULE_NAME));
+    let js = NeoJs::new_with_options(permitted(), options).unwrap();
     js.run_module(
         "admitted.js",
-        "const {openMemory} = await import('neo:sqlite'); openMemory().close();",
+        "import {openMemory} from 'neo:sqlite';
+         openMemory().close();
+         const cached = await import('neo:sqlite');
+         if (cached.openMemory !== openMemory) throw Error('cache identity');",
     )
     .unwrap();
+}
+
+#[test]
+fn registration_helpers_reject_duplicates_and_unknown_names() {
+    let options = with_sqlite(RuntimeOptions::new()).unwrap();
+    let duplicate = with_sqlite(options).unwrap_err();
+    assert_eq!(duplicate.code(), "EXTENSION_DUPLICATE_EXTENSION");
+
+    let error = with_sqlite(RuntimeOptions::new())
+        .unwrap()
+        .module_names(["neo:sqlite "])
+        .unwrap_err();
+    assert_eq!(error.names(), ["neo:sqlite "]);
+
+    // Migration helpers: an explicit name builder and the all-extensions
+    // builder both recognize the registered exact name.
+    let options = with_sqlite(RuntimeOptions::new()).unwrap();
+    let named = ModuleAllowlist::from_names_with([MODULE_NAME], options.extensions()).unwrap();
+    assert!(named.contains_extension_name(MODULE_NAME));
+    let all = ModuleAllowlist::all_with_extensions(options.extensions());
+    assert!(all.contains_extension_name(MODULE_NAME));
+    assert!(all.contains(neojs_core::RuntimeModule::Fs));
 }
 
 #[test]

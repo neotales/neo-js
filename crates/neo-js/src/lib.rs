@@ -30,6 +30,12 @@
 //! [extension module documentation](extension) for the hook contract and a
 //! complete native-module example.
 //!
+//! Optional modules are not compiled into this crate. In particular, SQLite is
+//! supplied by the separate `neojs-sqlite` package, which registers the exact
+//! `neo:sqlite` name and keeps `rusqlite` out of this crate's dependency graph.
+//! [`Permissions::sqlite`] remains the gate, but it grants nothing unless that
+//! extension is registered.
+//!
 //! The allowlist is a host-capability boundary, not an OS sandbox. It does not
 //! limit CPU, memory, or the JavaScript language, and a script still shares one
 //! realm with everything the host left in it. `console` is present in every
@@ -68,7 +74,6 @@ mod os;
 mod path;
 mod process;
 mod semver;
-mod sqlite;
 mod stdio;
 mod sync_callback;
 mod toml;
@@ -175,9 +180,13 @@ pub struct Permissions {
     pub network: bool,
     /// Allow synchronous, private in-memory databases through `neo:sqlite`.
     ///
-    /// This opts into the host's native SQLite engine, not a sandbox. Use
-    /// only trusted SQL: there is no cap on SQLite's intermediate heap.
-    /// It grants no file-backed database, filesystem, shell or network API.
+    /// This gates the optional `neo:sqlite` module; core itself does not link
+    /// SQLite. The module is present only when a host registers the
+    /// `neojs-sqlite` extension, and importing it still requires admission by
+    /// an explicit [`ModuleAllowlist`] when one is configured. It opts into the
+    /// host's native SQLite engine, not a sandbox. Use only trusted SQL: there
+    /// is no cap on SQLite's intermediate heap. It grants no file-backed
+    /// database, filesystem, shell or network API.
     pub sqlite: bool,
 }
 
@@ -201,7 +210,6 @@ pub struct NeoJs {
     // callbacks parse text only and need no permission.
     toml: Rc<RefCell<toml::TomlState>>,
     yaml: Rc<RefCell<yaml::YamlState>>,
-    sqlite: Rc<RefCell<sqlite::SqliteState>>,
     // `neo:semver` keeps every native callback private to its module. It needs
     // no permission and installs nothing on the global object.
     semver: Rc<RefCell<semver::SemverState>>,
@@ -280,9 +288,6 @@ impl Drop for NeoJs {
         }
         if let Ok(mut state) = self.yaml.try_borrow_mut() {
             state.factory = None;
-        }
-        if let Ok(mut state) = self.sqlite.try_borrow_mut() {
-            state.clear();
         }
         if let Ok(mut state) = self.semver.try_borrow_mut() {
             state.factory = None;
@@ -445,7 +450,6 @@ impl NeoJs {
         let dotenv = Rc::new(RefCell::new(dotenv::DotenvState::default()));
         let toml = Rc::new(RefCell::new(toml::TomlState::default()));
         let yaml = Rc::new(RefCell::new(yaml::YamlState::default()));
-        let sqlite = Rc::new(RefCell::new(sqlite::SqliteState::default()));
         let semver = Rc::new(RefCell::new(semver::SemverState::default()));
         let winregistry = Rc::new(RefCell::new(winregistry::WinRegistryState::default()));
         let fetch = Rc::new(RefCell::new(fetch::FetchState::new(
@@ -681,9 +685,6 @@ impl NeoJs {
                     .map_err(|_| rquickjs::Error::Unknown)?;
                 path.borrow_mut().api = Some(Persistent::save(&ctx, api));
             }
-            if permissions.sqlite && allowed.allows(RuntimeModule::Sqlite) {
-                sqlite::SqliteState::install(&ctx, &sqlite)?;
-            }
             // Extension init runs after core state exists and before user code.
             // Keep this last in the fallible construction path: a successful
             // init is only assigned to the shared runtime below, and any later
@@ -708,7 +709,6 @@ impl NeoJs {
             dotenv,
             toml,
             yaml,
-            sqlite,
             semver,
             winregistry,
             fetch,

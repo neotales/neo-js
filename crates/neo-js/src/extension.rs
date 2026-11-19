@@ -68,13 +68,13 @@
 //!
 //! # Built-in names
 //!
-//! A built-in name is reserved for the runtime. Moving a built-in module such
-//! as `neo:sqlite` into an external crate therefore requires removing the
-//! built-in variant and loader first; until then registration reports
-//! [`ExtensionRegistrationError::CoreModuleCollision`]. The replacement keeps
-//! the same exact name, uses the existing [`crate::Permissions`] field through
-//! [`ExtensionPermission`], and owns its native dependency. Core does not move
-//! authority to the extension.
+//! A built-in name is reserved for the runtime. Registration reports
+//! [`ExtensionRegistrationError::CoreModuleCollision`] for a name such as
+//! `neo:fs` that this build still provides. `neo:sqlite` is no longer built in:
+//! the separate `neojs-sqlite` package registers that exact name through this
+//! API with [`ExtensionPermission::Sqlite`] and owns its `rusqlite` dependency.
+//! Core still owns the permission gate, the allowlist, resolution, the module
+//! cache, and teardown; an extension cannot define new authority.
 //!
 //! # Thread ownership
 //!

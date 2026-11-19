@@ -376,15 +376,17 @@ fn registration_rejects_duplicates_core_collisions_and_invalid_names() {
         .unwrap_err();
     assert_eq!(core_collision.code(), "EXTENSION_CORE_MODULE_COLLISION");
 
-    // The built-in SQLite name is reserved exactly like any other core module.
-    let sqlite_collision = registry
+    // `neo:sqlite` is no longer built in, so the optional `neojs-sqlite`
+    // package can register that exact name through this API.
+    let mut optional_sqlite = ExtensionRegistry::new();
+    optional_sqlite
         .register(descriptor(
             "sqlite",
             "neo:sqlite",
             ExtensionPermission::Sqlite,
         ))
-        .unwrap_err();
-    assert_eq!(sqlite_collision.code(), "EXTENSION_CORE_MODULE_COLLISION");
+        .unwrap();
+    assert!(optional_sqlite.contains_module("neo:sqlite"));
 
     let within_descriptor = registry
         .register(
