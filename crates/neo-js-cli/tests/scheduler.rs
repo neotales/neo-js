@@ -7,7 +7,8 @@ fn cli_imports_scheduler_without_permissions() {
     std::fs::write(
         &main,
         r#"
-        import { systemdUnits, windowsTask } from 'neo:scheduler';
+        import { systemdUnits } from 'neo:os/schedulers/systemd';
+        const { windowsTask } = await import('neo:os/schedulers/windows');
         const units = systemdUnits({
           name: 'backup',
           program: '/bin/true',
@@ -50,7 +51,7 @@ fn cli_reports_scheduler_error_codes() {
     std::fs::write(
         &main,
         r#"
-        import { systemdService } from 'neo:scheduler';
+        import { systemdService } from 'neo:os/schedulers/systemd';
         try {
           systemdService({ name: 'task', program: 'relative' });
         } catch (error) {

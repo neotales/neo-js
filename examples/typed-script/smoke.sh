@@ -11,7 +11,8 @@ if command -v tsc >/dev/null 2>&1; then
   printf '%s\n' 'tsc: ES2022, DOM, and WebWorker checks passed'
 elif command -v deno >/dev/null 2>&1; then
   printf '%s\n' 'tsc unavailable: using Deno; the tsc project and optional lib checks are unverified.'
-  deno check --cached-only --no-config types/neo-js.d.ts "$example/main.mts" "$example/types.test.mts"
+  deno check --cached-only --no-config types/neo-js.d.ts types/schedulers.test.ts \
+    "$example/main.mts" "$example/types.test.mts"
 else
   printf '%s\n' 'Smoke test needs a local tsc or Deno executable.' >&2
   exit 1

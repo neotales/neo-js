@@ -1,6 +1,9 @@
 /**
  * Pure, synchronous generation of scheduler configuration text.
  *
+ * The host appends the export list for each public specifier to this shared
+ * implementation. `neo:scheduler` is the deprecated combined entry point.
+ *
  * `systemdService`, `systemdTimer`, and `systemdUnits` return systemd unit
  * text. `windowsTask` returns Windows Task Scheduler XML text. No function
  * reads or writes a file, creates a directory, changes permissions, starts a
@@ -1076,14 +1079,3 @@ function systemdUnits(options) {
 function windowsTask(options) {
   return buildWindowsTask(validateRecord(options, '', WINDOWS_TASK_KEYS));
 }
-
-export {
-  SchedulerError,
-  WINDOWS_XML_ENCODING,
-  MAX_SYSTEMD_LINE_BYTES,
-  MAX_WINDOWS_COMMAND_LINE,
-  systemdService,
-  systemdTimer,
-  systemdUnits,
-  windowsTask,
-};
