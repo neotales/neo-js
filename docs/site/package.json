@@ -1,0 +1,26 @@
+{
+	"name": "neo-js-docs",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "astro dev",
+		"build": "pnpm reference:check && astro build",
+		"check": "pnpm fmt:check && pnpm build",
+		"fmt:check": "oxfmt --check",
+		"reference:generate": "node scripts/reference.mjs",
+		"reference:check": "node scripts/reference.mjs --check"
+	},
+	"dependencies": {
+		"@astrojs/markdown-remark": "7.3.9",
+		"@astrojs/starlight": "0.43.1",
+		"astro": "7.4.11"
+	},
+	"devDependencies": {
+		"oxfmt": "0.79.0",
+		"typescript": "5.9.3"
+	},
+	"engines": {
+		"node": ">=22.23.4"
+	},
+	"packageManager": "pnpm@12.18.0"
+}
