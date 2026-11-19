@@ -68,10 +68,13 @@ test("reference rejects every extra publishable extension and nested directory",
 	}
 	await mkdir(join(api, "modules/archive"));
 	await writeFile(join(api, "modules/archive/index.mdx"), "---\ntitle: Archive\n---\n");
+	const nested = "modules/os/schedulers/old.mdx";
+	await writeFile(join(api, nested), "---\ntitle: Old scheduler\n---\n");
 	for (const args of [["--check"], []]) {
 		const result = run("reference.mjs", ...args);
 		expect(result, 1, /Unexpected entries in the generated API reference/);
-		for (const name of [...extras, "modules/archive"]) assert.ok(result.output.includes(name));
+		for (const name of [...extras, "modules/archive", nested])
+			assert.ok(result.output.includes(name));
 	}
 	assert.match(await readFile(join(api, "old.mdx"), "utf8"), /title: Extra/);
 });

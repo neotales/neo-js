@@ -61,6 +61,10 @@ declarations when changing exports, and update the probe and
 [host permissions](src/content/docs/runtime/permissions.md) when changing access.
 The runtime supplies `console`, but the declaration file does not declare it.
 
+The CLI probe checks all three scheduler specifiers independently. None
+requires a permission flag. The Rust `runtime_options` integration tests
+check their separate allowlist entries.
+
 Run `pnpm --dir docs/site reference:test` to exercise the checks against a
 temporary copy of the Rust sources. The copy has its own Cargo target
 directory and builds offline.

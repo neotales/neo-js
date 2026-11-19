@@ -92,5 +92,12 @@ never documented, and are no longer installed; import the module instead. It
 also imposes the documented input limits: an oversized version makes `valid`
 return `false` and `compare` throw `SEMVER_LIMIT`, where the previous
 implementation had no bound.
+
+The scheduler split grew `RuntimeModule::ALL` from 21 to 23 entries.
+Iterate with `RuntimeModule::ALL.into_iter()` rather than declaring an array
+with a fixed length. Use `ModuleAllowlist::all()` if you intend to admit
+every built-in module. For an explicit scheduler allowlist, see
+[the scheduler migration guide](/guides/modules/scheduler/#migrate-from-neoscheduler).
+
 Pre-1.0 releases may make further
 source-breaking changes; no compatibility guarantee is implied.

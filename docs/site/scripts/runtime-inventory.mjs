@@ -15,6 +15,10 @@ const permissions = {
 	"neo:fs": ["--allow-fs"],
 	"neo:process": ["--allow-run", "--allow-stdio"],
 	"neo:winregistry": ["--allow-registry"],
+	// Separate imports under the CLI's unrestricted allowlist; none needs a flag.
+	"neo:os/schedulers/systemd": [],
+	"neo:os/schedulers/windows": [],
+	"neo:scheduler": [],
 };
 // Only this export disappears from an otherwise importable module.
 const conditionalExports = { "neo:hash": { digestFile: "--allow-fs" } };
@@ -156,7 +160,7 @@ function declaredInventory() {
 	return new Map(
 		modules.map((module) => {
 			const name = JSON.parse(module.getName());
-			if (!/^neo:[a-z]+(?:-[a-z]+)*$/.test(name)) {
+			if (!/^neo:[a-z]+(?:[-/][a-z]+)*$/.test(name)) {
 				throw new Error("Only built-in neo: modules can be imported by the inventory probe.");
 			}
 			const values = checker
@@ -227,7 +231,7 @@ async function checkInventory() {
 			for (const [index, name] of modules.entries()) {
 				const context = `${name} (${profile.join(" ") || "no flags"})`;
 				const required = permissions[name];
-				const allowed = !required || required.some((flag) => profile.includes(flag));
+				const allowed = !required?.length || required.some((flag) => profile.includes(flag));
 				const keys = actual[index];
 				if (!allowed) {
 					if (keys !== null) problems.push(`${context}: imported without a required permission.`);

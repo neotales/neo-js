@@ -3,15 +3,17 @@ title: "Scheduler configuration"
 description: "Generate systemd and Windows Task Scheduler configuration text."
 ---
 
-`neo:scheduler` generates configuration text for a recurring job on systemd or
-Windows Task Scheduler. It is a pure, synchronous JavaScript module: it needs
-no permission flag and grants no host capability. It does not read or write a
-file, create a directory, change a permission, start a process, run a shell,
-call `systemctl`, register a task, or enable anything. The returned strings are
-inert until a caller with separate authority writes and installs them.
+Use `neo:os/schedulers/systemd` to generate systemd units and
+`neo:os/schedulers/windows` to generate Windows Task Scheduler XML. Both are
+synchronous text generators and can run on any host supported by neo-js.
+Neither requires a permission flag. They do not read or write files, start
+processes, or install, register, or enable jobs. Writing and installing the
+output requires separate authority.
+
+## Generate systemd units
 
 ```js
-import { systemdUnits } from "neo:scheduler";
+import { systemdUnits } from "neo:os/schedulers/systemd";
 
 const { service, timer } = systemdUnits({
 	name: "backup",
@@ -37,8 +39,10 @@ normally belongs in `/etc/systemd/system` and needs administrator authority; a
 user unit normally belongs in `~/.config/systemd/user`. Installing or
 reloading either is outside this module.
 
+## Generate Task Scheduler XML
+
 ```js
-import { windowsTask } from "neo:scheduler";
+import { windowsTask } from "neo:os/schedulers/windows";
 
 const xml = windowsTask({
 	name: "Backup",
@@ -64,6 +68,8 @@ declaration with one that matches the bytes you actually write.
 performs no encoding. It does not register the task; registration and the
 `Password` credential are the caller's responsibility, and this module never
 accepts or stores a password.
+
+## Choose a schedule
 
 The supported schedule is deliberately small:
 
@@ -160,6 +166,11 @@ JavaScript type), `SCHEDULER_VALUE` (invalid value), `SCHEDULER_SCHEDULE`
 (invalid schedule), `SCHEDULER_UNSUPPORTED` (unsupported or not safely
 representable), and `SCHEDULER_LIMIT` (a documented size bound).
 
+Each specifier has its own `SchedulerError` constructor, including the legacy
+specifier. Use `instanceof` with the constructor imported from the same
+specifier as the function that threw the error. The `code` and `field` have
+the same meanings across the three modules.
+
 Every options object must be a plain object (prototype `Object.prototype`) or
 a null-prototype record whose own properties are enumerable data properties.
 Accessors, own symbol properties, non-enumerable own properties, unknown keys,
@@ -195,8 +206,21 @@ The repository tests run generated units through `systemd-analyze verify` and
 validate generated UTF-16LE XML against the pinned Task Scheduler 1.3 XSD with
 `xmllint --schema` on temporary files, when those tools are installed. The
 schema fixture is reproduced from Microsoft Learn with provenance and license
-in `crates/neo-js/tests/fixtures/`. Schema validation covers document validity,
-not installation, service execution, or Windows runtime behaviour. No Windows
-runtime is claimed.
+in `crates/neo-js/tests/fixtures/`. These checks validate the generated files.
+They do not test installation or verify that Windows registers or runs a task.
 
-Declarations: [`neo:scheduler`](/api/modules/scheduler/).
+## Migrate from `neo:scheduler`
+
+`neo:scheduler` is deprecated but still exports both sets of generators and
+constants. Move systemd imports to
+[`neo:os/schedulers/systemd`](/api/modules/os/schedulers/systemd/) and Windows
+imports to [`neo:os/schedulers/windows`](/api/modules/os/schedulers/windows/).
+If a script uses both, split the import and match errors to the corresponding
+module. See the [legacy declarations](/api/modules/scheduler/) for the
+compatibility exports.
+
+If a Rust host sets an explicit allowlist, update it alongside the script.
+`RuntimeModule::SchedulerSystemd`, `RuntimeModule::SchedulerWindows`, and
+`RuntimeModule::Scheduler` each admit only their own import specifier.
+Allowing `neo:os` does not allow either scheduler module. See
+[Host permissions and module access](/runtime/permissions/).

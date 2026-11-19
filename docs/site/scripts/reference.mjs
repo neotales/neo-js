@@ -1,5 +1,5 @@
 import { lstat, mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -33,7 +33,11 @@ function declarationText(node, source) {
 /** Use declaration names as headings, including default exports and overloads. */
 function declarationName(node) {
 	if (ts.isExportAssignment(node)) return node.isExportEquals ? "export =" : "default";
-	if (ts.isExportDeclaration(node)) return node.exportClause?.getText() ?? "Re-exports";
+	if (ts.isExportDeclaration(node)) {
+		const from = node.moduleSpecifier?.getText() ?? "this module";
+		return `${node.isTypeOnly ? "Type" : "Value"} re-exports from ${from}`;
+	}
+	if (ts.isImportDeclaration(node)) return "Type dependencies";
 	if (ts.isVariableStatement(node)) {
 		return node.declarationList.declarations.map(({ name }) => name.getText()).join(", ");
 	}
@@ -104,7 +108,7 @@ async function referencePages() {
 	const globals = [];
 	for (const node of source.statements) {
 		if (ts.isModuleDeclaration(node) && ts.isStringLiteral(node.name)) {
-			const match = /^neo:([a-z]+(?:-[a-z]+)*)$/.exec(node.name.text);
+			const match = /^neo:([a-z]+(?:[-/][a-z]+)*)$/.exec(node.name.text);
 			if (!match || !node.body || !ts.isModuleBlock(node.body)) {
 				throw new Error("Expected a named neo: module with a declaration body.");
 			}
@@ -186,19 +190,26 @@ async function existingPages(pages, check) {
 	if (!root.isDirectory())
 		throw new Error("The generated API reference root must be a real directory.");
 
+	const expectedDirectories = new Set();
+	for (const name of pages.keys()) {
+		const parts = name.split("/");
+		for (let depth = 1; depth < parts.length; depth++) {
+			expectedDirectories.add(parts.slice(0, depth).join("/"));
+		}
+	}
+
 	const existing = new Map();
 	const unexpected = [];
-	for (const prefix of ["", "modules/"]) {
-		const directory = join(output, prefix);
-		const entries = await readdir(directory, { withFileTypes: true }).catch((error) => {
-			if (error.code === "ENOENT" && prefix) return [];
-			throw error;
-		});
+	/** Walk only expected directories. Do not follow symlinks. */
+	async function inspect(prefix) {
+		const entries = await readdir(join(output, prefix), { withFileTypes: true });
 		for (const entry of entries) {
 			const name = `${prefix}${entry.name}`;
-			if (name === "modules" && entry.isDirectory()) continue;
-			if (name === "modules")
-				throw new Error("The generated API modules path must be a real directory.");
+			if (expectedDirectories.has(name)) {
+				if (entry.isDirectory()) await inspect(`${name}/`);
+				else unexpected.push(name);
+				continue;
+			}
 			if (entry.isFile() && (pages.has(name) || (!check && name.endsWith(".md")))) {
 				const content = (await readFile(join(output, name), "utf8")).replaceAll("\r\n", "\n");
 				if (pages.has(name) || content.split("\n").includes(marker)) {
@@ -209,6 +220,7 @@ async function existingPages(pages, check) {
 			unexpected.push(name);
 		}
 	}
+	await inspect("");
 	if (unexpected.length) {
 		throw new Error(
 			`Unexpected entries in the generated API reference: ${unexpected.sort().join(", ")}. Move handwritten files out of this directory${check ? " and run pnpm reference:generate to remove obsolete generated pages" : ""}.`,
@@ -236,9 +248,10 @@ async function main(args) {
 		return;
 	}
 
-	await mkdir(join(output, "modules"), { recursive: true });
 	for (const [name, content] of pages) {
-		await writeFile(join(output, name), content);
+		const file = join(output, name);
+		await mkdir(dirname(file), { recursive: true });
+		await writeFile(file, content);
 	}
 	for (const name of existing.keys()) {
 		if (!pages.has(name)) await unlink(join(output, name));

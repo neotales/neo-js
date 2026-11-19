@@ -71,3 +71,18 @@ you trust with the user's network reachability.
 The globals `os`, `env`, and `fs` are present only if the allowlist admits their matching modules. `env` and `fs` also require their corresponding permissions. `os` needs no flag but discloses bounded host OS metadata. `console` always exists. See [Public host globals](/api/globals/) for signatures.
 
 Other built-in modules require no permission flag. The allowlist still applies to every module. TypeScript does not check runtime permissions or allowlists.
+
+## Scheduler allowlists
+
+None of the scheduler modules requires a permission flag. An explicit
+allowlist checks each exact name independently:
+
+| Import specifier            | Rust allowlist entry              |
+| --------------------------- | --------------------------------- |
+| `neo:os/schedulers/systemd` | `RuntimeModule::SchedulerSystemd` |
+| `neo:os/schedulers/windows` | `RuntimeModule::SchedulerWindows` |
+| `neo:scheduler`             | `RuntimeModule::Scheduler`        |
+
+`RuntimeModule::Os` admits `neo:os`, not its scheduler specifiers. The
+deprecated `neo:scheduler` exposes both generators through the legacy name
+only. It does not admit either platform-specific import.

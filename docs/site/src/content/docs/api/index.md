@@ -27,6 +27,8 @@ A declaration does not grant access. See [Host permissions and module access](/r
 - [`neo:fs`](/api/modules/fs/)
 - [`neo:hash`](/api/modules/hash/)
 - [`neo:os`](/api/modules/os/)
+- [`neo:os/schedulers/systemd`](/api/modules/os/schedulers/systemd/)
+- [`neo:os/schedulers/windows`](/api/modules/os/schedulers/windows/)
 - [`neo:path`](/api/modules/path/)
 - [`neo:process`](/api/modules/process/)
 - [`neo:scheduler`](/api/modules/scheduler/)

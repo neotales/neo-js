@@ -26,9 +26,9 @@ containment. `neo:dotenv` parses text only: it has no file loader, no expansion,
 and no environment mutation. Network support is limited to the synchronous
 `neo:fetch.download` call: there is no asynchronous or streaming API, no
 authentication, cookie, proxy, decompression, resume, or content-type support,
-and no SSRF filtering. `neo:scheduler` generates text only: it does not write,
-install, enable, or run a generated unit or task, does not provide a scheduler
-daemon, and supports only [daily and weekly schedules](/guides/modules/scheduler/).
+and no SSRF filtering. The scheduler modules generate text only. They do not
+write, install, enable, or run units or tasks, and they do not provide a
+scheduler daemon. They support only [daily and weekly schedules](/guides/modules/scheduler/).
 `neo:semver` follows the Rust `semver` crate: a core component is limited to
 `u64::MAX`, and ranges are Cargo-style intersections without `||`, hyphen
 ranges, or npm x-range defaults. Numeric prerelease identifiers remain
