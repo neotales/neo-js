@@ -211,8 +211,8 @@ They do not test installation or verify that Windows registers or runs a task.
 
 ## Migrate from `neo:scheduler`
 
-`neo:scheduler` is deprecated but still exports both sets of generators and
-constants. Move systemd imports to
+`neo:scheduler` is deprecated. No release is currently scheduled to remove it.
+It still exports both sets of generators and constants. Move systemd imports to
 [`neo:os/schedulers/systemd`](/api/modules/os/schedulers/systemd/) and Windows
 imports to [`neo:os/schedulers/windows`](/api/modules/os/schedulers/windows/).
 If a script uses both, split the import and match errors to the corresponding
