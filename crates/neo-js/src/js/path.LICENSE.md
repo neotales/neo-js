@@ -21,13 +21,14 @@ argument validation, NUL handling, and several documented edge cases:
 
 - `posix/_util.ts`, `posix/normalize.ts`, `posix/join.ts`, `posix/basename.ts`,
   `posix/dirname.ts`, `posix/extname.ts`, `posix/is_absolute.ts`,
-  `posix/parse.ts`, `posix/format.ts`
+  `posix/parse.ts`, `posix/format.ts`, `posix/resolve.ts`, `posix/constants.ts`
 - `windows/_util.ts`, `windows/normalize.ts`, `windows/join.ts`,
   `windows/basename.ts`, `windows/dirname.ts`, `windows/extname.ts`,
-  `windows/is_absolute.ts`, `windows/parse.ts`, `windows/format.ts`
+  `windows/is_absolute.ts`, `windows/parse.ts`, `windows/format.ts`,
+  `windows/resolve.ts`, `windows/to_namespaced_path.ts`, `windows/constants.ts`
 - `_common/normalize_string.ts`, `_common/basename.ts`, `_common/dirname.ts`,
   `_common/format.ts`, `_common/strip_trailing_separators.ts`,
-  `_common/assert_path.ts`
+  `_common/assert_path.ts`, `_common/common.ts`
 - `types.ts`
 
 The adapted files also carry header lines, recorded here without alteration:
