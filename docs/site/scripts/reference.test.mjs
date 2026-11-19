@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import process from "node:process";
 import { test } from "node:test";
@@ -10,7 +10,7 @@ const root = fileURLToPath(new URL("../../../", import.meta.url));
 const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
 
 /** Copy the inputs so a mutation cannot affect the checkout or the generated pages. */
-async function fixture(t) {
+async function fixture(t, runtime = false) {
 	await mkdir(cache, { recursive: true });
 	const directory = await mkdtemp(join(cache, "reference-fixture-"));
 	t.after(() => rm(directory, { recursive: true, force: true }));
@@ -25,23 +25,22 @@ async function fixture(t) {
 	]) {
 		await copyFile(join(root, file), join(directory, file));
 	}
+	if (runtime) {
+		for (const path of ["Cargo.toml", "Cargo.lock", "crates"]) {
+			await cp(join(root, path), join(directory, path), { recursive: true });
+		}
+	}
 	return {
 		api: join(directory, "docs/site/src/content/docs/api"),
 		types: join(directory, "types/neo-js.d.ts"),
+		checkout: directory,
 		run(script, ...args) {
 			const result = spawnSync(
 				process.execPath,
 				[join(directory, "docs/site/scripts", script), ...args],
 				{
 					encoding: "utf8",
-					// Pass only the inputs these scripts need.
-					env: {
-						NEO_JS_DOCS_BIN: process.env.NEO_JS_DOCS_BIN ?? "",
-						TMPDIR: directory,
-						TEMP: directory,
-						TMP: directory,
-					},
-					timeout: 30_000,
+					timeout: 300_000,
 				},
 			);
 			if (result.error) throw result.error;
@@ -86,12 +85,8 @@ test("generation can remove a stale generated module page", async (t) => {
 	expect(run("reference.mjs", "--check"), 0, /API reference matches/);
 });
 
-test("reference rejects a removed or added declaration even after regeneration", async (t) => {
-	const { types, run } = await fixture(t);
-	expect(run("reference.mjs"), 0, /Generated \d+ API reference pages/);
-	expect(run("runtime-inventory.mjs"), 0, /Runtime value exports match/);
-
-	const source = await readFile(types, "utf8");
+/** Change declarations without touching the live checkout or cached runtime. */
+async function checkDeclarationDrift({ types, run }, source) {
 	const added = source.replace(
 		'declare module "neo:hash" {',
 		'declare module "neo:hash" {\n  export const reviewerExtra: number;',
@@ -111,11 +106,10 @@ test("reference rejects a removed or added declaration even after regeneration",
 		1,
 		/runtime exports absent from declarations or unexpected for this permission: digestFile/,
 	);
-});
+}
 
-test("inventory counts default values but excludes type-only aliases and wildcard re-exports", async (t) => {
-	const { types, run } = await fixture(t);
-	const source = await readFile(types, "utf8");
+/** Verify that a declared type-only export cannot be mistaken for a value. */
+async function checkTypeOnlyExports({ types, run }, source) {
 	const added = source.replace(
 		'declare module "neo:hash" {',
 		`declare module "neo:hash" {
@@ -136,5 +130,75 @@ test("inventory counts default values but excludes type-only aliases and wildcar
 		run("runtime-inventory.mjs"),
 		1,
 		/neo:dotenv .+: runtime exports absent from declarations or unexpected for this permission: default/,
+	);
+}
+
+test("runtime inventory refreshes its checkout's CLI and checks for export and flag drift", async (t) => {
+	const inputs = await fixture(t, true);
+	const { checkout, types, run } = inputs;
+	const declarations = await readFile(types, "utf8");
+	expect(run("reference.mjs"), 0, /Generated \d+ API reference pages/);
+	expect(run("runtime-inventory.mjs"), 0, /Runtime value exports match/);
+
+	await t.test("rejects missing or extra value declarations after regenerating pages", async () => {
+		await checkDeclarationDrift(inputs, declarations);
+	});
+	await t.test(
+		"counts default values but ignores type-only aliases and wildcard re-exports",
+		async () => {
+			await checkTypeOnlyExports(inputs, declarations);
+			await writeFile(types, declarations);
+			expect(run("reference.mjs"), 0, /Generated \d+ API reference pages/);
+		},
+	);
+
+	const module = join(checkout, "crates/neo-js/src/js/string_builder.js");
+	const original = await readFile(module, "utf8");
+	await t.test("rebuilds a stale CLI and detects an extra runtime export", async () => {
+		await writeFile(module, `${original}\nexport const reviewerExtra = 1;\n`);
+		expect(
+			run("runtime-inventory.mjs"),
+			1,
+			/runtime exports absent from declarations or unexpected for this permission: reviewerExtra/,
+		);
+	});
+	await t.test("rebuilds after a runtime export is removed", async () => {
+		const missing = original.replace("export class StringBuilder", "class StringBuilder");
+		assert.notEqual(missing, original);
+		await writeFile(module, missing);
+		expect(run("runtime-inventory.mjs"), 1, /declared but missing at runtime: StringBuilder/);
+		await writeFile(module, original);
+	});
+
+	const cli = join(checkout, "crates/neo-js-cli/src/main.rs");
+	const cliSource = await readFile(cli, "utf8");
+	await t.test(
+		"rejects a new permission flag and a removed flag from current CLI help",
+		async () => {
+			const renamed = cliSource.replace(
+				"#[arg(long)]\n    allow_net: bool,",
+				'#[arg(long = "allow-reviewer")]\n    allow_net: bool,',
+			);
+			assert.notEqual(renamed, cliSource);
+			await writeFile(cli, renamed);
+			expect(
+				run("runtime-inventory.mjs"),
+				1,
+				/Unmodeled in check: --allow-reviewer\. Not listed in CLI help: --allow-net\./,
+			);
+		},
+	);
+	await t.test(
+		"fails closed when Cargo cannot rebuild and an older executable is present",
+		async () => {
+			await writeFile(cli, `${cliSource}\ncompile_error!("regression fixture");\n`);
+			expect(
+				run("runtime-inventory.mjs"),
+				1,
+				/Could not build the current neo-js checkout offline/,
+			);
+			await writeFile(cli, cliSource);
+			expect(run("runtime-inventory.mjs"), 0, /Runtime value exports match/);
+		},
 	);
 });
