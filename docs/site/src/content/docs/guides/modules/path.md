@@ -3,18 +3,21 @@ title: "Path utilities"
 description: "Lexical POSIX and Windows path operations, errors, and limits."
 ---
 
-`neo:path` provides synchronous, purely lexical operations for POSIX and
-Windows path syntax. It needs no permission flag and grants no host capability:
-no function reads or writes files, the working directory, environment
-variables, the locale, or the platform, and none resolves symlinks, junctions,
-drive mappings, or short names, checks existence, folds case, or normalizes
-Unicode. The two namespaces are selected explicitly, so a Linux host can parse
-Windows paths and a Windows host can parse POSIX paths. There is no host-default
-namespace and no `resolve`, because resolving a relative path would read the
-working directory.
+`neo:path` provides synchronous, lexical operations for POSIX and Windows
+paths. Importing it requires no permission flag. Choose `posix` or `win32` to
+use a fixed dialect on any host. The other named exports select the host
+dialect: Windows on Windows, POSIX elsewhere. There is no default export.
+
+The module does not read or write files, check existence, resolve symlinks,
+junctions, drive mappings, or short names, or read environment variables.
+It does not normalize Unicode. Operations that need an implicit resolution base
+may read the runtime-local working directory under the rules below.
 
 ```js
-import { posix, win32 } from "neo:path";
+import { posix, win32, SEPARATOR, SEPARATOR_PATTERN } from "neo:path";
+
+["app", "data"].join(SEPARATOR); // "app/data" or "app\\data"
+"app///data".split(SEPARATOR_PATTERN); // ["app", "data"]
 
 posix.join("/srv", "app", "..", "data"); // "/srv/data"
 posix.dirname("/srv/data/file.txt"); // "/srv/data"
@@ -24,36 +27,87 @@ posix.parse("/srv/data/file.txt");
 // { root: "/", dir: "/srv/data", base: "file.txt", ext: ".txt", name: "file" }
 
 win32.normalize("C:/work/out/../log"); // "C:\\work\\log"
+win32.resolve("C:/work/out", "../log"); // "C:\\work\\log", on any host
 win32.parse("\\\\server\\share\\file");
 // { root: "\\\\server\\share\\", dir: "\\\\server\\share\\",
 //   base: "file", ext: "", name: "file" }
 ```
 
-Each namespace exports `join`, `normalize`, `basename`, `dirname`, `extname`,
-`isAbsolute`, `parse`, `format`, `sep`, and `delimiter`. `sep` is `/` for
-`posix` and `\` for `win32`; `delimiter` is `:` or `;` and is only a constant,
-not used by the functions. The namespaces are frozen. Every function is
-synchronous and repeatable and returns a string or a fresh plain object;
-`parse` results are not shared or cached.
+The frozen namespaces both provide `join`, `normalize`, `basename`, `dirname`,
+`extname`, `isAbsolute`, `parse`, `format`, `common`, `resolve`, `relative`,
+and `toNamespacedPath`. Each is also available as a host-selected named export.
+`SEPARATOR` and `DELIMITER` match the selected namespace's `sep` and
+`delimiter`: `/` and `:` on POSIX, `\` and `;` on Windows. The delimiter is
+a path-list constant. The functions do not use it. `SEPARATOR_PATTERN` is a
+regular expression that matches runs of host separators. On Windows it
+matches both `/` and `\`. `parse` returns a fresh plain object on each call.
 
 ## Arguments and errors
 
 Every path must be a primitive string. A boxed `String`, `URL`, buffer, number,
 `null`, `undefined`, or other value throws `TypeError`; nothing is coerced.
-Windows functions accept both `\` and `/` as separators on input, but the
-argument is still a string. `basename`'s optional suffix must be a string.
+Windows functions accept both `\` and `/` as separators on input, except
+`common`, which splits on `\` only. `common` takes an array of paths.
+`basename`'s optional suffix must be a string.
 `format` requires a non-null, non-array object, and each of `root`, `dir`,
 `base`, `ext`, and `name` must be a string or absent. A NUL (U+0000) in any
 argument throws `TypeError`: such a string cannot name a usable file, and
 returning a lexical result that contains one would look usable when it is not.
-Error messages name the rejected argument and never repeat its value. These are
-the module's only errors; a getter or Proxy trap on a `format` argument may
-throw its own. There are no I/O, permission, or host failures.
+The module's error messages do not repeat the rejected path. Getters and
+Proxy traps on a `format` argument or `common` array can throw their own errors.
 
 Empty input follows the conventional dot where a path is required:
 `normalize("")`, `join()` with no non-empty segment, and `dirname("")` are
 `"."`. `basename("")` and `extname("")` are empty, `parse("")` has five empty
 fields, `isAbsolute("")` is false, and `format({})` is empty.
+
+## Common prefixes and resolution
+
+- `common(paths)` compares components as written, without normalizing or
+  folding case. It retains the separator when paths diverge after a shared
+  component. It returns `""` if the paths share no prefix or the array is empty.
+- `resolve(...paths)` works from right to left. It validates every segment,
+  ignores empty strings, and eliminates `.` and `..`. The result is absolute
+  and has no trailing separator except at a root. On Windows, `\child`
+  needs to inherit a drive or share even though `isAbsolute("\\child")` is
+  true. A drive-relative path such as `C:child` needs a base on the same drive.
+  There is no per-drive environment lookup or implicit drive-root fallback.
+- `relative(from, to)` resolves both operands and returns the path from `from`
+  to `to`, or `""` if they resolve to the same path. Windows compares roots and
+  components case-insensitively but preserves destination spelling. It returns
+  the absolute destination if the drive, share, or namespace differs.
+- POSIX `toNamespacedPath(path)` returns the validated string unchanged.
+  Windows converts resolved drive paths to `\\?\` form and UNC paths to
+  `\\?\UNC\` form. It leaves empty, already namespaced, and device paths
+  unchanged. It does not validate paths for Windows I/O.
+
+## Runtime working directory
+
+An explicit, fully qualified base for `resolve`, or fully qualified operands
+for `relative`, need no permission flag. This works even in the non-host
+dialect. On a POSIX host, for example, `win32.resolve("C:\\work", "C:child")`
+works without a flag. `win32.resolve("C:child")` needs an explicit base on
+that host. To convert a relative Windows path with `toNamespacedPath`, pass an
+absolute path first or resolve it with an explicit Windows base.
+
+When `resolve` (including `resolve()`), `relative`, or Windows
+`toNamespacedPath` needs an implicit base, only the host dialect can read the
+runtime-local working directory. Either of these pairs is sufficient:
+
+- Filesystem permission (`--allow-fs`) and an allowlist that admits `neo:fs`.
+- Process permission (`--allow-run`) or standard I/O permission
+  (`--allow-stdio`), and an allowlist that admits `neo:process`.
+
+Admitting `neo:path` alone does not grant cwd access. The fallback observes
+`neo:process.chdir()`. It does not change, reread, or fall back to the host
+process working directory. See [Host permissions and module access](/runtime/permissions/).
+
+| Error code          | Meaning                                                                                        |
+| ------------------- | ---------------------------------------------------------------------------------------------- |
+| `PATH_PERMISSION`   | The operation needs the runtime cwd, but neither qualifying permission pair exists.            |
+| `PATH_CWD`          | The operation may read the runtime cwd, but the cwd is unavailable.                            |
+| `PATH_CWD_DIALECT`  | The non-host dialect cannot use cwd fallback. Supply an explicit base.                         |
+| `PATH_WINDOWS_ROOT` | The operation could not obtain a matching drive or share, or the namespace root is incomplete. |
 
 ## POSIX rules
 
@@ -141,11 +195,11 @@ fields, `isAbsolute("")` is false, and `format({})` is empty.
 - `format` follows the same joining rule with `\`. A non-empty `base` is
   appended as supplied, even when it is `\`; it is never silently dropped, and
   the result is not normalized.
-- `\\?\` and `\\.\` receive no special treatment. `\\\\?\\C:\\foo` parses as a
-  UNC-shaped root (`\\\\?\\C:\\`) followed by `foo`, and
-  `\\\\?\\UNC\\server\\share\\foo` parses with root `\\\\?\\UNC\\`.
-  Extended-length translation, device enumeration, reserved device names, and
-  alternate data streams are not implemented.
+- `parse` and `normalize` retain their UNC-shaped treatment of `\\?\` and
+  `\\.\`. For example, `parse` reports `\\?\UNC\` as the root of
+  `\\?\UNC\server\share\foo`. In contrast, `resolve` treats the full
+  namespaced server and share as one root. The module does not enumerate
+  devices or validate reserved device names or alternate data streams.
 
 The Windows rules are pure string logic and are exercised on Linux by the test
 suite; no Windows host was used to run it.
@@ -163,11 +217,10 @@ a fixed point. POSIX `join` is exactly concatenation followed by `normalize`;
 the Windows `join` applies its UNC guard first.
 
 This module is not a drop-in replacement for Node's `path` or
-`@neotales/path`. `resolve`, `relative`, `common`, `toFileUrl`, `fromFileUrl`,
-`toNamespacedPath`, and the glob helpers are absent. URL inputs, buffers, and
-type coercion are not accepted. Windows long-path translation, device names,
-case folding, and `\\?\` handling are absent, as is POSIX `//` root
-preservation. For a path that is a drive root or a complete UNC root,
+`@neotales/path`. `toFileUrl`, `fromFileUrl`, and glob helpers are not
+implemented. The module does not accept URL objects or buffers or coerce
+types. It does not preserve the POSIX `//` root. For a drive root or a
+complete UNC root,
 `basename` and the `parse` component fields are empty rather than a separator,
 and Windows `dirname("C:/")` preserves the root as written instead of stripping
 its separator. There is no asynchronous form.
@@ -179,7 +232,7 @@ The same text is embedded in the library and binary: print it with
 `neo-js --third-party-notices` or call `neo_js::third_party_notices()`. It is
 not a complete inventory of every dependency's license.
 
-## Security: not a safe jail
+## Path operations do not enforce containment
 
 `neo:path` is lexical string manipulation, not a security boundary. It does not
 validate against traversal, symlinks or junctions, case-insensitive aliasing,

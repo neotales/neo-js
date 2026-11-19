@@ -16,6 +16,10 @@ through a different path:
   `neo:fs` module.
 - Process permission lets `neo:exec` launch programs with the host user's
   authority, regardless of other permission flags or module selections.
+- `neo:path` can use the runtime cwd as an implicit base in the host dialect.
+  This fallback requires filesystem permission with `neo:fs` admitted,
+  or process or stdio permission with `neo:process` admitted. See the
+  [path guide](/guides/modules/path/#runtime-working-directory).
 - `console` is present in every runtime.
 
 neo-js is not a sandbox. For untrusted scripts, isolate the process with

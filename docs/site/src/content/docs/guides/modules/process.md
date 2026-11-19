@@ -33,6 +33,9 @@ The working directory is owned by the runtime, not the host process. `chdir()`
 never calls the host's global directory change, so two `NeoJs` instances in one
 embedder keep independent values and unrelated threads are unaffected. It starts
 as the host process working directory when the runtime is constructed.
+The [host path dialect](/guides/modules/path/#runtime-working-directory) can
+use this directory as an implicit resolution base when the matching
+permission and module allowlist entry grant access.
 Relative paths used by `neo:fs`, `neo:hash`'s file digest, `neo:fetch`'s
 destination, relative module entry names, and `neo:exec` children are resolved
 against it. A module's relative imports use the absolute base captured when

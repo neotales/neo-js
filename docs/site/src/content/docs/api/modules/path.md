@@ -7,30 +7,27 @@ description: "TypeScript declarations for neo:path."
 
 Declarations for `neo:path`. See [host permissions and module access](/runtime/permissions/) before importing.
 
-Lexical path operations for POSIX and Windows syntax. Requires no permission
-flag and grants none.
+Lexical path operations for POSIX and Windows syntax. Importing this module
+does not require a permission flag.
 
-The `posix` and `win32` namespaces are selected explicitly; the host
-platform never chooses between them. No function reads the filesystem, the
-working directory, environment variables, the locale, or the platform, and
-none resolves symlinks, junctions, drive mappings, or short names, checks
-existence, folds case, or normalizes Unicode. Functions are synchronous and
-repeatable.
+Choose `posix` or `win32` explicitly, or use named functions and constants
+for the host dialect (Windows on Windows, POSIX elsewhere). These functions
+do not perform filesystem I/O or check containment, existence, symlinks or
+junctions. They never read the process environment or per-drive directories.
 
 Every path must be a primitive string; a boxed `String`, `URL`, number,
 `null`, `undefined`, or other value throws `TypeError`, as does any NUL
 (U+0000) in a string argument. `basename`'s `suffix` must be a string.
 `format` requires a non-null, non-array object whose `root`, `dir`, `base`,
-`ext`, and `name` fields are strings or absent. These are the only errors.
+`ext`, and `name` fields are strings or absent.
 
-`normalize` is purely lexical: `..` is resolved by string manipulation, so
-its result is not a containment or safety decision. Windows drive letters
-are ASCII `A`-`Z`/`a`-`z`, case is preserved, and `\\?\` and `\\.\` receive
-no special treatment. POSIX `//` collapses to `/`. `parse` removes trailing
-separators from `dir` except a root's own separator, and a root-only path
-has an empty `base`. This is not a drop-in replacement for Node's `path` or
-`@neotales/path`: `resolve`, `relative`, file-URL helpers, and globs are
-deliberately absent.
+`resolve`, `relative`, and Windows `toNamespacedPath` can disclose the
+runtime-local cwd if the input does not provide a complete absolute base.
+This fallback is available only in the host dialect and requires admitted
+`neo:fs` with filesystem permission, or admitted `neo:process` with
+process or stdio permission. It observes runtime `chdir` and never changes
+or falls back to the host process's cwd. File-URL and glob helpers are not
+implemented.
 
 ## ParsedPath
 
@@ -52,7 +49,7 @@ export interface ParsedPath {
 
 ## PathApi
 
-```ts
+````ts
 /** The shape shared by the `posix` and `win32` namespaces. */
 export interface PathApi<Separator extends string, Delimiter extends string> {
   /** Path separator: `/` for POSIX, `\` for Windows. */
@@ -96,7 +93,10 @@ export interface PathApi<Separator extends string, Delimiter extends string> {
    */
   extname(path: string): string;
 
-  /** True only for a syntactically absolute path in this namespace. */
+  /**
+   * True for a syntactically absolute path. A Windows rooted path such as
+   * `\child` is absolute here but still needs a drive or share in `resolve`.
+   */
   isAbsolute(path: string): boolean;
 
   /** Split into `root`, `dir`, `base`, `ext`, and `name` without normalizing. */
@@ -110,8 +110,54 @@ export interface PathApi<Separator extends string, Delimiter extends string> {
    * validate consistency.
    */
   format(pathObject: Partial<ParsedPath>): string;
+
+  /**
+   * Return the common prefix at component boundaries, or `""` if there is
+   * none (including an empty array). Compare spelling exactly, retaining
+   * the separator when paths diverge after a shared component. Does not
+   * normalize or read cwd; Windows splits on `\` only, as in the reference.
+   */
+  common(paths: readonly string[]): string;
+
+  /**
+   * Resolve right to left into an absolute path without a trailing
+   * separator, except at the root. Empty segments are ignored after
+   * validation. Reads the runtime cwd only if a complete base is missing;
+   * the non-host dialect requires an explicit base. On Windows, a
+   * drive-relative segment requires a matching drive base (or matching
+   * native cwd), and a rooted segment without a drive inherits a drive or
+   * share. UNC shares are indivisible roots. No per-drive cwd or drive-root
+   * fallback is used. Can throw `Error` with `PATH_PERMISSION`,
+   * `PATH_CWD_DIALECT`, `PATH_CWD`, or `PATH_WINDOWS_ROOT`.
+   *
+   * @example Resolve without access to the runtime cwd.
+   * ```ts
+   * import { posix } from "neo:path";
+   * const absolute = posix.resolve("/project", "src", "../README.md");
+   * // "/project/README.md"
+   * ```
+   */
+  resolve(...paths: string[]): string;
+
+  /**
+   * Resolve both operands as `resolve` would, then return the path from
+   * `from` to `to`. Returns `""` for equal paths. Windows compares roots
+   * and components case-insensitively, preserves destination spelling, and
+   * returns the absolute destination if the drive/share/namespace differs.
+   * Has the same cwd requirements and errors as `resolve`.
+   */
+  relative(from: string, to: string): string;
+
+  /**
+   * POSIX returns the validated input unchanged. Windows converts a
+   * resolved drive path to `\\?\` form or a UNC path to `\\?\UNC\` form.
+   * Empty and already-namespaced/device paths are returned unchanged.
+   * Conversion is lexical and does not validate paths for Windows I/O.
+   * When resolution is needed, its cwd requirements and errors apply.
+   */
+  toNamespacedPath(path: string): string;
 }
-```
+````
 
 ## posix
 
@@ -125,4 +171,109 @@ export const posix: Readonly<PathApi<"/", ":">>;
 ```ts
 /** Windows syntax: `\` separator, `;` delimiter; both separators accepted. */
 export const win32: Readonly<PathApi<"\\", ";">>;
+```
+
+## SEPARATOR
+
+```ts
+/** Host path separator: `\` on Windows, `/` elsewhere. */
+export const SEPARATOR: "/" | "\\";
+```
+
+## DELIMITER
+
+```ts
+/** Host PATH-list separator: `;` on Windows, `:` elsewhere. */
+export const DELIMITER: ":" | ";";
+```
+
+## SEPARATOR_PATTERN
+
+```ts
+/** Matches runs of host path separators (Windows accepts both spellings). */
+export const SEPARATOR_PATTERN: RegExp;
+```
+
+## join
+
+```ts
+/** The host dialect's {@link PathApi.join}. */
+export const join: PathApi<string, string>["join"];
+```
+
+## normalize
+
+```ts
+/** The host dialect's {@link PathApi.normalize}. */
+export const normalize: PathApi<string, string>["normalize"];
+```
+
+## basename
+
+```ts
+/** The host dialect's {@link PathApi.basename}. */
+export const basename: PathApi<string, string>["basename"];
+```
+
+## dirname
+
+```ts
+/** The host dialect's {@link PathApi.dirname}. */
+export const dirname: PathApi<string, string>["dirname"];
+```
+
+## extname
+
+```ts
+/** The host dialect's {@link PathApi.extname}. */
+export const extname: PathApi<string, string>["extname"];
+```
+
+## isAbsolute
+
+```ts
+/** The host dialect's {@link PathApi.isAbsolute}. */
+export const isAbsolute: PathApi<string, string>["isAbsolute"];
+```
+
+## parse
+
+```ts
+/** The host dialect's {@link PathApi.parse}. */
+export const parse: PathApi<string, string>["parse"];
+```
+
+## format
+
+```ts
+/** The host dialect's {@link PathApi.format}. */
+export const format: PathApi<string, string>["format"];
+```
+
+## common
+
+```ts
+/** The host dialect's {@link PathApi.common}. */
+export const common: PathApi<string, string>["common"];
+```
+
+## resolve
+
+```ts
+/** The host dialect's {@link PathApi.resolve}. */
+export const resolve: PathApi<string, string>["resolve"];
+```
+
+## relative
+
+```ts
+/** The host dialect's {@link PathApi.relative}. */
+export const relative: PathApi<string, string>["relative"];
+```
+
+## toNamespacedPath
+
+```ts
+/** The host dialect's {@link PathApi.toNamespacedPath}. */
+export const toNamespacedPath: PathApi<string, string>["toNamespacedPath"];
 ```
