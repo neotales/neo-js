@@ -56,6 +56,7 @@ mod loader;
 mod module_turn;
 mod modules;
 mod os;
+mod path;
 mod process;
 mod semver;
 mod stdio;
@@ -98,7 +99,8 @@ pub struct Permissions {
     /// sandbox: a script gets the host user's filesystem authority. Reads,
     /// writes, paths, and listings are bounded, and failures carry stable
     /// `FsError` codes. The module and its `fs` global are also gated by the
-    /// runtime's [`ModuleAllowlist`].
+    /// runtime's [`ModuleAllowlist`]. When `neo:fs` is admitted, this also
+    /// lets `neo:path` use and disclose the runtime working-directory text.
     pub filesystem: bool,
     /// Allow reading environment variables.
     pub environment: bool,
@@ -107,7 +109,9 @@ pub struct Permissions {
     /// A script that reads stdin consumes input the embedder or an interactive
     /// user may be using, so this is an explicit opt-in. It also makes
     /// `neo:process` importable for its stdout/stderr writers and the runtime
-    /// working directory. [`Self::process`] grants the same stdin access
+    /// working directory. When that module is admitted, `neo:path` can also
+    /// use and disclose the runtime working-directory text.
+    /// [`Self::process`] grants the same stdin access
     /// because it already permits arbitrary child programs with the host
     /// user's privileges; `stdio` is the narrower way to allow stdin alone.
     /// Standard output and standard error writes are already reachable through
@@ -123,7 +127,9 @@ pub struct Permissions {
     /// This grants the child the same filesystem, network, and environment
     /// access as the host process. It is not constrained by the other
     /// permission fields here. It also makes `neo:process` importable and
-    /// permits reading host stdin through that module. `neo:exec` exposes both
+    /// permits reading host stdin through that module. When `neo:process` is
+    /// admitted, `neo:path` can also use and disclose the runtime cwd text.
+    /// `neo:exec` exposes both
     /// the one-shot `exec` call and owned `spawn` handles; both are synchronous
     /// and both use the same process-wide slot limit.
     pub process: bool,
@@ -183,6 +189,7 @@ pub struct NeoJs {
     module_turns: module_turn::ModuleTurns,
     #[cfg(test)]
     before_drive: RefCell<Option<Box<dyn FnOnce()>>>,
+    path: Rc<RefCell<path::PathState>>,
     // The runtime-local working directory. It is never installed on the host
     // process and is shared only with this runtime's host callbacks.
     cwd: Rc<RefCell<cwd::WorkingDirectory>>,
@@ -244,6 +251,9 @@ impl Drop for NeoJs {
         if let Ok(mut state) = self.fs.try_borrow_mut() {
             state.factory = None;
             state.pristine = None;
+        }
+        if let Ok(mut state) = self.path.try_borrow_mut() {
+            state.api = None;
         }
         if let Ok(mut state) = self.stdio.try_borrow_mut() {
             state.factory = None;
@@ -360,6 +370,7 @@ impl NeoJs {
             Rc::clone(&cwd),
         )));
         let fs = Rc::new(RefCell::new(fs::FsState::new(Rc::clone(&cwd))));
+        let path = Rc::new(RefCell::new(path::PathState::default()));
         let stdio = Rc::new(RefCell::new(stdio::ProcessState::new(Rc::clone(&cwd))));
         let exec = Rc::new(RefCell::new(process::ExecState::new()));
         context.with(|ctx| -> rquickjs::Result<()> {
@@ -581,6 +592,12 @@ impl NeoJs {
                 let stdio_factory = stdio::factory(&ctx)?;
                 stdio.borrow_mut().factory = Some(Persistent::save(&ctx, stdio_factory));
             }
+            if allowed.allows(RuntimeModule::Path) {
+                let api = path::api(&ctx, permissions, allowed, Rc::clone(&cwd))?;
+                ctx.store_userdata(Rc::clone(&path))
+                    .map_err(|_| rquickjs::Error::Unknown)?;
+                path.borrow_mut().api = Some(Persistent::save(&ctx, api));
+            }
             Ok(())
         })?;
         module_turns.install(&runtime);
@@ -602,6 +619,7 @@ impl NeoJs {
             module_turns,
             #[cfg(test)]
             before_drive: RefCell::default(),
+            path,
             cwd,
             stdio,
             exec,
@@ -1414,6 +1432,43 @@ chdir({directory});"
                 .unwrap(),
             "true"
         );
+        assert_eq!(std::env::current_dir().unwrap(), host_before);
+    }
+
+    #[test]
+    // Inject unavailable state: public APIs cannot clear a valid cwd, and
+    // changing the process cwd would affect unrelated tests and embedders.
+    fn authorized_path_resolution_fails_only_when_it_needs_the_unavailable_cwd() {
+        let host_before = std::env::current_dir().unwrap();
+        let js = NeoJs::new_with_options(
+            Permissions {
+                stdio: true,
+                ..Permissions::default()
+            },
+            RuntimeOptions::new().modules([RuntimeModule::Path, RuntimeModule::Process]),
+        )
+        .unwrap();
+        *js.cwd.borrow_mut() = crate::cwd::WorkingDirectory::unavailable();
+        js.run_module(
+            "unavailable-path.js",
+            r#"import { resolve, relative, SEPARATOR } from 'neo:path';
+               function expectUnavailable(operation) {
+                 try { operation(); }
+                 catch (error) {
+                   if (error.code !== 'PATH_CWD') throw error;
+                   return;
+                 }
+                 throw Error('operation used an unavailable cwd');
+               }
+               const windows = SEPARATOR === '\\';
+               const base = windows ? 'C:\\project' : '/project';
+               const child = windows ? 'C:\\project\\file' : '/project/file';
+               expectUnavailable(() => resolve('file'));
+               expectUnavailable(() => relative(base, 'file'));
+               if (resolve(base, 'file') !== child) throw Error('explicit base failed');
+               if (relative(base, child) !== 'file') throw Error('absolute operands failed');"#,
+        )
+        .unwrap();
         assert_eq!(std::env::current_dir().unwrap(), host_before);
     }
 

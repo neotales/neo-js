@@ -21,7 +21,6 @@ const ASSERT_MODULE: &str = include_str!("js/assert.js");
 const TEST_MODULE: &str = include_str!("js/test.js");
 const ANSI_MODULE: &str = include_str!("js/ansi.js");
 const CHARS_MODULE: &str = include_str!("js/chars.js");
-const PATH_MODULE: &str = include_str!("js/path.js");
 const STRING_BUILDER_MODULE: &str = include_str!("js/string_builder.js");
 const EXEC_MODULE: &str = include_str!("js/exec.js");
 
@@ -172,7 +171,6 @@ impl ModuleLoader {
         match name {
             "neo:ansi" => Some(ANSI_MODULE),
             "neo:chars" => Some(CHARS_MODULE),
-            "neo:path" => Some(PATH_MODULE),
             "neo:scheduler" => Some(LEGACY_SCHEDULER_MODULE),
             "neo:os/schedulers/systemd" => Some(SCHEDULER_SYSTEMD_MODULE),
             "neo:os/schedulers/windows" => Some(SCHEDULER_WINDOWS_MODULE),
@@ -351,6 +349,9 @@ impl Loader for ModuleLoader {
                 return Err(Error::new_loading(name));
             }
             return Module::declare_def::<crate::fs::FsModule, _>(ctx.clone(), name);
+        }
+        if name == "neo:path" {
+            return Module::declare_def::<crate::path::PathModule, _>(ctx.clone(), name);
         }
         if name == "neo:winregistry" {
             if !self.permissions.registry {
