@@ -36,8 +36,12 @@
 //! [`Permissions::sqlite`] remains the gate, but it grants nothing unless that
 //! extension is registered. Operating-system metadata is supplied by
 //! `neojs-os`, which registers `neo:os`, installs the `os` global, and reads
-//! the bounded host metadata. Core itself no longer adds either one, so a
-//! core-only runtime has no `neo:os` import and no `os` global.
+//! the bounded host metadata. The pure scheduler text generators are supplied
+//! by `neojs-schedulers`, which registers the exact
+//! `neo:os/schedulers/systemd`, `neo:os/schedulers/windows`, and deprecated
+//! `neo:scheduler` names; none needs a permission flag or a global. Core itself
+//! no longer adds any of them, so a core-only runtime has no `neo:os` import,
+//! no `os` global, and no scheduler import.
 //!
 //! The allowlist is a host-capability boundary, not an OS sandbox. It does not
 //! limit CPU, memory, or the JavaScript language, and a script still shares one

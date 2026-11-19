@@ -5,9 +5,15 @@ description: "Generate systemd and Windows Task Scheduler configuration text."
 
 Use `neo:os/schedulers/systemd` to generate systemd units and
 `neo:os/schedulers/windows` to generate Windows Task Scheduler XML. Both are
-synchronous text generators and can run on any host supported by neo-js.
-Neither requires a permission flag. They do not read or write files, start
-processes, or install, register, or enable jobs. Writing and installing the
+synchronous JavaScript text generators and can run on any host supported
+by neo-js. The optional `neojs-schedulers` crate provides both canonical
+names and the deprecated combined alias `neo:scheduler`. The CLI registers
+the crate. Core alone provides none of the three imports.
+
+No scheduler specifier needs a permission flag, grants host authority, or
+installs a global. The generators do not read or write files, create
+directories, change permissions, run a shell or service manager, or
+install, register, start, or enable jobs. Writing and installing the
 output requires separate authority.
 
 ## Generate systemd units
@@ -206,21 +212,86 @@ The repository tests run generated units through `systemd-analyze verify` and
 validate generated UTF-16LE XML against the pinned Task Scheduler 1.3 XSD with
 `xmllint --schema` on temporary files, when those tools are installed. The
 schema fixture is reproduced from Microsoft Learn with provenance and license
-in `crates/neo-js/tests/fixtures/`. These checks validate the generated files.
+in `crates/neojs-schedulers/tests/fixtures/` (`task-scheduler-1.3.xsd` and
+`NOTICE.md`). These checks validate the generated files.
 They do not test installation or verify that Windows registers or runs a task.
 
 ## Migrate from `neo:scheduler`
 
 `neo:scheduler` is deprecated. No release is currently scheduled to remove it.
-It still exports both sets of generators and constants. Move systemd imports to
+It still exports both sets of generators and constants under that name, with
+the same output and error contract:
+
+```js
+import { systemdUnits, windowsTask } from "neo:scheduler";
+```
+
+Use the canonical names in new code. Move systemd imports to
 [`neo:os/schedulers/systemd`](/api/modules/os/schedulers/systemd/) and Windows
 imports to [`neo:os/schedulers/windows`](/api/modules/os/schedulers/windows/).
 If a script uses both, split the import and match errors to the corresponding
 module. See the [legacy declarations](/api/modules/scheduler/) for the
 compatibility exports.
 
-If a Rust host sets an explicit allowlist, update it alongside the script.
-`RuntimeModule::SchedulerSystemd`, `RuntimeModule::SchedulerWindows`, and
-`RuntimeModule::Scheduler` each admit only their own import specifier.
-Allowing `neo:os` does not allow either scheduler module. See
-[Host permissions and module access](/runtime/permissions/).
+## Embed scheduler generators
+
+For a checkout next to your crate, add both dependencies:
+
+```toml
+[dependencies]
+neojs-core = { path = "../neo-js/crates/neo-js" }
+neojs-schedulers = { path = "../neo-js/crates/neojs-schedulers" }
+```
+
+```rust
+use neojs_core::{NeoJs, Permissions, RuntimeOptions};
+use neojs_schedulers::{MODULE_NAMES, with_schedulers};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+	let options = with_schedulers(RuntimeOptions::new())?.module_names(MODULE_NAMES)?;
+	let runtime = NeoJs::new_with_options(Permissions::default(), options)?;
+	runtime.run_module(
+		"main.js",
+		r#"import {systemdUnits} from "neo:os/schedulers/systemd";
+		   import {windowsTask} from "neo:os/schedulers/windows";
+		   import {systemdUnits as legacyUnits} from "neo:scheduler";
+		   const schedule = {kind: "daily", at: "09:30"};
+		   const unit = {name: "backup", program: "/bin/true", schedule};
+		   if (systemdUnits(unit).service !== legacyUnits(unit).service)
+		     throw Error("legacy output differs");
+		   if (!windowsTask({name: "Backup", startDate: "2026-11-18",
+		                     program: "C:\\backup.exe", schedule}).includes("<Task"))
+		     throw Error("expected task XML");"#,
+	)?;
+	Ok(())
+}
+```
+
+`with_schedulers` registers all three names with `ExtensionPermission::None`.
+Use `neojs_schedulers::schedulers_extension()` if you assemble the registry
+yourself. Registering the extension does not change an explicit allowlist.
+If you need only one name, pass only its exact constant to `module_names`:
+
+| Removed `RuntimeModule` variant   | Replacement constant                    |
+| --------------------------------- | --------------------------------------- |
+| `RuntimeModule::SchedulerSystemd` | `neojs_schedulers::SYSTEMD_MODULE_NAME` |
+| `RuntimeModule::SchedulerWindows` | `neojs_schedulers::WINDOWS_MODULE_NAME` |
+| `RuntimeModule::Scheduler`        | `neojs_schedulers::LEGACY_MODULE_NAME`  |
+
+Admitting either canonical name admits only that target, not the other
+target or the legacy alias. Admitting the legacy name grants access to both
+generators through `neo:scheduler` only. Registering or admitting `neo:os`
+has no effect on the schedulers. Static and dynamic imports of a single
+specifier share a module instance. Different specifiers do not share an
+instance or a `SchedulerError` constructor.
+
+`ModuleAllowlist::all()` contains built-ins only. Register the extension
+and add exact names, or use
+`ModuleAllowlist::all_with_extensions(options.extensions())` to admit all
+registered extensions. Unrestricted `RuntimeOptions::default()` admits
+registered names but does not register them itself.
+
+For a host that registers only `neojs-schedulers`, compose declarations with
+`--with schedulers`. This selects all three declarations. Any explicit
+runtime allowlist still controls each import independently. See
+[Select declarations](/runtime/typescript/#select-declarations).

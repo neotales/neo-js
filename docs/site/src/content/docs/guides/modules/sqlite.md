@@ -130,8 +130,9 @@ exact name to your allowlist. This migration keeps the JavaScript API,
 permission, default-deny behavior, and SQL restrictions.
 
 For an embedder that registers only `neojs-sqlite`, compose declarations
-with `--with sqlite`. The CLI composition also declares `neo:os` and `os`;
-use it only when the host registers both extensions. The core-only file
+with `--with sqlite`. The CLI composition also declares `neo:os`, `os`, and
+the scheduler modules. Use it only when the host registers all three
+extensions. The core-only file
 omits `neo:sqlite`. See [Select declarations](/runtime/typescript/#select-declarations).
 Declarations never grant permission or override an allowlist.
 

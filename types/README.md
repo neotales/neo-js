@@ -6,19 +6,23 @@ optional crate uses a composition of the core file and that crate's fragment.
 
 | File | Role |
 | --- | --- |
-| `neo-js.core.d.ts` | Hand-written declarations for `neojs-core`. It omits every optional module, including `neo:os` and `neo:sqlite`, and the `os` global. |
-| `neo-js.d.ts` | Generated entry for the CLI build. It is core plus the optional modules the CLI links, currently `neo:os` and `neo:sqlite`. Do not edit it by hand. |
+| `neo-js.core.d.ts` | Hand-written declarations for `neojs-core`. It omits every optional module, including `neo:os`, the scheduler generators, and `neo:sqlite`, and the `os` global. |
+| `neo-js.d.ts` | Generated entry for the CLI build. It is core plus the optional modules the CLI links, currently `neo:os`, the scheduler generators, and `neo:sqlite`. Do not edit it by hand. |
 | `crates/neojs-os/types/neo-os.d.ts` | Hand-written `neo:os` fragment, including the `os` global, owned by the `neojs-os` crate. |
+| `crates/neojs-schedulers/types/neo-schedulers.d.ts` | Hand-written systemd, Windows Task Scheduler, and deprecated `neo:scheduler` fragments owned by the `neojs-schedulers` crate. |
 | `crates/neojs-sqlite/types/neo-sqlite.d.ts` | Hand-written `neo:sqlite` fragment owned by the `neojs-sqlite` crate. |
 
 The declarations describe **compiled availability**, not permission. Declaring
 `neo:os` means the host links `neojs-os` and can register the module; it grants
 no permission because none is needed, and a runtime allowlist can still deny
-the import. Declaring `neo:sqlite` means the host links `neojs-sqlite` and can
-register the module; it does not grant `Permissions::sqlite`, and a runtime
-allowlist can still deny the import. The reverse is also true: a script can
-type-check against the core file, where both modules are absent, even on a CLI
-that would admit them at run time. The checker models the build, while the
+the import. Declaring the scheduler specifiers means the host links
+`neojs-schedulers` and can register them; they grant no permission, and a
+runtime allowlist still decides each exact name independently. Declaring
+`neo:sqlite` means the host links `neojs-sqlite` and can register the module;
+it does not grant `Permissions::sqlite`, and a runtime allowlist can still deny
+the import. The reverse is also true: a script can type-check against the core
+file, where all optional modules are absent, even on a CLI that would admit
+them at run time. The checker models the build, while the
 runtime enforces permissions and allowlists.
 
 ## Select
@@ -27,13 +31,13 @@ runtime enforces permissions and allowlists.
   registers, not the permissions or allowlist of a particular runtime.
 - Core-only embedder, or a script checked against the core API only:
   reference `types/neo-js.core.d.ts`.
-- Host that registers only `neojs-os`: compose with `--with os`.
-- Host that registers only `neojs-sqlite`: compose with `--with sqlite`.
-- CLI build, which links `neojs-core`, `neojs-os`, and `neojs-sqlite`:
-  reference `types/neo-js.d.ts` or compose with `--with os --with sqlite`.
-  The checked-in CLI file retains the previous module set.
-  Consumers that relied on `neo:os` or `neo:sqlite`
-  through this file need no change.
+- For a custom selection, pass one flag per registered extension: `--with os`
+  for `neojs-os`, `--with schedulers` for `neojs-schedulers`, and
+  `--with sqlite` for `neojs-sqlite`. For example, SQLite alone uses
+  `--with sqlite`; registering OS and SQLite uses `--with os --with sqlite`.
+- The CLI registers all three extensions. Use `types/neo-js.d.ts` or compose
+  with `--with os --with schedulers --with sqlite`. The checked-in file retains
+  the previous CLI module set.
 
 `examples/typed-script/tsconfig.json` lists the composed entry, so the example
 and its editor completion continue to describe the CLI.
@@ -51,15 +55,15 @@ cargo run --offline -p neojs --example compose-types
 
 # CLI selection, printed to stdout.
 cargo run --offline -p neojs --example compose-types -- \
-  --with os --with sqlite --check-cli-manifest
+  --with os --with schedulers --with sqlite --check-cli-manifest
 
 # Regenerate the checked-in CLI entry.
 cargo run --offline -p neojs --example compose-types -- \
-  --with os --with sqlite --check-cli-manifest --output types/neo-js.d.ts
+  --with os --with schedulers --with sqlite --check-cli-manifest --output types/neo-js.d.ts
 
 # Verify it without writing.
 cargo run --offline -p neojs --example compose-types -- \
-  --with os --with sqlite --check-cli-manifest --check types/neo-js.d.ts
+  --with os --with schedulers --with sqlite --check-cli-manifest --check types/neo-js.d.ts
 ```
 
 `--with` is repeatable. Unknown or duplicate selections are errors. `--output -`

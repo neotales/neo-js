@@ -22,7 +22,8 @@ description: Run a JavaScript or TypeScript entry file with the neo-js CLI.
 
 The Cargo package is `neojs`; the executable is `neo-js`. The CLI registers
 [`neojs-os`](/guides/modules/os/), so `neo:os` and the `os` global are available
-without a flag. For a `.ts` or
+without a flag. The CLI also registers [`neojs-schedulers`](/guides/modules/scheduler/).
+Its three scheduler imports need no flag. For a `.ts` or
 `.mts` entry file, pass that filename instead. The CLI strips
 types but does not check them. See [TypeScript support](/runtime/typescript/).
 

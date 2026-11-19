@@ -11,7 +11,7 @@ trap 'rm -rf "$mutation"' 0
 # The checked-in CLI composition must match the explicit selection and the
 # CLI manifest. The tool never selects fragments from the manifest itself.
 cargo run --offline --quiet -p neojs --example compose-types -- \
-  --with os --with sqlite --check-cli-manifest --check types/neo-js.d.ts
+  --with os --with schedulers --with sqlite --check-cli-manifest --check types/neo-js.d.ts
 
 # Prove the positive SQLite fixture is load-bearing. Deno types an unknown
 # `scheme:` specifier as `any`, and a checker would otherwise accept the

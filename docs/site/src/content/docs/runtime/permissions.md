@@ -90,16 +90,17 @@ Other built-in modules require no permission flag. The allowlist still applies t
 
 ## Scheduler allowlists
 
-None of the scheduler modules requires a permission flag. An explicit
-allowlist checks each exact name independently:
+The CLI registers `neojs-schedulers`. A custom embedder must register it
+before admitting any of its names. None requires a permission flag. An
+explicit allowlist checks each exact name independently:
 
-| Import specifier            | Rust allowlist entry              |
-| --------------------------- | --------------------------------- |
-| `neo:os/schedulers/systemd` | `RuntimeModule::SchedulerSystemd` |
-| `neo:os/schedulers/windows` | `RuntimeModule::SchedulerWindows` |
-| `neo:scheduler`             | `RuntimeModule::Scheduler`        |
+| Import specifier            | Rust constant                           |
+| --------------------------- | --------------------------------------- |
+| `neo:os/schedulers/systemd` | `neojs_schedulers::SYSTEMD_MODULE_NAME` |
+| `neo:os/schedulers/windows` | `neojs_schedulers::WINDOWS_MODULE_NAME` |
+| `neo:scheduler`             | `neojs_schedulers::LEGACY_MODULE_NAME`  |
 
-Registering or admitting `neo:os` does not admit its scheduler specifiers.
-The schedulers are built into core even when `neojs-os` is absent. The
-deprecated `neo:scheduler` exposes both generators through the legacy name
-only. It does not admit either platform-specific import.
+The schedulers do not depend on `neojs-os`. Registering or admitting
+`neo:os` does not admit any scheduler specifier. The deprecated `neo:scheduler`
+exposes both generators through the legacy name only. It does not admit
+either platform-specific import. See [Embed scheduler generators](/guides/modules/scheduler/#embed-scheduler-generators).

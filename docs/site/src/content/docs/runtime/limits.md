@@ -33,7 +33,8 @@ fallback requires a matching permission and allowlist entry.
 and no environment mutation. Network support is limited to the synchronous
 `neo:fetch.download` call: there is no asynchronous or streaming API, no
 authentication, cookie, proxy, decompression, resume, or content-type support,
-and no SSRF filtering. The scheduler modules generate text only. They do not
+and no SSRF filtering. The optional `neojs-schedulers` extension generates
+text only and installs no global. Its modules do not
 write, install, enable, or run units or tasks, and they do not provide a
 scheduler daemon. They support only [daily and weekly schedules](/guides/modules/scheduler/).
 `neo:semver` follows the Rust `semver` crate: a core component is limited to

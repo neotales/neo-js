@@ -36,13 +36,14 @@ once a deployment URL exists.
 Edit [`types/neo-js.core.d.ts`](../../types/neo-js.core.d.ts) for built-ins
 or the fragment owned by the optional crate:
 [`neojs-os`](../../crates/neojs-os/types/neo-os.d.ts) or
+[`neojs-schedulers`](../../crates/neojs-schedulers/types/neo-schedulers.d.ts) or
 [`neojs-sqlite`](../../crates/neojs-sqlite/types/neo-sqlite.d.ts).
 Do not hand-edit the composed CLI entry. See the
 [composition instructions](../../types/README.md). From the checkout root:
 
 ```sh
 cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- \
-  --with os --with sqlite --check-cli-manifest --output types/neo-js.d.ts
+  --with os --with schedulers --with sqlite --check-cli-manifest --output types/neo-js.d.ts
 pnpm --dir docs/site reference:generate
 pnpm --dir docs/site reference:check
 ```
@@ -70,9 +71,9 @@ declarations when changing exports, and update the probe and
 [host permissions](src/content/docs/runtime/permissions.md) when changing access.
 The runtime supplies `console`, but the declaration file does not declare it.
 
-The CLI probe checks all three scheduler specifiers independently. None
-requires a permission flag. The Rust `runtime_options` integration tests
-check their separate allowlist entries.
+The CLI probe checks all three scheduler specifiers independently. The CLI
+registers `neojs-schedulers`; none of its names requires a permission flag.
+The `neojs-schedulers` crate's `allowlist` tests verify independent admission.
 
 Run `pnpm --dir docs/site reference:test` to exercise the checks against a
 temporary copy of the Rust sources. The copy has its own Cargo target

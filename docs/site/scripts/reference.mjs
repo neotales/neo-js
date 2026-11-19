@@ -151,7 +151,7 @@ async function referencePages() {
 			"API reference",
 			"Globals and TypeScript declarations for the CLI's built-in and registered neo: modules.",
 			[
-				"The module pages reproduce the CLI exports and signatures in `types/neo-js.d.ts`, including types that do not exist at runtime. The CLI composition includes `neojs-os` and `neojs-sqlite`. Core alone does not provide `neo:os`, the `os` global, or `neo:sqlite`. See [declaration selection](/runtime/typescript/#select-declarations).",
+				"The module pages reproduce the CLI exports and signatures in `types/neo-js.d.ts`, including types that do not exist at runtime. The CLI composition includes `neojs-os`, `neojs-schedulers`, and `neojs-sqlite`. Core alone does not provide those modules or the `os` global. See [declaration selection](/runtime/typescript/#select-declarations).",
 				"A declaration does not grant access. See [Host permissions and module access](/runtime/permissions/) for permission flags, conditional exports, and module allowlists.",
 				"## Globals",
 				"[Public host globals](/api/globals/), including `console` and the file-only `URL` constructor.",

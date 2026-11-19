@@ -1424,6 +1424,7 @@ dependencies = [
  "clap",
  "neojs-core",
  "neojs-os",
+ "neojs-schedulers",
  "neojs-sqlite",
  "same-file",
  "serde_json",
@@ -1489,6 +1490,15 @@ dependencies = [
  "serde_json",
  "tempfile",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "neojs-schedulers"
+version = "0.1.0"
+dependencies = [
+ "neojs-core",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

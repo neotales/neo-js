@@ -81,4 +81,6 @@ has the full hook contract and a native `ModuleDef` example. The
 [SQLite guide](/guides/modules/sqlite/#embed-sqlite) shows registration of a
 separately packaged extension that needs a permission grant. The
 [OS metadata guide](/guides/modules/os/#embed-os-metadata) shows `neojs-os`,
-which needs exact registration and allowlist admission but no permission flag.
+which needs registration and exact allowlist admission but no permission flag.
+The [scheduler guide](/guides/modules/scheduler/#embed-scheduler-generators)
+shows one extension with three independently admitted names.

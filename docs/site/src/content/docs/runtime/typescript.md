@@ -10,28 +10,32 @@ TypeScript language server. Its `tsconfig.json` loads the checked-in
 
 ## Select declarations
 
-| Declaration input                           | Use                                                                                                   |
-| ------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `types/neo-js.core.d.ts`                    | A core-only embedder. It omits `neo:os`, `os`, and `neo:sqlite`.                                      |
-| `types/neo-js.d.ts`                         | The CLI build. This generated file combines core and the fragments for `neojs-os` and `neojs-sqlite`. |
-| `crates/neojs-os/types/neo-os.d.ts`         | The `neo:os` and `os` fragment owned by `neojs-os`.                                                   |
-| `crates/neojs-sqlite/types/neo-sqlite.d.ts` | The SQLite fragment owned by the optional crate, not a standalone core declaration file.              |
+| Declaration input                                   | Use                                                                                      |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `types/neo-js.core.d.ts`                            | A core-only embedder. It omits `os` and every optional module.                           |
+| `types/neo-js.d.ts`                                 | The CLI build. This generated file combines core and all three extension fragments.      |
+| `crates/neojs-os/types/neo-os.d.ts`                 | The `neo:os` and `os` fragment owned by `neojs-os`.                                      |
+| `crates/neojs-schedulers/types/neo-schedulers.d.ts` | The two canonical scheduler names and the deprecated `neo:scheduler` alias.              |
+| `crates/neojs-sqlite/types/neo-sqlite.d.ts`         | The SQLite fragment owned by the optional crate, not a standalone core declaration file. |
 
 Choose declarations for the extensions the host links and registers, not for
 the permissions a script receives:
 
-- Neither: use `types/neo-js.core.d.ts`.
-- Only `neojs-os`: compose with `--with os`.
-- Only `neojs-sqlite`: compose with `--with sqlite`.
-- Both: use `types/neo-js.d.ts` or compose with `--with os --with sqlite`.
+- No extensions: use `types/neo-js.core.d.ts`.
+- A custom selection: pass `--with os`, `--with schedulers`, or `--with sqlite`
+  for each extension your host registers. For example, SQLite alone uses
+  `--with sqlite`, and OS metadata alone uses `--with os`.
+- All three, as in the CLI: use `types/neo-js.d.ts` or compose with
+  `--with os --with schedulers --with sqlite`.
 
 The declaration files record module availability in the host build, not permission.
 An import can type-check yet fail at runtime if an extension is not registered,
 the allowlist omits it, or a required permission is missing. `neo:os` needs
-both registration and allowlist admission but no permission flag.
-`neo:sqlite` also needs `Permissions::sqlite`. Neither module nor the `os`
-global is present in the core-only declarations, even when checking a script
-intended for the CLI.
+registration and allowlist admission but no permission flag. The scheduler
+fragment declares all three scheduler names, but a runtime allowlist admits
+each exact name independently. Scheduler imports need no permission flag
+either. `neo:sqlite` also needs `Permissions::sqlite`. Core-only declarations
+omit all five optional module names and the `os` global.
 
 ## Compose and check declarations offline
 
@@ -46,20 +50,23 @@ cargo run --locked --offline -p neojs --target-dir target/docs-reference --examp
 # Print a composition for a host that registers only neojs-os.
 cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- --with os
 
+# Print a composition for a host that registers only neojs-schedulers.
+cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- --with schedulers
+
 # Print a composition for a host that registers only neojs-sqlite.
 cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- --with sqlite
 
 # Print the CLI composition and verify its selection against the manifest.
 cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- \
-  --with os --with sqlite --check-cli-manifest
+  --with os --with schedulers --with sqlite --check-cli-manifest
 
 # Regenerate the checked-in CLI entry.
 cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- \
-  --with os --with sqlite --check-cli-manifest --output types/neo-js.d.ts
+  --with os --with schedulers --with sqlite --check-cli-manifest --output types/neo-js.d.ts
 
 # Verify the CLI entry without writing.
 cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- \
-  --with os --with sqlite --check-cli-manifest --check types/neo-js.d.ts
+  --with os --with schedulers --with sqlite --check-cli-manifest --check types/neo-js.d.ts
 ```
 
 Core is always included. Repeat `--with` to select more fragments. Unknown or

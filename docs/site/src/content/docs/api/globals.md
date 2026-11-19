@@ -28,14 +28,14 @@ The host installs a [file-only `URL` constructor](/guides/modules/path/#file-url
 
 ```ts
 // Generated declarations for the selected compiled modules. Do not edit.
-// Inputs: types/neo-js.core.d.ts, crates/neojs-os/types/neo-os.d.ts, crates/neojs-sqlite/types/neo-sqlite.d.ts
-// Selection: core, os, sqlite
+// Inputs: types/neo-js.core.d.ts, crates/neojs-os/types/neo-os.d.ts, crates/neojs-schedulers/types/neo-schedulers.d.ts, crates/neojs-sqlite/types/neo-sqlite.d.ts
+// Selection: core, os, schedulers, sqlite
 // See types/README.md for the compose-types command.
 
 // Core declarations for neojs-core. Optional modules owned by separate crates
 // are added by composition; see types/README.md. This file deliberately omits
-// `neo:os` and `neo:sqlite`, because neojs-core does not compile or register
-// them.
+// `neo:os`, the scheduler generators, and `neo:sqlite`, because neojs-core
+// does not compile or register them.
 
 /** Available only with --allow-env. */
 declare const env: {

@@ -101,6 +101,12 @@ module name in the allowlist. Core alone provides neither `neo:os` nor `os`.
 The CLI registers the extension, so its module, writable global, and private
 snapshot exports are unchanged. No permission flag is required.
 
+`RuntimeModule::Scheduler`, `RuntimeModule::SchedulerSystemd`, and
+`RuntimeModule::SchedulerWindows` were removed. Register
+[`neojs-schedulers`](/guides/modules/scheduler/#embed-scheduler-generators)
+and replace the variants with its exact module name constants. The CLI
+registers the extension without a permission flag.
+
 Adding `neo:exec.spawn` is
 additive: the module exports one more function, existing `exec` calls and
 permissions are unchanged, and the host installs two additional host
@@ -114,7 +120,8 @@ return `false` and `compare` throw `SEMVER_LIMIT`, where the previous
 implementation had no bound.
 
 The scheduler split grew `RuntimeModule::ALL` from 21 to 23 entries.
-The move of `neo:os` out of core leaves 22 built-in entries.
+Moving `neo:os` out of core left 22 entries. Moving the three scheduler
+specifiers to `neojs-schedulers` leaves 19 built-in entries.
 Iterate with `RuntimeModule::ALL.into_iter()` rather than declaring an array
 with a fixed length. `ModuleAllowlist::all()` admits built-ins only. Use
 `ModuleAllowlist::all_with_extensions(options.extensions())` if you also
@@ -144,9 +151,10 @@ neojs-core = { path = "../neo-js/crates/neo-js" }
 ```
 
 Use `use neojs_core::{NeoJs, Permissions};` in Rust. The extension packages
-are optional dependencies, not renames. Add `neojs-sqlite` for `neo:sqlite`
-or `neojs-os` for `neo:os` and `os`; their import roots are `neojs_sqlite`
-and `neojs_os`. Core does not link either extension.
+are optional dependencies, not renames. Add `neojs-sqlite` for `neo:sqlite`,
+`neojs-os` for `neo:os` and `os`, or `neojs-schedulers` for the scheduler
+generators. Their import roots are `neojs_sqlite`, `neojs_os`, and
+`neojs_schedulers`. Core does not link these extensions.
 
 ```sh
 cargo run -p neojs -- script.js

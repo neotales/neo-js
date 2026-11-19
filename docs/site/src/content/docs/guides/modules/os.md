@@ -77,12 +77,13 @@ built-ins only. To admit all registered extensions as well, use
 `RuntimeOptions::default()` admits registered modules, subject to their
 permissions. It does not register modules on its own.
 
-The [scheduler modules](/guides/modules/scheduler/) remain built into core.
-They do not depend on `neojs-os`, and their exact allowlist entries are separate
-from `neo:os`.
+The [scheduler modules](/guides/modules/scheduler/) come from the separate
+optional `neojs-schedulers` crate. They do not depend on `neojs-os`, and
+their exact allowlist entries are separate from `neo:os`.
 
 Use [the matching declaration composition](/runtime/typescript/#select-declarations)
-for your host. The core-only declarations omit `neo:os` and `os`. The CLI
+for your host. For a host that registers only `neojs-os`, compose with
+`--with os`. Core-only declarations omit `neo:os` and `os`. The CLI
 composition includes both from `crates/neojs-os/types/neo-os.d.ts`.
 
 Declarations: [`neo:os`](/api/modules/os/).

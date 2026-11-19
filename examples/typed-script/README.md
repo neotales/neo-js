@@ -8,14 +8,13 @@ Version** while `main.mts` is open. Try completion on `os.` or hover over
 `stdout.write`. The config lists `../../types/neo-js.d.ts` as an input so the
 editor sees both the ambient globals and the `neo:` modules. That file is the
 generated CLI composition: core declarations plus the optional modules the CLI
-links and registers, currently `neo:os` and `neo:sqlite`. For an embedder,
-match the declaration selection to the extensions the host registers:
-
-- Neither extension: use `../../types/neo-js.core.d.ts`.
-- Only `neojs-os`: compose with `--with os`.
-- Only `neojs-sqlite`: compose with `--with sqlite`.
-- Both extensions: use the existing CLI composition or compose with
-  `--with os --with sqlite`.
+links and registers: `neojs-os`, `neojs-schedulers`, and `neojs-sqlite`.
+For an embedder, match the declaration selection to the extensions the host
+registers. With none, use `../../types/neo-js.core.d.ts`. Otherwise, pass
+`--with os`, `--with schedulers`, or `--with sqlite` for each registered
+extension. For example, a host with only SQLite uses `--with sqlite`.
+Use the CLI composition only for a host that registers all three extensions,
+or generate it with `--with os --with schedulers --with sqlite`.
 
 Do not select declarations based on which runtime permissions a script has.
 The declaration files grant no permissions and do not override an allowlist.

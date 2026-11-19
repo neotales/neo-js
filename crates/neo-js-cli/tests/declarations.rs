@@ -3,8 +3,8 @@
 //! The example command is:
 //!
 //! ```sh
-//! cargo run --offline -p neojs --example compose-types -- --with os --with sqlite \
-//!   --check-cli-manifest --check types/neo-js.d.ts
+//! cargo run --offline -p neojs --example compose-types -- --with os --with schedulers \
+//!   --with sqlite --check-cli-manifest --check types/neo-js.d.ts
 //! ```
 
 #[path = "../src/declarations.rs"]
@@ -63,20 +63,27 @@ fn assert_no_duplicate_modules(source: &str) {
 
 #[test]
 fn checked_in_cli_composition_is_current() {
-    let expected = declarations::compose(&root(), &["os", "sqlite"]).unwrap();
+    let expected = declarations::compose(&root(), &["os", "schedulers", "sqlite"]).unwrap();
     let actual = read("types/neo-js.d.ts");
     assert_eq!(
         actual, expected,
         "types/neo-js.d.ts is stale; regenerate with \
          cargo run --offline -p neojs --example compose-types -- \
-         --with os --with sqlite --check-cli-manifest --output types/neo-js.d.ts"
+         --with os --with schedulers --with sqlite --check-cli-manifest -- \
+         --output types/neo-js.d.ts"
     );
 }
 
 #[test]
 fn core_declarations_omit_optional_modules() {
     let core = read(declarations::CORE_PATH);
-    for name in ["neo:os", "neo:sqlite"] {
+    for name in [
+        "neo:os",
+        "neo:os/schedulers/systemd",
+        "neo:os/schedulers/windows",
+        "neo:scheduler",
+        "neo:sqlite",
+    ] {
         assert!(
             !declared_modules(&core).contains(&name),
             "core declarations must not declare the optional {name} module"
@@ -84,7 +91,13 @@ fn core_declarations_omit_optional_modules() {
     }
 
     let core_only = declarations::compose(&root(), &[]).unwrap();
-    for name in ["neo:os", "neo:sqlite"] {
+    for name in [
+        "neo:os",
+        "neo:os/schedulers/systemd",
+        "neo:os/schedulers/windows",
+        "neo:scheduler",
+        "neo:sqlite",
+    ] {
         assert!(
             !declared_modules(&core_only).contains(&name),
             "a core-only composition must not declare {name}"
@@ -93,6 +106,10 @@ fn core_declarations_omit_optional_modules() {
     assert!(
         !core_only.contains("neo-os.d.ts"),
         "a core-only composition must not name the optional OS fragment"
+    );
+    assert!(
+        !core_only.contains("neo-schedulers.d.ts"),
+        "a core-only composition must not name the optional scheduler fragment"
     );
     assert!(
         !core_only.contains("neo-sqlite.d.ts"),
@@ -141,9 +158,28 @@ fn enabling_os_adds_exactly_one_module_declaration_and_the_global() {
 }
 
 #[test]
+fn enabling_schedulers_adds_the_three_specifiers_once() {
+    let composed = declarations::compose(&root(), &["schedulers"]).unwrap();
+    let modules = declared_modules(&composed);
+    for name in [
+        "neo:os/schedulers/systemd",
+        "neo:os/schedulers/windows",
+        "neo:scheduler",
+    ] {
+        assert_eq!(
+            modules.iter().filter(|module| **module == name).count(),
+            1,
+            "the scheduler selection must declare {name} exactly once"
+        );
+    }
+    assert!(composed.contains("// Selection: core, schedulers\n"));
+    assert_no_duplicate_modules(&composed);
+}
+
+#[test]
 fn composition_is_deterministic_and_offline() {
-    let first = declarations::compose(&root(), &["os", "sqlite"]).unwrap();
-    let second = declarations::compose(&root(), &["os", "sqlite"]).unwrap();
+    let first = declarations::compose(&root(), &["os", "schedulers", "sqlite"]).unwrap();
+    let second = declarations::compose(&root(), &["os", "schedulers", "sqlite"]).unwrap();
     assert_eq!(first, second, "composition must not depend on run order");
     assert!(
         !first.contains(env!("CARGO_MANIFEST_DIR")),
@@ -233,6 +269,7 @@ fn rejects_hard_link_aliases_of_inputs() {
     let inputs = [
         declarations::CORE_PATH,
         "crates/neojs-os/types/neo-os.d.ts",
+        "crates/neojs-schedulers/types/neo-schedulers.d.ts",
         "crates/neojs-sqlite/types/neo-sqlite.d.ts",
         declarations::CLI_MANIFEST_PATH,
     ];
@@ -365,7 +402,10 @@ fn rejects_unknown_and_duplicate_selections() {
         unknown.contains("unknown optional fragment `nope`"),
         "{unknown}"
     );
-    assert!(unknown.contains("available: os, sqlite"), "{unknown}");
+    assert!(
+        unknown.contains("available: os, schedulers, sqlite"),
+        "{unknown}"
+    );
 
     let duplicate = declarations::run(args(&["--with", "sqlite", "--with", "sqlite"])).unwrap_err();
     assert!(
@@ -402,6 +442,7 @@ fn manifest_fixture() -> tempfile::TempDir {
     let dir = workdir();
     fs::create_dir_all(dir.path().join("types")).unwrap();
     fs::create_dir_all(dir.path().join("crates/neojs-os/types")).unwrap();
+    fs::create_dir_all(dir.path().join("crates/neojs-schedulers/types")).unwrap();
     fs::create_dir_all(dir.path().join("crates/neojs-sqlite/types")).unwrap();
     fs::create_dir_all(dir.path().join("crates/neo-js-cli")).unwrap();
     fs::write(
@@ -412,6 +453,14 @@ fn manifest_fixture() -> tempfile::TempDir {
     fs::write(
         dir.path().join("crates/neojs-os/types/neo-os.d.ts"),
         "declare module \"neo:os\" {}\ndeclare const os: { platform: string };\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path()
+            .join("crates/neojs-schedulers/types/neo-schedulers.d.ts"),
+        "declare module \"neo:os/schedulers/systemd\" {}\n\
+         declare module \"neo:os/schedulers/windows\" {}\n\
+         declare module \"neo:scheduler\" {}\n",
     )
     .unwrap();
     fs::write(
@@ -434,6 +483,7 @@ fn run_with_root(root: &Path, extra: &[&str]) -> Result<Option<String>, String> 
 
 const CORE_DEPENDENCY: &str = "[dependencies]\nneojs-core = { path = \"../neo-js\" }\n";
 const OS_DEPENDENCY: &str = "neojs-os = { path = \"../neojs-os\" }\n";
+const SCHEDULERS_DEPENDENCY: &str = "neojs-schedulers = { path = \"../neojs-schedulers\" }\n";
 const SQLITE_DEPENDENCY: &str = "neojs-sqlite = { path = \"../neojs-sqlite\" }\n";
 
 #[test]
@@ -484,6 +534,32 @@ fn manifest_check_covers_the_os_fragment() {
     write_manifest(root, CORE_DEPENDENCY);
     let error = run_with_root(root, &["--with", "os", "--check-cli-manifest"]).unwrap_err();
     assert!(error.contains("does not link `neojs-os`"), "{error}");
+}
+
+#[test]
+fn manifest_check_covers_the_schedulers_fragment() {
+    let dir = manifest_fixture();
+    let root = dir.path();
+
+    write_manifest(root, &format!("{CORE_DEPENDENCY}{SCHEDULERS_DEPENDENCY}"));
+    let error = run_with_root(root, &["--check-cli-manifest"]).unwrap_err();
+    assert!(
+        error.contains("links `neojs-schedulers`")
+            && error.contains("omits `schedulers`")
+            && error.contains("add `--with schedulers`"),
+        "{error}"
+    );
+    assert!(
+        run_with_root(root, &["--with", "schedulers", "--check-cli-manifest"]).is_ok(),
+        "selecting the scheduler fragment matches a manifest that links neojs-schedulers"
+    );
+
+    write_manifest(root, CORE_DEPENDENCY);
+    let error = run_with_root(root, &["--with", "schedulers", "--check-cli-manifest"]).unwrap_err();
+    assert!(
+        error.contains("does not link `neojs-schedulers`"),
+        "{error}"
+    );
 }
 
 #[test]
