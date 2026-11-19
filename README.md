@@ -1280,7 +1280,8 @@ win32.parse("\\\\server\\share\\file");
 
 The frozen namespaces both provide `join`, `normalize`, `basename`, `dirname`,
 `extname`, `isAbsolute`, `parse`, `format`, `common`, `resolve`, `relative`,
-and `toNamespacedPath`. Each function is also available as a host-selected
+`toNamespacedPath`, `toFileUrl`, and `fromFileUrl`, plus the glob helpers
+described below. Each function is also available as a host-selected
 named export. The named constants `SEPARATOR` and `DELIMITER` correspond to
 the selected namespace's `sep` and `delimiter`: `/` and `:` on POSIX, `\`
 and `;` on Windows. `SEPARATOR_PATTERN` is a regular expression matching runs
@@ -1305,6 +1306,66 @@ Empty input follows the conventional dot where a path is required:
 `normalize("")`, `join()` with no non-empty segment, and `dirname("")` are
 `"."`. `basename("")` and `extname("")` are empty, `parse("")` has five empty
 fields, `isAbsolute("")` is false, and `format({})` is empty.
+
+### File URLs
+
+Both helpers are lexical and never use the working directory. `toFileUrl(path)`
+requires an absolute path in the selected dialect and returns a fresh instance
+of the realm's original `URL` class, even if user code replaces `globalThis.URL`.
+`fromFileUrl(url)` accepts a primitive file URL string or an instance with
+that realm's private URL brand, including one created with the original
+`new URL(...)`. A lookalike, a proxy around a URL, or an object from another
+realm is not accepted. There is no type coercion.
+
+```js
+import { posix, win32 } from "neo:path";
+
+const url = posix.toFileUrl("/srv/my file");
+url.href;                                      // "file:///srv/my%20file"
+url instanceof URL;                            // true
+posix.fromFileUrl(url);                         // "/srv/my file"
+win32.toFileUrl("\\\\server\\share\\a").href;    // "file://server/share/a"
+win32.fromFileUrl("file:///C:/logs/a?x#y");      // "C:\\logs\\a"
+```
+
+neo-js installs its **file-only** `URL` class before user code whenever the
+runtime allows `neo:path`, even if the script has not imported it. The
+constructor accepts a primitive string or a same-realm URL and an optional
+file URL base. It supports reading and writing `href`, `host`, `hostname`,
+`pathname`, `search`, and `hash`, and serializing with `toString()` and
+`toJSON()`. `origin` is `"null"`, `protocol` stays `"file:"`, and username,
+password, and port stay empty. Invalid hostname or host assignments leave the
+URL unchanged, except oversize inputs throw. This is not a full WHATWG URL
+implementation: non-file schemes and bases, live `searchParams`,
+`URLSearchParams`, static URL parsing helpers, and object URL APIs are not
+provided. The types export `FileURL` and `FileURLConstructor` without
+redeclaring the DOM or WebWorker global.
+
+Conversion can lose spelling. `toFileUrl` collapses leading POSIX slashes,
+normalizes URL dot segments, canonicalizes UNC hosts, and replaces lone
+surrogates with U+FFFD. File URL pathname parsing and assignment escape `^`
+as `%5E`; the older WHATWG fixtures bundled with `url` 2.5.8 expect a literal
+caret in their pathname encoding examples for other schemes. Windows path
+conversion percent-encodes line breaks in the pathname instead of truncating
+at them as the pinned upstream Windows parser can; UNC hostname parsing
+does not preserve line breaks. If a URL has a remote host and a drive-shaped
+first segment, `win32.fromFileUrl` keeps the separator before it
+(`file://server/C:/` becomes `\\server\C:\`), rather than adjoining it to
+the hostname.
+
+`fromFileUrl` ignores query and fragment; POSIX also ignores the hostname.
+It decodes percent-encoded separators (`%2F`, `%5C`) rather than rejecting
+them, so the decoded result can introduce path components. Malformed percent
+escapes are kept literal; valid escapes with invalid UTF-8 throw `URIError`.
+Invalid inputs (including a relative path, a non-file URL, a literal NUL in
+either helper's string input, or a decoded pathname NUL such as `%00`) throw
+`TypeError`. Input strings and final URL serializations are limited to 65,536
+UTF-16 code units each; the host text passed to canonicalization is limited
+to 8,192 code units. Exceeding these limits throws `RangeError`. These are
+input and serialized output limits, not a working-memory cap: escaping and
+decoding can allocate larger intermediate buffers. The helpers' error
+messages do not echo supplied URLs or paths. Windows syntax is tested on
+Linux; native Windows behavior is unverified.
 
 ### Common prefixes, resolution, and the working directory
 
@@ -1454,9 +1515,9 @@ a fixed point. POSIX `join` is exactly concatenation followed by `normalize`;
 the Windows `join` applies its UNC guard first.
 
 This module is not a drop-in replacement for Node's `path` or
-`@neotales/path`. `toFileUrl` and `fromFileUrl` are not
-implemented. URL inputs, buffers, and type coercion are not accepted. There
-is no POSIX `//` root preservation. For a drive root or a complete UNC root,
+`@neotales/path`. Only `fromFileUrl` accepts URL objects. Buffers and type
+coercion are not accepted. There is no POSIX `//` root preservation. For a
+drive root or a complete UNC root,
 `basename` and the `parse` component fields are empty rather than a separator,
 and Windows `dirname("C:/")` preserves the root as written instead of stripping
 its separator. There is no asynchronous form.
@@ -1493,10 +1554,11 @@ Windows reserved device names, alternate data streams, Unicode confusables, or
 network shares, and it does not check that a result stays inside a directory.
 `normalize("a/../../b")` is `"../b"`; on a real filesystem a symlink can also
 redirect a path that looks contained. Do not use this module to decide
-containment, and do not treat a normalized path as authorized input to a file
-operation. Enforce containment with the operating system after resolving the
-real path and checking the opened object, under the process's existing
-permissions. `neo:fs` and `neo:exec` do not consult this module.
+containment, and do not treat a normalized path or a decoded file URL as
+authorized input to a file operation. Enforce containment with the operating
+system after resolving the real path and checking the opened object, under
+the process's existing permissions. `neo:fs` and `neo:exec` do not consult
+this module.
 
 ## Filesystem
 
@@ -2385,7 +2447,7 @@ instance and is not a sandbox. Windows registry support is limited to the
 synchronous `neo:winregistry` functions described above and exists only on a
 Windows host. `neo:path` is lexical: runtime cwd fallback requires a
 qualifying grant and module allowlist entry. It does not resolve symlinks
-or enforce containment, and has no file-URL helpers. `neo:dotenv`
+or enforce containment, and its URL class only accepts file URLs. `neo:dotenv`
 parses text only: it has no file loader, no expansion,
 and no environment mutation. Network support is limited to the synchronous
 `neo:fetch.download` call: there is no asynchronous or streaming API, no

@@ -38,14 +38,16 @@ Use an already installed `tsc`, or use Deno's bundled checker as a fallback:
 ```sh
 tsc -p examples/typed-script/tsconfig.json
 # Fallback if tsc is not available:
-deno check --cached-only --no-config types/neo-js.d.ts types/schedulers.test.ts \
+deno check --cached-only --no-config types/neo-js.d.ts types/path.test.ts types/schedulers.test.ts \
   examples/typed-script/main.mts examples/typed-script/types.test.mts
 ```
 
 Deno checks the listed inputs with its own defaults, not the `tsconfig.json`
 project. Use it only for checking; run the example with neo-js. The
-`types.test.mts` fixture is not a runnable example: it requires the checker to
-reject invalid types.
+`types.test.mts`, `types/path.test.ts`, and `types/schedulers.test.ts` fixtures
+are checked, not run: they require the checker to reject invalid types. The
+path fixture covers the file-only `FileURL` type without requiring a DOM
+global declaration.
 
 Run `./examples/typed-script/smoke.sh` from a POSIX shell to check the types,
 run the example, and verify the missing permission causes a failure. With `tsc`
