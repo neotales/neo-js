@@ -4,6 +4,7 @@
 use super::*;
 use std::{
     cell::RefCell,
+    panic::panic_any,
     sync::mpsc::{self, Receiver, Sender},
 };
 
@@ -44,7 +45,9 @@ fn gated_job(result: u64) -> (Job, Receiver<thread::ThreadId>, Sender<()>) {
 
 fn execute_gated(job: Job, _: &Cancellation) -> u64 {
     job.started.send(thread::current().id()).unwrap();
-    job.release.recv_timeout(TIMEOUT).unwrap();
+    // The controller owns all deadlines. On controller failure its sender
+    // drops before the pool joins, so the worker cannot strand teardown.
+    let _ = job.release.recv();
     job.result
 }
 
@@ -128,28 +131,50 @@ fn undelivered_completions_hold_pending_and_byte_charges() {
 }
 
 #[test]
-fn worker_panic_completes_the_job_and_keeps_the_worker_available() {
-    fn execute(input: bool, _: &Cancellation) -> bool {
-        assert!(input, "intentional worker panic");
-        input
+fn worker_panic_with_panicking_payload_releases_capacity_and_preserves_worker() {
+    struct PanicOnDrop {
+        _notify: NotifyOnDrop,
     }
 
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            panic!("intentional panic while dropping the caught payload");
+        }
+    }
+
+    fn execute(input: Result<(), NotifyOnDrop>, _: &Cancellation) -> thread::ThreadId {
+        if let Err(dropped) = input {
+            panic_any(PanicOnDrop { _notify: dropped });
+        }
+        thread::current().id()
+    }
+
+    let (dropped, payload_dropped) = mpsc::channel();
     let mut pool = Pool::new(limits(1, 1, 1, 10), execute).unwrap();
-    submit(&mut pool, 1, 10, false);
+    submit(&mut pool, 1, 10, Ok(()));
+    let Some(Completion {
+        outcome: Outcome::Finished(worker),
+        ..
+    }) = pool.receive(TIMEOUT)
+    else {
+        panic!("expected the original worker ID");
+    };
+    submit(&mut pool, 2, 10, Err(NotifyOnDrop(dropped)));
     assert_eq!(pool.reserve(1).err(), Some(AdmitError::Full));
     assert_eq!(
         pool.receive(TIMEOUT),
         Some(Completion {
-            id: 1,
+            id: 2,
             outcome: Outcome::Panicked,
         })
     );
-    submit(&mut pool, 2, 10, true);
+    assert_eq!(payload_dropped.try_recv(), Ok(()));
+    submit(&mut pool, 3, 10, Ok(()));
     assert_eq!(
         pool.receive(TIMEOUT),
         Some(Completion {
-            id: 2,
-            outcome: Outcome::Finished(true),
+            id: 3,
+            outcome: Outcome::Finished(worker),
         })
     );
 }
@@ -164,25 +189,36 @@ impl Drop for NotifyOnDrop {
     }
 }
 
+struct Discarded {
+    _notify: NotifyOnDrop,
+    panic: bool,
+}
+
+impl Drop for Discarded {
+    fn drop(&mut self) {
+        assert!(!self.panic, "intentional panic while discarding a message");
+    }
+}
+
 thread_local! {
     static ON_WORKER_EXIT: RefCell<Option<NotifyOnDrop>> = const { RefCell::new(None) };
 }
 
 enum ShutdownJob {
-    Complete(NotifyOnDrop),
+    Complete(Discarded),
     Running {
         started: Sender<()>,
         queued_dropped: Receiver<()>,
         finished: Sender<bool>,
-        result: NotifyOnDrop,
+        result: Discarded,
         worker_exit: NotifyOnDrop,
     },
     Queued {
-        _discarded: NotifyOnDrop,
+        _discarded: Discarded,
     },
 }
 
-fn execute_shutdown(job: ShutdownJob, cancel: &Cancellation) -> NotifyOnDrop {
+fn execute_shutdown(job: ShutdownJob, cancel: &Cancellation) -> Discarded {
     match job {
         ShutdownJob::Complete(result) => result,
         ShutdownJob::Running {
@@ -204,13 +240,25 @@ fn execute_shutdown(job: ShutdownJob, cancel: &Cancellation) -> NotifyOnDrop {
 
 #[test]
 fn drop_discards_pending_messages_signals_running_work_and_joins() {
-    let mut pool = Pool::new(limits(1, 2, 3, 10), execute_shutdown).unwrap();
+    verify_drop(false);
+}
+
+#[test]
+fn drop_during_unwind_contains_discard_panics_and_joins_running_worker() {
+    verify_drop(true);
+}
+
+fn verify_drop(panicking: bool) {
+    let mut pool = Pool::new(limits(1, 2, 4, 10), execute_shutdown).unwrap();
     let (ready_dropped, ready) = mpsc::channel();
     submit(
         &mut pool,
         1,
         0,
-        ShutdownJob::Complete(NotifyOnDrop(ready_dropped)),
+        ShutdownJob::Complete(Discarded {
+            _notify: NotifyOnDrop(ready_dropped),
+            panic: panicking,
+        }),
     );
     let (started, running) = mpsc::channel();
     let (queued, queued_dropped) = mpsc::channel();
@@ -225,7 +273,10 @@ fn drop_discards_pending_messages_signals_running_work_and_joins() {
             started,
             queued_dropped,
             finished,
-            result: NotifyOnDrop(result_dropped),
+            result: Discarded {
+                _notify: NotifyOnDrop(result_dropped),
+                panic: panicking,
+            },
             worker_exit: NotifyOnDrop(exit),
         },
     );
@@ -235,16 +286,45 @@ fn drop_discards_pending_messages_signals_running_work_and_joins() {
         3,
         0,
         ShutdownJob::Queued {
-            _discarded: NotifyOnDrop(queued),
+            _discarded: Discarded {
+                _notify: NotifyOnDrop(queued),
+                panic: panicking,
+            },
         },
     );
-    drop(pool);
+    // Prove disposal continues after the first queued destructor panics.
+    let (later_dropped, later) = mpsc::channel();
+    submit(
+        &mut pool,
+        4,
+        0,
+        ShutdownJob::Queued {
+            _discarded: Discarded {
+                _notify: NotifyOnDrop(later_dropped),
+                panic: panicking,
+            },
+        },
+    );
+    if panicking {
+        let original = catch_unwind(AssertUnwindSafe(move || {
+            let _pool = pool;
+            panic!("original owner panic");
+        }))
+        .unwrap_err();
+        assert_eq!(
+            original.downcast_ref::<&str>(),
+            Some(&"original owner panic")
+        );
+    } else {
+        drop(pool);
+    }
     // No blocking reads after drop: outputs must already be destroyed and
     // the running worker must have seen the cancellation before returning.
     assert_eq!(ready.try_recv(), Ok(()));
     assert_eq!(cancelled.try_recv(), Ok(true));
     assert_eq!(result.try_recv(), Ok(()));
     assert_eq!(exited.try_recv(), Ok(()));
+    assert_eq!(later.try_recv(), Ok(()));
 }
 
 #[test]

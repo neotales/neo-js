@@ -1,8 +1,16 @@
 //! Private worker foundation. The runtime owner alone admits requests and
 //! consumes completions; workers receive only owned Rust data, never a JS
 //! context, JS values, or promise handles.
+//!
+//! This is for controlled filesystem operations and passive Rust messages,
+//! not arbitrary user-supplied Rust code. Isolated unwinds (including from a
+//! destructor) are contained, but the operation and destructors must not
+//! panic during their own unwind or generate an endless chain of panic
+//! payloads. An abort, including a double panic inside a callback's unwind,
+//! cannot be caught here.
 
 use std::{
+    any::Any,
     collections::VecDeque,
     io,
     num::NonZeroUsize,
@@ -89,6 +97,34 @@ struct Pool<Input, Output> {
     shared: Arc<Shared<Input, Output>>,
     limits: Limits,
     workers: Vec<JoinHandle<()>>,
+}
+
+/// Drop each panic payload under its own catch. A `panic_any` payload can
+/// itself panic on drop; consume the replacement rather than leaking either
+/// payload or letting the destructor unwind through the caller.
+fn discard_panic(mut payload: Box<dyn Any + Send>) {
+    while let Err(next) = catch_unwind(AssertUnwindSafe(|| drop(payload))) {
+        payload = next;
+    }
+}
+
+fn discard<T>(message: T) {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(message))) {
+        discard_panic(payload);
+    }
+}
+
+/// Own joining independently of the code that disposes of messages.
+struct JoinWorkers<'a>(&'a mut Vec<JoinHandle<()>>);
+
+impl Drop for JoinWorkers<'_> {
+    fn drop(&mut self) {
+        for worker in self.0.drain(..) {
+            if let Err(payload) = worker.join() {
+                discard_panic(payload);
+            }
+        }
+    }
 }
 
 /// Exclusive permission to take a snapshot and enqueue one job. Dropping it
@@ -185,6 +221,7 @@ impl<Input, Output> Pool<Input, Output> {
 
     /// Stop admitting jobs, discard queued and undelivered messages, signal
     /// any running operation, and join every worker. This also runs on drop.
+    /// Isolated destructor unwinds are contained so cleanup can continue.
     /// If an OS call is blocked, shutdown waits for it to return; it never
     /// detaches an operation or rolls back side effects.
     fn shutdown(&mut self) {
@@ -200,10 +237,14 @@ impl<Input, Output> Pool<Input, Output> {
                 std::mem::take(&mut state.ready),
             )
         };
-        // Destructors run outside the lock.
-        drop((queued, ready));
-        for worker in self.workers.drain(..) {
-            let _ = worker.join();
+        let _join = JoinWorkers(&mut self.workers);
+        // Dispose of each message separately, outside the lock. A single
+        // catch around a whole queue would drop the rest during unwinding.
+        for request in queued {
+            discard(request);
+        }
+        for completion in ready {
+            discard(completion);
         }
     }
 }
@@ -235,10 +276,15 @@ fn work<Input, Output>(
 
         let outcome = match catch_unwind(AssertUnwindSafe(|| execute(input, &shared.cancelled))) {
             Ok(output) => Outcome::Finished(output),
-            Err(_) => Outcome::Panicked,
+            Err(payload) => {
+                discard_panic(payload);
+                Outcome::Panicked
+            }
         };
         let mut state = shared.state.lock().unwrap();
         if shared.cancelled.requested() {
+            drop(state);
+            discard(outcome);
             return;
         }
         state.ready.push_back((bytes, Completion { id, outcome }));
