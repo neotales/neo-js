@@ -1,4 +1,4 @@
-//! Synchronous Windows Registry access for `neo:winregistry`.
+//! Synchronous Windows Registry access for `neo:win-registry`.
 //!
 //! The API is a set of free functions. Every call opens the key it needs and
 //! drops the handle before returning, so a caller never owns a registry handle
@@ -1292,7 +1292,7 @@ unsafe impl<'js> rquickjs::JsLifetime<'js> for WinRegistryState {
     type Changed<'to> = WinRegistryState;
 }
 
-/// The native `neo:winregistry` module.
+/// The native `neo:win-registry` module.
 pub(crate) struct WinRegistryModule;
 
 const EXPORTS: [&str; 19] = [

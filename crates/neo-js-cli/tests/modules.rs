@@ -93,28 +93,34 @@ console.log([
 fn cli_registry_module_requires_allow_registry() {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("registry.js");
-    std::fs::write(
-        &main,
-        "import { isAvailable } from 'neo:winregistry'; console.log(isAvailable() ? 'true' : 'false');",
-    )
-    .unwrap();
-
-    let denied = Command::new(env!("CARGO_BIN_EXE_neo-js"))
-        .arg(&main)
-        .output()
+    for name in ["neo:win-registry", "neo:winregistry"] {
+        std::fs::write(
+            &main,
+            format!(
+                "import {{ isAvailable }} from '{name}'; console.log(isAvailable() ? 'true' : 'false');"
+            ),
+        )
         .unwrap();
-    assert!(!denied.status.success());
 
-    let allowed = Command::new(env!("CARGO_BIN_EXE_neo-js"))
-        .arg("--allow-registry")
-        .arg(&main)
-        .output()
-        .unwrap();
-    assert!(allowed.status.success(), "{:?}", allowed);
-    #[cfg(windows)]
-    assert_eq!(allowed.stdout, b"true\n");
-    #[cfg(not(windows))]
-    assert_eq!(allowed.stdout, b"false\n");
+        let denied = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+            .arg(&main)
+            .output()
+            .unwrap();
+        assert!(!denied.status.success());
+        assert!(denied.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&denied.stderr).contains(name));
+
+        let allowed = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+            .arg("--allow-registry")
+            .arg(&main)
+            .output()
+            .unwrap();
+        assert!(allowed.status.success(), "{:?}", allowed);
+        #[cfg(windows)]
+        assert_eq!(allowed.stdout, b"true\n");
+        #[cfg(not(windows))]
+        assert_eq!(allowed.stdout, b"false\n");
+    }
 }
 
 #[test]

@@ -74,8 +74,15 @@ pub enum RuntimeModule {
     Test,
     /// `neo:toml` — TOML text parsing.
     Toml,
-    /// `neo:winregistry` — Windows Registry access; also requires
+    /// `neo:win-registry` — Windows Registry access; also requires
     /// [`crate::Permissions::registry`].
+    ///
+    /// Migrate imports and name-based allowlists from the deprecated
+    /// `neo:winregistry` spelling to `neo:win-registry`. Both names identify
+    /// the same module and use this same allowlist entry. No release is
+    /// scheduled to remove the alias. Neither spelling accepts nonempty
+    /// import attributes. The registry functions still close their handles
+    /// before returning; there are no disposable registry key objects.
     WinRegistry,
     /// `neo:yaml` — YAML text parsing.
     Yaml,
@@ -141,12 +148,13 @@ impl RuntimeModule {
             Self::StringBuilder => "neo:string-builder",
             Self::Test => "neo:test",
             Self::Toml => "neo:toml",
-            Self::WinRegistry => "neo:winregistry",
+            Self::WinRegistry => "neo:win-registry",
             Self::Yaml => "neo:yaml",
         }
     }
 
-    /// Parse a canonical `neo:` module name.
+    /// Parse an exact `neo:` module name, including the deprecated
+    /// `neo:winregistry` alias for [`Self::WinRegistry`].
     ///
     /// Matching is exact. A bare name such as `"fs"`, a different case, or any
     /// module this host does not implement returns `None`.
@@ -173,7 +181,7 @@ impl RuntimeModule {
             "neo:string-builder" => Self::StringBuilder,
             "neo:test" => Self::Test,
             "neo:toml" => Self::Toml,
-            "neo:winregistry" => Self::WinRegistry,
+            "neo:win-registry" | "neo:winregistry" => Self::WinRegistry,
             "neo:yaml" => Self::Yaml,
             _ => return None,
         })
@@ -269,7 +277,7 @@ impl ModuleAllowlist {
         }
     }
 
-    /// Build an allowlist from exact canonical `neo:` names.
+    /// Build an allowlist from names accepted by [`RuntimeModule::from_name`].
     ///
     /// Every name is checked. If any name is unknown, the returned error lists
     /// all of them and no allowlist is produced, so a caller can report a typo
@@ -405,8 +413,9 @@ impl RuntimeOptions {
 
     /// Builder form of [`ModuleAllowlist::from_names`].
     ///
-    /// Every name must be a canonical `neo:` name. If any name is unknown, the
-    /// call returns an error and no options; nothing is silently dropped.
+    /// Every name must be accepted by [`RuntimeModule::from_name`]. If any
+    /// name is unknown, the call returns an error and no options; nothing is
+    /// silently dropped.
     pub fn module_names<I, S>(self, names: I) -> Result<Self, UnknownModuleNames>
     where
         I: IntoIterator<Item = S>,

@@ -56,7 +56,7 @@ fn default_runtime_keeps_the_historical_behavior() {
          import 'neo:string-builder';
          import 'neo:test';
          import 'neo:toml';
-         import 'neo:winregistry';
+         import 'neo:win-registry';
          import 'neo:yaml';",
     )
     .unwrap();
@@ -279,7 +279,7 @@ fn allowlisted_modules_still_need_their_permission() {
          import 'neo:fetch';
          import 'neo:fs';
          import 'neo:process';
-         import 'neo:winregistry';
+         import 'neo:win-registry';
          if (typeof fs.readText !== 'function' || typeof env.get !== 'function') throw Error('globals');",
     )
     .unwrap();
@@ -626,34 +626,134 @@ fn neo_os_exports_are_private_snapshot_not_mutable_global_reads() {
 }
 
 #[test]
-fn registry_allowlist_is_independent_of_the_registry_permission() {
-    let denied = runtime(
-        Permissions {
-            registry: true,
-            ..Permissions::default()
-        },
-        &[RuntimeModule::Path],
-    );
-    assert!(
-        denied
-            .run_module("registry-denied.js", "import 'neo:winregistry';")
-            .is_err()
-    );
+fn both_registry_names_require_allowlist_and_permission() {
+    for (registry, modules, denied_by_allowlist) in [
+        (true, &[RuntimeModule::Path], true),
+        (false, &[RuntimeModule::WinRegistry], false),
+    ] {
+        let js = runtime(
+            Permissions {
+                registry,
+                ..Permissions::default()
+            },
+            modules,
+        );
+        for (index, name) in ["neo:win-registry", "neo:winregistry"]
+            .into_iter()
+            .enumerate()
+        {
+            for (case, source) in [
+                format!("import '{name}';"),
+                format!("await import('{name}');"),
+                format!("import '{name}' with {{ type: 'json' }};"),
+                format!("await import('{name}', {{ with: {{ type: 'json' }} }});"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let error = js
+                    .run_module(&format!("registry-denied-{index}-{case}.js"), &source)
+                    .unwrap_err();
+                assert!(error.contains(name), "{error}");
+                assert_eq!(error.contains("allowlist"), denied_by_allowlist, "{error}");
+                assert!(!error.contains("do not support attributes"), "{error}");
+            }
+        }
+    }
+}
 
-    let allowed = runtime(
+#[test]
+fn registry_aliases_share_one_allowlist_entry_and_cached_namespace() {
+    let names = ["neo:win-registry", "neo:winregistry"];
+    let allowlist = ModuleAllowlist::from_names(names).unwrap();
+    assert_eq!(
+        allowlist.iter().collect::<Vec<_>>(),
+        [RuntimeModule::WinRegistry]
+    );
+    assert_eq!(RuntimeModule::WinRegistry.name(), names[0]);
+    for name in names {
+        let js = NeoJs::new_with_options(
+            Permissions {
+                registry: true,
+                ..Permissions::default()
+            },
+            RuntimeOptions::new().module_names([name]).unwrap(),
+        )
+        .unwrap();
+        js.run_module(
+            "registry-first.js",
+            &format!("import * as registry from '{name}'; globalThis.registry = registry;"),
+        )
+        .unwrap();
+        js.run_module(
+            "registry-cached.js",
+            "import * as canonical from 'neo:win-registry';
+             import * as legacy from 'neo:winregistry';
+             if (typeof canonical.isAvailable !== 'function' || canonical.ValueType.DWORD !== 4)
+                 throw Error('missing registry exports');
+             if (canonical !== globalThis.registry || canonical !== legacy ||
+                 canonical !== await import('neo:win-registry') ||
+                 canonical !== await import('neo:winregistry'))
+                 throw Error('registry module identity changed');",
+        )
+        .unwrap();
+        js.run_module(
+            "registry-empty-attributes.ts",
+            "import * as canonical from 'neo:win-registry' with {};
+             import * as legacy from 'neo:winregistry' with {};
+             const cached: typeof canonical = globalThis.registry;
+             if (canonical !== cached || legacy !== cached ||
+                 cached !== await import('neo:win-registry', { with: {} }) ||
+                 cached !== await import('neo:winregistry', { with: {} }))
+                 throw Error('empty registry attributes changed module identity');",
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn both_registry_names_reject_nonempty_import_attributes_before_and_after_caching() {
+    let js = runtime(
         Permissions {
             registry: true,
             ..Permissions::default()
         },
         &[RuntimeModule::WinRegistry],
     );
-    allowed
-        .run_module(
-            "registry-allowed.js",
-            "import {isAvailable, ValueType} from 'neo:winregistry';
-             if (typeof isAvailable !== 'function' || ValueType.DWORD !== 4) throw Error('registry');",
-        )
-        .unwrap();
+    for cached in [false, true] {
+        if cached {
+            js.run_module("registry-cache.js", "import 'neo:win-registry';")
+                .unwrap();
+        }
+        for extension in ["js", "ts"] {
+            for (index, name) in ["neo:win-registry", "neo:winregistry"]
+                .into_iter()
+                .enumerate()
+            {
+                for (case, source) in [
+                    format!("import '{name}' with {{ type: 'json' }};"),
+                    format!("import '{name}' with {{ encoding: 'unsupported' }};"),
+                    format!("await import('{name}', {{ with: {{ type: 'json' }} }});"),
+                    format!("await import('{name}', {{ with: {{ encoding: 'unsupported' }} }});"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let error = js
+                        .run_module(
+                            &format!("registry-attributes-{cached}-{index}-{case}.{extension}"),
+                            &source,
+                        )
+                        .unwrap_err();
+                    assert!(error.contains(name), "{error}");
+                    assert!(
+                        error.contains("Windows Registry imports do not support attributes"),
+                        "{error}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

@@ -2239,7 +2239,9 @@ declare module "neo:fetch" {
 
 /**
  * Synchronous Windows Registry access. Requires `--allow-registry` and is
- * absent without it.
+ * absent without it. Migrate imports from `neo:winregistry` to
+ * `neo:win-registry`; both names refer to the same module. Neither spelling
+ * accepts nonempty import attributes.
  *
  * This API grants full read, write, and delete authority under the current
  * process token. It is not a sandbox: a script can change any key or value the
@@ -2328,7 +2330,7 @@ declare module "neo:fetch" {
  * notification, no key metadata or last-write time, and no remote registry
  * support. A non-Windows host cannot read or write a Windows registry.
  */
-declare module "neo:winregistry" {
+declare module "neo:win-registry" {
   /** A predefined registry root, by short or full name. */
   export type Hive =
     | "HKCR" | "HKCU" | "HKLM" | "HKU" | "HKCC"
@@ -2523,6 +2525,11 @@ declare module "neo:winregistry" {
     name: string,
     data: Uint8Array,
   ): void;
+}
+
+/** @deprecated Import from `neo:win-registry` instead. No release is scheduled to remove this alias. */
+declare module "neo:winregistry" {
+  export * from "neo:win-registry";
 }
 
 declare module "neo:hash" {

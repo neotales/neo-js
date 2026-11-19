@@ -169,7 +169,7 @@ pub struct NeoJs {
     // `neo:semver` keeps every native callback private to its module. It needs
     // no permission and installs nothing on the global object.
     semver: Rc<RefCell<semver::SemverState>>,
-    // `neo:winregistry` also keeps its wrapper private. It has no live native
+    // `neo:win-registry` also keeps its wrapper private. It has no live native
     // state because each call opens and closes its own key handle.
     winregistry: Rc<RefCell<winregistry::WinRegistryState>>,
     // `neo:fetch` keeps its host callback private. The state records whether
@@ -541,7 +541,7 @@ impl NeoJs {
                 semver.borrow_mut().factory = Some(Persistent::save(&ctx, semver_factory));
             }
 
-            // `neo:winregistry` is built the same way, before user code can
+            // `neo:win-registry` is built the same way, before user code can
             // replace JavaScript constructors. The factory is only reachable
             // through the allowlisted and permission-gated module.
             if permissions.registry && allowed.allows(RuntimeModule::WinRegistry) {
@@ -677,7 +677,9 @@ impl NeoJs {
     /// still needs its target and preserves its side effects. Parser and
     /// early semantic errors are reported before any of the module runs. Output
     /// is regenerated from the parsed module, so formatting is not preserved and
-    /// no source map is produced.
+    /// no source map is produced. JavaScript `using` declarations are
+    /// evaluated natively, calling a resource's `Symbol.dispose` method on
+    /// scope exit in both JavaScript and TypeScript modules.
     ///
     /// `.cts`, `.tsx`, `.d.ts`, and `.d.mts` names are rejected with a
     /// `TS_EXTENSION` error. Any other name is evaluated as JavaScript, byte for

@@ -105,7 +105,7 @@ icu_provider = "=2.2.0"
 [target.'cfg(not(unix))'.dependencies]
 same-file = "=1.0.6"
 
-# Windows Registry access for `neo:winregistry`. `windows-sys` 0.61 is the
+# Windows Registry access for `neo:win-registry`. `windows-sys` 0.61 is the
 # maintained Microsoft binding crate, used directly so every query has an
 # explicit, bounded buffer and retry loop. It is target-specific: on a
 # non-Windows host the crate is not built and the module reports unsupported.

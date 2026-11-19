@@ -39,7 +39,7 @@ Use an already installed `tsc`, or use Deno's bundled checker as a fallback:
 tsc -p examples/typed-script/tsconfig.json
 # Fallback if tsc is not available:
 deno check --cached-only --no-config types/neo-js.d.ts types/schedulers.test.ts \
-  examples/typed-script/main.mts examples/typed-script/types.test.mts
+  types/win-registry.test.ts examples/typed-script/main.mts examples/typed-script/types.test.mts
 ```
 
 Deno checks the listed inputs with its own defaults, not the `tsconfig.json`

@@ -1,4 +1,4 @@
-//! Integration tests for `neo:winregistry` that do not touch a real registry.
+//! Integration tests for `neo:win-registry` that do not touch a real registry.
 //!
 //! Permission gating, argument validation, and the non-Windows unsupported
 //! behavior are shared by every host. Windows-only success paths live in
@@ -136,14 +136,11 @@ fn permission_exposes_only_the_documented_surface() {
 #[cfg(not(windows))]
 #[test]
 fn every_operation_reports_unsupported_without_faking_success() {
-    let js = runtime(true);
-    js.run_module(
-        "unsupported.js",
-        r#"import {isAvailable, createKey, keyExists, deleteKey, deleteValue,
+    let source = r#"import {isAvailable, createKey, keyExists, deleteKey, deleteValue,
                  listSubKeys, listValues, readValue, readString, readUint32,
                  readUint64, readBinary, writeString, writeExpandString,
                  writeUint32, writeUint64, writeBinary}
-                 from 'neo:winregistry';
+                 from '__REGISTRY__';
          if (isAvailable() !== false) throw Error('isAvailable lied');
 
          const calls = [
@@ -175,9 +172,12 @@ fn every_operation_reports_unsupported_without_faking_success() {
              if (code !== 'WINREGISTRY_UNSUPPORTED') {
                  throw Error('expected unsupported, got ' + code);
              }
-         }"#,
-    )
-    .unwrap();
+         }"#;
+    for name in ["neo:win-registry", "neo:winregistry"] {
+        runtime(true)
+            .run_module("unsupported.js", &source.replace("__REGISTRY__", name))
+            .unwrap();
+    }
 }
 
 #[test]

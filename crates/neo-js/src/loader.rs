@@ -24,6 +24,7 @@ const CHARS_MODULE: &str = include_str!("js/chars.js");
 const PATH_MODULE: &str = include_str!("js/path.js");
 const STRING_BUILDER_MODULE: &str = include_str!("js/string_builder.js");
 const EXEC_MODULE: &str = include_str!("js/exec.js");
+const REGISTRY_ATTRIBUTES_UNSUPPORTED: &str = "Windows Registry imports do not support attributes";
 
 // Give each scheduler specifier its own export surface, without importing
 // another public specifier or introducing an importable internal module.
@@ -56,6 +57,15 @@ const LEGACY_SCHEDULER_MODULE: &str = scheduler_module!(
     WINDOWS_XML_ENCODING,
     MAX_WINDOWS_COMMAND_LINE,
 );
+
+/// Detect nonempty attributes using the same own enumerable string keys as
+/// QuickJS's module cache. An empty attribute bag matches an absent one.
+fn has_import_attributes(attributes: Option<ImportAttributes<'_>>) -> Result<bool> {
+    let Some(attributes) = attributes else {
+        return Ok(false);
+    };
+    Ok(attributes.keys().next().transpose()?.is_some())
+}
 
 /// Resolves only the modules provided by this host and relative JavaScript or
 /// TypeScript files. A TypeScript file is stripped in [`Loader::load`].
@@ -238,7 +248,7 @@ impl Resolver for ModuleLoader {
         _ctx: &Ctx<'js>,
         base: &str,
         name: &str,
-        _attributes: Option<ImportAttributes<'js>>,
+        attributes: Option<ImportAttributes<'js>>,
     ) -> Result<String> {
         self.formats
             .borrow()
@@ -262,7 +272,17 @@ impl Resolver for ModuleLoader {
             if !self.module_permitted(module) {
                 return Err(Error::new_resolving(base, name));
             }
-            return Ok(name.to_owned());
+            // QuickJS caches by both name and attributes. Reject nonempty
+            // registry attributes before lookup so the alias cannot create
+            // a second instance.
+            if module == RuntimeModule::WinRegistry && has_import_attributes(attributes)? {
+                return Err(Error::new_resolving_message(
+                    base,
+                    name,
+                    REGISTRY_ATTRIBUTES_UNSUPPORTED,
+                ));
+            }
+            return Ok(module.name().to_owned());
         }
         if self.permissions.filesystem && (name.starts_with("./") || name.starts_with("../")) {
             crate::typescript::validate_extension(name)
@@ -307,7 +327,7 @@ impl Loader for ModuleLoader {
         &mut self,
         ctx: &Ctx<'js>,
         name: &str,
-        _attributes: Option<ImportAttributes<'js>>,
+        attributes: Option<ImportAttributes<'js>>,
     ) -> Result<Module<'js, Declared>> {
         // Defense in depth: `resolve` already enforced both gates, but a load
         // call must never reach a module the runtime did not admit.
@@ -320,6 +340,18 @@ impl Loader for ModuleLoader {
             }
             if !self.module_permitted(module) {
                 return Err(Error::new_loading(name));
+            }
+            if module == RuntimeModule::WinRegistry {
+                if has_import_attributes(attributes)? {
+                    return Err(Error::new_loading_message(
+                        name,
+                        REGISTRY_ATTRIBUTES_UNSUPPORTED,
+                    ));
+                }
+                return Module::declare_def::<crate::winregistry::WinRegistryModule, _>(
+                    ctx.clone(),
+                    module.name(),
+                );
             }
         }
         if name == "neo:crypto" {
@@ -351,15 +383,6 @@ impl Loader for ModuleLoader {
                 return Err(Error::new_loading(name));
             }
             return Module::declare_def::<crate::fs::FsModule, _>(ctx.clone(), name);
-        }
-        if name == "neo:winregistry" {
-            if !self.permissions.registry {
-                return Err(Error::new_loading(name));
-            }
-            return Module::declare_def::<crate::winregistry::WinRegistryModule, _>(
-                ctx.clone(),
-                name,
-            );
         }
         if name == "neo:fetch" {
             if !self.permissions.network {
