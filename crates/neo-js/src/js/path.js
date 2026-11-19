@@ -4,8 +4,9 @@
  * The module exports two frozen namespaces, `posix` and `win32`, with the same
  * synchronous functions: `join`, `normalize`, `basename`, `dirname`, `extname`,
  * `isAbsolute`, `parse`, `format`, `common`, `resolve`, `relative`, and
- * `toNamespacedPath`, plus `sep` and `delimiter`. Named exports select
- * `win32` on Windows and `posix` elsewhere, independently of `neo:os`.
+ * `toNamespacedPath`, and the glob helpers, plus `sep` and `delimiter`.
+ * Named exports select `win32` on Windows and `posix` elsewhere,
+ * independently of `neo:os`.
  *
  * These are pure lexical operations. No function reads or writes the
  * filesystem or environment variables; none resolves symlinks, junctions,
@@ -151,7 +152,7 @@
  * module.
  *
  * Deliberately unsupported, compared with Node's `path` and `@neotales/path`:
- * `toFileUrl`, `fromFileUrl`, and the glob helpers. URL
+ * `toFileUrl` and `fromFileUrl`. URL
  * inputs, buffers, and type coercion are not accepted. There is no filesystem
  * or symlink resolution or validation of Windows device paths,
  * no POSIX `//` root preservation, and no asynchronous form. For a path that
@@ -173,9 +174,15 @@
 // The host builds this API in the fresh realm, before running user code.
 const NativeError = Error;
 const NativeTypeError = TypeError;
+const NativeSyntaxError = SyntaxError;
+const NativeRangeError = RangeError;
+const NativeRegExp = RegExp;
+const createNullObject = Object.create;
 const defineProperty = Object.defineProperty;
 const freeze = Object.freeze;
 const isArray = Array.isArray;
+const isSafeInteger = Number.isSafeInteger;
+const charAt = Function.prototype.call.bind(String.prototype.charAt);
 const charCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
 const slice = Function.prototype.call.bind(String.prototype.slice);
 const split = Function.prototype.call.bind(String.prototype.split);
@@ -184,6 +191,8 @@ const indexOf = Function.prototype.call.bind(String.prototype.indexOf);
 const lastIndexOf = Function.prototype.call.bind(String.prototype.lastIndexOf);
 const joinArray = Function.prototype.call.bind(Array.prototype.join);
 const sliceArray = Function.prototype.call.bind(Array.prototype.slice);
+const hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+const regExpExec = Function.prototype.call.bind(RegExp.prototype.exec);
 
 const SLASH = 47;
 const BACKSLASH = 92;
@@ -433,8 +442,10 @@ function readField(pathObject, name) {
 }
 
 function normalizePosix(path) {
-  assertPath(path);
+  return normalizePosixText(assertPath(path));
+}
 
+function normalizePosixText(path) {
   const absolute = path.length > 0 && isPosixSeparator(charCodeAt(path, 0));
   const trailing =
     path.length > 0 && isPosixSeparator(charCodeAt(path, path.length - 1));
@@ -575,8 +586,10 @@ function formatPosix(pathObject) {
 }
 
 function normalizeWin32(path) {
-  assertPath(path);
+  return normalizeWin32Text(assertPath(path));
+}
 
+function normalizeWin32Text(path) {
   const length = path.length;
   let rootEnd = 0;
   let device;
@@ -659,6 +672,10 @@ function joinWin32(...paths) {
     const part = assertPath(paths[i]);
     if (part.length > 0) parts[parts.length] = part;
   }
+  return joinWin32Parts(parts);
+}
+
+function joinWin32Parts(parts) {
   if (parts.length === 0) return '.';
 
   let needsReplace = true;
@@ -906,10 +923,18 @@ function formatWin32(pathObject) {
   return formatPath('\\', pathObject);
 }
 
+/** Read one length from a possibly proxied array, without coercion. */
+function arrayLength(value, name) {
+  if (!isArray(value)) throw new NativeTypeError(name + ' must be an array');
+  const length = value.length;
+  if (!isSafeInteger(length) || length < 0 || length > 0xffffffff)
+    throw new NativeTypeError(name + ' length must be a valid array length');
+  return length;
+}
+
 /** Find the shared spelling at component boundaries, without normalizing. */
 function commonPath(paths, separator) {
-  if (!isArray(paths)) throw new NativeTypeError('paths must be an array');
-  const length = paths.length;
+  const length = arrayLength(paths, 'paths');
   if (length === 0) return '';
   const first = split(assertPath(paths[0]), separator);
   let end = first.length;
@@ -1115,6 +1140,7 @@ function toNamespacedPathWin32(path) {
 }
 
 const posix = freeze({
+  ...globApi(false, normalizePosixText),
   sep: '/',
   delimiter: ':',
   join: joinPosix,
@@ -1132,6 +1158,7 @@ const posix = freeze({
 });
 
 const win32 = freeze({
+  ...globApi(true, normalizeWin32Text),
   sep: '\\',
   delimiter: ';',
   join: joinWin32,
@@ -1150,10 +1177,12 @@ const win32 = freeze({
 
 const native = hostWindows ? win32 : posix;
 const { join, normalize, basename, dirname, extname, isAbsolute, parse, format,
-  common, resolve, relative, toNamespacedPath } = native;
+  common, resolve, relative, toNamespacedPath, isGlob, globToRegExp, normalizeGlob,
+  joinGlobs, match, matchesGlob } = native;
 return {
   posix, win32, join, normalize, basename, dirname, extname, isAbsolute, parse, format,
-  common, resolve, relative, toNamespacedPath,
+  common, resolve, relative, toNamespacedPath, isGlob, globToRegExp, normalizeGlob,
+  joinGlobs, match, matchesGlob,
   SEPARATOR: native.sep,
   DELIMITER: native.delimiter,
   // Public RegExp is intentionally independent of the internal algorithms.

@@ -968,8 +968,8 @@ declare module "neo:ansi" {
  * This fallback is available only in the host dialect and requires admitted
  * `neo:fs` with filesystem permission, or admitted `neo:process` with
  * process or stdio permission. It observes runtime `chdir` and never changes
- * or falls back to the host process's cwd. File-URL and glob helpers are not
- * implemented.
+ * or falls back to the host process's cwd. Glob operations never use cwd.
+ * File-URL helpers are not implemented.
  */
 declare module "neo:path" {
   /** A parsed path; every field is a string. */
@@ -984,6 +984,20 @@ declare module "neo:path" {
     ext: string;
     /** The final component without its extension. */
     name: string;
+  }
+
+  /** Options for compiling a glob. Absent, inherited or undefined fields use defaults. */
+  export interface GlobOptions {
+    /** Enable `?(...)`, `@(...)`, `*(...)`, `+(...)`, and `!(...)`. Default: true. */
+    extended?: boolean;
+    /**
+     * Enable whole-component `**`. Default: true for compilation.
+     * In `normalizeGlob` and `joinGlobs`, preserve `..` directly following
+     * `**` instead; default: false.
+     */
+    globstar?: boolean;
+    /** Use JavaScript's `i` flag. Default: false, including on Windows. */
+    caseInsensitive?: boolean;
   }
 
   /** The shape shared by the `posix` and `win32` namespaces. */
@@ -1092,6 +1106,78 @@ declare module "neo:path" {
      * When resolution is needed, its cwd requirements and errors apply.
      */
     toNamespacedPath(path: string): string;
+
+    /**
+     * Heuristically detect glob-like syntax, using backslash as the escape
+     * in both dialects. A true result does not imply that compilation will
+     * succeed. Rejects non-strings and NUL with `TypeError`; over 4096 UTF-16
+     * code units throws `RangeError` with code `PATH_GLOB_LIMIT`.
+     */
+    isGlob(glob: string): boolean;
+
+    /**
+     * Produce a fresh, whole-string `RegExp`; an empty glob never matches.
+     * Supports `*`, `?` (one UTF-16 code unit except line terminators),
+     * comma-separated braces (not numeric/letter sequences), ranges,
+     * `[!...]`, named classes such as `[[:digit:]]`, and extended groups.
+     * `*`, `?`, classes and groups cannot cross separators. POSIX escapes
+     * with backslash; Windows accepts both separators and escapes with a
+     * backtick. Neither escape can quote a separator. Repeated and trailing
+     * separators are tolerated. `!(x)` tests for a rejected prefix, so
+     * `!(foo).js` also excludes `foobar.js`.
+     * `/` matches separator-only paths, not the empty string. An intermediate
+     * `**` consumes zero or more separator-terminated components; a nullable
+     * suffix such as `{,x}` does not let it consume a final bare component.
+     * Unlike upstream, separators in braces or extglobs are syntax errors.
+     *
+     * Invalid types and NUL throw `TypeError`; invalid syntax throws
+     * `SyntaxError` (`PATH_GLOB_SYNTAX`). Limits on pattern length (4096 code
+     * units), RegExp constructor source (16384 code units), group depth (16),
+     * alternative combinations (64), and variable repetitions (6) throw
+     * `RangeError` (`PATH_GLOB_LIMIT`). `*(...)` and `+(...)` require nonempty
+     * fixed-width alternatives with distinguishable literal prefixes when
+     * there is more than one alternative. Do not use the returned `RegExp`
+     * when either the pattern or subject is untrusted: compilation limits
+     * do not bound regex execution. Only `match` (default options) has an
+     * evaluation work budget. Neither is a security boundary.
+     *
+     * @example
+     * ```ts
+     * import { posix } from "neo:path";
+     * posix.globToRegExp("src/" + "**" + "/*.ts", { caseInsensitive: true })
+     *   .test("src/tools/PATH.TS"); // true
+     * ```
+     */
+    globToRegExp(glob: string, options?: GlobOptions): RegExp;
+
+    /**
+     * Normalize as a lexical path, without parsing its glob syntax. With
+     * `{ globstar: true }`, treat `..` immediately after `**` as literal.
+     * Rejects non-strings and NUL with `TypeError`; over 4096 UTF-16 code
+     * units throws `RangeError` (`PATH_GLOB_LIMIT`).
+     */
+    normalizeGlob(glob: string, options?: Pick<GlobOptions, "globstar">): string;
+
+    /**
+     * Join nonempty parts without modifying the input. An empty result
+     * from filtering the input is `"."`. With `{ globstar: true }`, join
+     * literally and use `normalizeGlob`; otherwise use normal `join` rules.
+     * Reads array length once and does not coerce it. Rejects invalid types,
+     * invalid array lengths, holes and NUL with `TypeError`. More than 256
+     * parts or 4096 joined code units throws `RangeError` (`PATH_GLOB_LIMIT`).
+     */
+    joinGlobs(globs: readonly string[], options?: Pick<GlobOptions, "globstar">): string;
+
+    /**
+     * Match against the default glob grammar with no cwd, I/O, or implicit
+     * normalization. Has the same input and pattern errors as `globToRegExp`;
+     * subjects over 16384 UTF-16 code units or evaluations beyond a fixed
+     * work budget throw `RangeError` (`PATH_GLOB_LIMIT`).
+     */
+    match(path: string, pattern: string): boolean;
+
+    /** Exact alias for {@link PathApi.match}. */
+    matchesGlob(path: string, pattern: string): boolean;
   }
 
   /** POSIX syntax: `/` separator, `:` delimiter. */
@@ -1131,6 +1217,18 @@ declare module "neo:path" {
   export const relative: PathApi<string, string>["relative"];
   /** The host dialect's {@link PathApi.toNamespacedPath}. */
   export const toNamespacedPath: PathApi<string, string>["toNamespacedPath"];
+  /** The host dialect's {@link PathApi.isGlob}. */
+  export const isGlob: PathApi<string, string>["isGlob"];
+  /** The host dialect's {@link PathApi.globToRegExp}. */
+  export const globToRegExp: PathApi<string, string>["globToRegExp"];
+  /** The host dialect's {@link PathApi.normalizeGlob}. */
+  export const normalizeGlob: PathApi<string, string>["normalizeGlob"];
+  /** The host dialect's {@link PathApi.joinGlobs}. */
+  export const joinGlobs: PathApi<string, string>["joinGlobs"];
+  /** The host dialect's {@link PathApi.match}. */
+  export const match: PathApi<string, string>["match"];
+  /** Exact alias for the host dialect's {@link match}. */
+  export const matchesGlob: typeof match;
 }
 
 /**

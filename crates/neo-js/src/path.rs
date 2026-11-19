@@ -14,6 +14,7 @@ use crate::{
 };
 
 const PATH_SOURCE: &str = include_str!("js/path.js");
+const GLOB_SOURCE: &str = include_str!("js/path-glob.js");
 const EXPORTS: &[&str] = &[
     "posix",
     "win32",
@@ -29,6 +30,12 @@ const EXPORTS: &[&str] = &[
     "resolve",
     "relative",
     "toNamespacedPath",
+    "isGlob",
+    "globToRegExp",
+    "joinGlobs",
+    "normalizeGlob",
+    "match",
+    "matchesGlob",
     "SEPARATOR",
     "DELIMITER",
     "SEPARATOR_PATTERN",
@@ -67,7 +74,7 @@ pub(crate) fn api<'js>(
         }
     })?;
     let factory: Function = ctx.eval(format!(
-        "(function (hostWindows, readCwd) {{ 'use strict'; {PATH_SOURCE}\n}})"
+        "(function (hostWindows, readCwd) {{ 'use strict'; {GLOB_SOURCE}\n{PATH_SOURCE}\n}})"
     ))?;
     factory.call((cfg!(windows), read_cwd))
 }
