@@ -10,7 +10,6 @@
 //! cannot be caught here.
 
 use std::{
-    any::Any,
     collections::VecDeque,
     io,
     num::NonZeroUsize,
@@ -22,6 +21,8 @@ use std::{
     thread::{self, JoinHandle},
     time::Duration,
 };
+
+use crate::unwind::{discard, discard_panic};
 
 /// Per-pool limits. Pending counts queued, running and undelivered jobs.
 pub(super) struct Limits {
@@ -97,21 +98,6 @@ pub(super) struct Pool<Input, Output> {
     shared: Arc<Shared<Input, Output>>,
     limits: Limits,
     workers: Vec<JoinHandle<()>>,
-}
-
-/// Drop each panic payload under its own catch. A `panic_any` payload can
-/// itself panic on drop; consume the replacement rather than leaking either
-/// payload or letting the destructor unwind through the caller.
-fn discard_panic(mut payload: Box<dyn Any + Send>) {
-    while let Err(next) = catch_unwind(AssertUnwindSafe(|| drop(payload))) {
-        payload = next;
-    }
-}
-
-fn discard<T>(message: T) {
-    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(message))) {
-        discard_panic(payload);
-    }
 }
 
 /// Own joining independently of the code that disposes of messages.

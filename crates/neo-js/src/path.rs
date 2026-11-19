@@ -60,7 +60,7 @@ unsafe impl<'js> rquickjs::JsLifetime<'js> for PathState {
 pub(crate) fn api<'js>(
     ctx: &Ctx<'js>,
     permissions: Permissions,
-    allowed: AllowedModules,
+    allowed: &AllowedModules,
     cwd: Rc<RefCell<WorkingDirectory>>,
 ) -> Result<Object<'js>> {
     // Requiring a corresponding admitted module prevents `neo:path` from

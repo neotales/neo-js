@@ -112,6 +112,83 @@ preserving `NeoJs::new` behavior. See the
 and [Permissions reference](https://docs.rs/neojs-core/latest/neojs_core/struct.Permissions.html)
 for the Rust API.
 
+### Host extensions
+
+An embedder can register static optional modules without changing neo-js. Each
+extension declares exact `neo:` names, the existing permission that gates each
+module, and optional per-runtime init and teardown hooks. Core still owns the
+runtime, permissions, exact allowlist, module cache, and lifecycle.
+
+```rust
+use std::any::Any;
+
+use neojs_core::{
+    ExtensionDescriptor, ExtensionPermission, NeoJs, Permissions, RuntimeOptions,
+    rquickjs::{Ctx, Module, Result as JsResult, module::Declared},
+};
+
+fn load<'js>(
+    ctx: &Ctx<'js>,
+    _state: &mut dyn Any,
+    name: &str,
+) -> JsResult<Module<'js, Declared>> {
+    Module::declare(ctx.clone(), name, "export const answer = 42;")
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let extension = ExtensionDescriptor::new("demo", load)
+        .with_module("neo:demo", ExtensionPermission::None);
+    let options = RuntimeOptions::new().with_extensions([extension])?;
+    let runtime = NeoJs::new_with_options(Permissions::default(), options)?;
+    runtime.run_module(
+        "main.js",
+        "import {answer} from 'neo:demo'; if (answer !== 42) throw Error('bad answer');",
+    )?;
+    Ok(())
+}
+```
+
+Names are exact and registration rejects duplicate extension ids, duplicate
+module names, names already provided by a built-in module, and malformed names;
+a failed registration adds nothing. A registered module is still denied when an
+explicit allowlist omits its exact name or when its declared permission is not
+granted. The check runs in the resolver before QuickJS consults its module
+cache, so a static import, a dynamic import, and a cache hit all follow the same
+gate.
+
+An extension is initialized once per runtime, in registration order, before
+user code, and only when at least one of its modules passes both gates. Teardown
+runs in reverse order on drop and receives no `Ctx`, so it releases native state
+only and cannot execute JavaScript. If an init hook fails, extensions
+initialized earlier are torn down and runtime construction returns an error; a
+JavaScript exception is captured into an owned message without invoking getters
+or `toString`. If an init hook panics, earlier extensions are still torn down
+and construction returns an error naming the extension and panic payload. If a
+module load fails, only that import fails and the runtime remains usable.
+
+Teardown hook and state-drop panics are contained: every remaining teardown and
+core persistent cleanup still runs. A normal drop resumes the first teardown
+panic after cleanup; if the drop already happens during another unwind,
+teardown panics are swallowed so the original panic continues instead of
+aborting with a double panic. A finite chain of panicking panic-payload
+destructors is consumed without leaking either payload; an intentionally
+endless destructor chain hangs rather than leaking or aborting, the same
+limitation as the filesystem worker. Extension descriptors are `Send + Sync` and hold no QuickJS
+values; per-runtime state is created by the init hook, stays on the runtime
+thread, and is released by teardown. Native extensions should use
+`neojs_core::rquickjs` so their `Ctx`, `Module`, and `Persistent` types match the
+runtime's. See
+[`neojs_core::extension`](https://docs.rs/neojs-core/latest/neojs_core/extension/index.html)
+for the native `ModuleDef` example and the full hook contract.
+
+A built-in name stays reserved while the built-in exists. Moving `neo:sqlite`
+to an external crate therefore requires removing the built-in SQLite variant and
+loader first; until then registration reports a core collision. The external
+crate would register exact name `neo:sqlite` with
+`ExtensionPermission::Sqlite`, keep `rusqlite` with its `bundled`, `hooks`, and
+`limits` features, and create its native state in the init hook. This boundary
+does not claim SQLite is already removable.
+
 `--third-party-notices` prints the third-party copyright and permission notices
 embedded in neo-js and exits. It reads no script and needs no permission flag.
 It is a standalone mode; combining it with a script is an error. The text

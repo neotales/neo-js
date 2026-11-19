@@ -22,6 +22,14 @@
 //! and native callbacks that only those modules use. A module that is allowed
 //! still needs its permission; permission alone never overrides the allowlist.
 //!
+//! Embedders can add static optional modules through
+//! [`ExtensionDescriptor`] and [`RuntimeOptions::with_extensions`]. An
+//! extension declares exact `neo:` names and selects one of the existing
+//! [`Permissions`] gates; core still owns resolution, the module cache,
+//! initialization, and teardown. See the
+//! [extension module documentation](extension) for the hook contract and a
+//! complete native-module example.
+//!
 //! The allowlist is a host-capability boundary, not an OS sandbox. It does not
 //! limit CPU, memory, or the JavaScript language, and a script still shares one
 //! realm with everything the host left in it. `console` is present in every
@@ -48,6 +56,7 @@ mod age;
 mod crypto;
 mod cwd;
 mod dotenv;
+pub mod extension;
 mod fetch;
 mod fs;
 mod hash;
@@ -64,10 +73,22 @@ mod stdio;
 mod sync_callback;
 mod toml;
 mod typescript;
+mod unwind;
 mod winregistry;
 mod yaml;
 
+pub use extension::{
+    ExtensionDescriptor, ExtensionInit, ExtensionLoad, ExtensionModule, ExtensionPermission,
+    ExtensionRegistrationError, ExtensionRegistry, ExtensionTeardown,
+};
 pub use modules::{ModuleAllowlist, RuntimeModule, RuntimeOptions, UnknownModuleNames};
+
+/// The QuickJS binding used by extension hooks.
+///
+/// Native extensions should use these types, not a separately resolved
+/// `rquickjs`, so `Ctx`, `Module`, and `Persistent` are the same types as the
+/// runtime's. This re-export follows neo-js's own rquickjs dependency.
+pub use rquickjs;
 
 use std::{
     cell::RefCell,
@@ -195,6 +216,10 @@ pub struct NeoJs {
     fs: Rc<RefCell<fs::FsState>>,
     reads: fs::ReadDriver,
     module_turns: module_turn::ModuleTurns,
+    // Static descriptors and per-runtime extension state. The registry holds no
+    // JS values; the state is created and dropped on this runtime's thread.
+    extension_registry: Rc<extension::ExtensionRegistry>,
+    extensions: Rc<RefCell<extension::ExtensionRuntime>>,
     #[cfg(test)]
     before_drive: RefCell<Option<Box<dyn FnOnce()>>>,
     path: Rc<RefCell<path::PathState>>,
@@ -224,6 +249,15 @@ struct TestState {
 impl Drop for NeoJs {
     fn drop(&mut self) {
         self.module_turns.clear(&self._runtime);
+        // Extension teardown runs before core persistent values are released,
+        // and in reverse initialization order. Teardown receives no context and
+        // cannot execute JavaScript from Drop. Each hook and state drop is
+        // unwind-contained.
+        let teardown_panic = self
+            .extensions
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut extensions| extensions.teardown_all(&self.extension_registry));
         // Release persistent values while the runtime is still alive.
         // Host closures may keep the surrounding `TestState` alive, but it no
         // longer holds a JS value by the time the runtime is dropped.
@@ -272,6 +306,16 @@ impl Drop for NeoJs {
         // Request termination of direct children still owned by outstanding handles
         // before the context and runtime disappear.
         process::abort_all(&self.exec);
+        // Every remaining teardown and core cleanup has run. A normal drop
+        // resumes the first teardown panic; a drop already unwinding another
+        // panic contains it so the original unwind is not turned into an abort.
+        if let Some(payload) = teardown_panic {
+            if std::thread::panicking() {
+                payload.discard();
+            } else {
+                payload.resume();
+            }
+        }
     }
 }
 
@@ -335,11 +379,34 @@ impl NeoJs {
     /// selection. Process permission lets `neo:exec` launch programs with the
     /// host user's authority, regardless of the other permission flags and module
     /// selections. This runtime is not an OS sandbox.
+    ///
+    /// Registered extensions are initialized once, in registration order,
+    /// before this method returns. A module is initialized only when it is
+    /// admitted by the allowlist and its permission is granted. An init error
+    /// or panic tears down extensions initialized earlier and returns an owned
+    /// error; a pending JavaScript exception is captured without invoking
+    /// getters. Teardown runs on drop without a `Ctx` and its panics are
+    /// contained. See [`crate::extension`] for the full contract.
     pub fn new_with_options(
         permissions: Permissions,
         options: RuntimeOptions,
     ) -> rquickjs::Result<Self> {
+        // An allowlist may name an extension module only when the same options
+        // registered that extension. Check before constructing the runtime so a
+        // mismatched configuration fails closed with a clear error.
+        if let Some(allowlist) = options.allowlist() {
+            for name in allowlist.extension_names() {
+                if !options.extensions().contains_module(name) {
+                    return Err(rquickjs::Error::new_loading_message(
+                        name,
+                        "allowlisted extension module is not registered",
+                    ));
+                }
+            }
+        }
         let allowed = options.allowed_modules();
+        let extension_registry = Rc::new(options.extensions().clone());
+        let extension_runtime = Rc::new(RefCell::new(extension::ExtensionRuntime::new()));
         // Take one private snapshot for the `neo:os` module and the initial
         // global values. The global remains writable for compatibility; module
         // exports never reread it after user code can mutate it.
@@ -358,13 +425,17 @@ impl NeoJs {
                 permissions,
                 formats: Rc::clone(&formats),
                 os_metadata: os_metadata.clone(),
-                allowed,
+                allowed: allowed.clone(),
+                extensions: Rc::clone(&extension_registry),
+                extension_runtime: Rc::clone(&extension_runtime),
             },
             loader::ModuleLoader {
                 permissions,
                 formats: Rc::clone(&formats),
                 os_metadata: os_metadata.clone(),
-                allowed,
+                allowed: allowed.clone(),
+                extensions: Rc::clone(&extension_registry),
+                extension_runtime: Rc::clone(&extension_runtime),
             },
         );
         let context = Context::full(&runtime)?;
@@ -605,7 +676,7 @@ impl NeoJs {
                 stdio.borrow_mut().factory = Some(Persistent::save(&ctx, stdio_factory));
             }
             if allowed.allows(RuntimeModule::Path) {
-                let api = path::api(&ctx, permissions, allowed, Rc::clone(&cwd))?;
+                let api = path::api(&ctx, permissions, &allowed, Rc::clone(&cwd))?;
                 ctx.store_userdata(Rc::clone(&path))
                     .map_err(|_| rquickjs::Error::Unknown)?;
                 path.borrow_mut().api = Some(Persistent::save(&ctx, api));
@@ -613,6 +684,17 @@ impl NeoJs {
             if permissions.sqlite && allowed.allows(RuntimeModule::Sqlite) {
                 sqlite::SqliteState::install(&ctx, &sqlite)?;
             }
+            // Extension init runs after core state exists and before user code.
+            // Keep this last in the fallible construction path: a successful
+            // init is only assigned to the shared runtime below, and any later
+            // error would leave that state without a teardown call.
+            let initialized = extension::ExtensionRuntime::initialize(
+                &ctx,
+                &extension_registry,
+                permissions,
+                &allowed,
+            )?;
+            *extension_runtime.borrow_mut() = initialized;
             Ok(())
         })?;
         module_turns.install(&runtime);
@@ -633,6 +715,8 @@ impl NeoJs {
             fs,
             reads,
             module_turns,
+            extension_registry,
+            extensions: extension_runtime,
             #[cfg(test)]
             before_drive: RefCell::default(),
             path,
