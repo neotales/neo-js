@@ -5,7 +5,7 @@
 //! the size bounds, and an independently generated age fixture; these tests
 //! exercise the JavaScript surface and its error codes.
 
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions};
 
 fn runtime() -> NeoJs {
     NeoJs::new(Permissions::default()).unwrap()

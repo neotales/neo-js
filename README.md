@@ -7,8 +7,10 @@ Built-in `neo:` modules provide utilities and optional access to host resources.
 With Rust 1.87 or later, run a script from the checkout root:
 
 ```sh
-cargo run -p neo-js-cli -- script.js
+cargo run -p neojs -- script.js
 ```
+
+The executable is `neo-js`. Rust embedders use `neojs-core`.
 
 The [documentation site](docs/site/) contains the usage guides, embedding
 instructions, and generated API reference. Review

@@ -7,7 +7,7 @@ description: "Construct a NeoJs instance, select modules, and evaluate source fr
 This example admits `neo:hash` and `neo:fetch` without admitting `neo:fs`:
 
 ```rust
-use neo_js::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
+use neojs_core::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = RuntimeOptions::new().modules([
@@ -30,14 +30,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 The example omits `neo:fs` but grants filesystem permission for the listed
 operations. `RuntimeOptions::default()` leaves the module set unrestricted,
 preserving `NeoJs::new` behavior. See the
-[RuntimeOptions reference](https://docs.rs/neo-js/latest/neo_js/struct.RuntimeOptions.html)
-and [Permissions reference](https://docs.rs/neo-js/latest/neo_js/struct.Permissions.html)
+[RuntimeOptions reference](https://docs.rs/neojs-core/latest/neojs_core/struct.RuntimeOptions.html)
+and [Permissions reference](https://docs.rs/neojs-core/latest/neojs_core/struct.Permissions.html)
 for the Rust API.
+
+To load optional native modules, see [Register a host extension](/runtime/extensions/).
 
 ## Evaluate a module
 
 ```rust
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let runtime = NeoJs::new(Permissions::default())?;
@@ -73,15 +75,27 @@ host modules. An identity already declared as an entry or dependency cannot
 be supplied as a new entry, even if its evaluation failed; this avoids
 conflicting module definitions.
 
+Both module entry APIs block until the managed turn settles or fails. See
+[Managed module evaluation](/runtime/loading/#managed-module-evaluation) for
+the asynchronous read and Promise limits.
+
 ## Compatibility
 
-neo-js is pre-1.0. Adding the `process` field to `Permissions` was a
+neo-js is pre-1.0. See [Rust package migration](#rust-package-migration)
+for the breaking Cargo package and Rust import rename.
+
+Adding the `process` field to `Permissions` was a
 source-breaking change for code that constructed the struct with a complete
 literal. Adding `registry` is the same kind of change, and so is adding
-`network`; adding `stdio` is the same kind of change. Migrate by setting the
+`network`, `stdio`, or `sqlite`. Migrate by setting the
 fields you need and adding `..Permissions::default()`, or by naming every field
-explicitly, including `process`, `stdio`, `registry`, and `network`. CLI users
-opt in with `--allow-net` and `--allow-stdio`. Adding `neo:exec.spawn` is
+explicitly, including `process`, `stdio`, `registry`, `network`, and `sqlite`.
+CLI users opt in with `--allow-net`, `--allow-stdio`, and `--allow-sqlite`.
+`RuntimeModule::Sqlite` was removed. To admit `neo:sqlite`, register the
+[optional SQLite extension](/guides/modules/sqlite/#embed-sqlite) and grant
+`Permissions::sqlite`.
+
+Adding `neo:exec.spawn` is
 additive: the module exports one more function, existing `exec` calls and
 permissions are unchanged, and the host installs two additional host
 callbacks only when `process` is granted. `neo:semver` is additive for its
@@ -95,9 +109,38 @@ implementation had no bound.
 
 The scheduler split grew `RuntimeModule::ALL` from 21 to 23 entries.
 Iterate with `RuntimeModule::ALL.into_iter()` rather than declaring an array
-with a fixed length. Use `ModuleAllowlist::all()` if you intend to admit
-every built-in module. For an explicit scheduler allowlist, see
+with a fixed length. `ModuleAllowlist::all()` admits built-ins only. Use
+`ModuleAllowlist::all_with_extensions(options.extensions())` if you also
+intend to admit registered extensions. For an explicit scheduler allowlist, see
 [the scheduler migration guide](/guides/modules/scheduler/#migrate-from-neoscheduler).
 
 Pre-1.0 releases may make further
 source-breaking changes; no compatibility guarantee is implied.
+
+## Rust package migration
+
+| Before                         | After                                  |
+| ------------------------------ | -------------------------------------- |
+| `neo-js`, imported as `neo_js` | `neojs-core`, imported as `neojs_core` |
+| `neo-js-cli`                   | `neojs`                                |
+
+Change workspace package selectors, dependency keys, and Rust imports. There
+is no old package alias or `neo_js` re-export. The rename alone did not
+change the JavaScript API or the executable name. The CLI's `--help` and
+`--version` still identify `neo-js`.
+
+For a checkout next to your crate:
+
+```toml
+[dependencies]
+neojs-core = { path = "../neo-js/crates/neo-js" }
+```
+
+Use `use neojs_core::{NeoJs, Permissions};` in Rust. Add `neojs-sqlite` only
+if the program registers `neo:sqlite`. It is a separate optional package
+with the import root `neojs_sqlite`; `neojs-core` does not link SQLite.
+
+```sh
+cargo run -p neojs -- script.js
+cargo test -p neojs-core
+```

@@ -22,6 +22,20 @@
 //! and native callbacks that only those modules use. A module that is allowed
 //! still needs its permission; permission alone never overrides the allowlist.
 //!
+//! Embedders can add static optional modules through
+//! [`ExtensionDescriptor`] and [`RuntimeOptions::with_extensions`]. An
+//! extension declares exact `neo:` names and selects one of the existing
+//! [`Permissions`] gates; core still owns resolution, the module cache,
+//! initialization, and teardown. See the
+//! [extension module documentation](extension) for the hook contract and a
+//! complete native-module example.
+//!
+//! Optional modules are not compiled into this crate. In particular, SQLite is
+//! supplied by the separate `neojs-sqlite` package, which registers the exact
+//! `neo:sqlite` name and keeps `rusqlite` out of this crate's dependency graph.
+//! [`Permissions::sqlite`] remains the gate, but it grants nothing unless that
+//! extension is registered.
+//!
 //! The allowlist is a host-capability boundary, not an OS sandbox. It does not
 //! limit CPU, memory, or the JavaScript language, and a script still shares one
 //! realm with everything the host left in it. `console` is present in every
@@ -48,11 +62,13 @@ mod age;
 mod crypto;
 mod cwd;
 mod dotenv;
+pub mod extension;
 mod fetch;
 mod fs;
 mod hash;
 mod js_text;
 mod loader;
+mod module_turn;
 mod modules;
 mod os;
 mod path;
@@ -62,10 +78,22 @@ mod stdio;
 mod sync_callback;
 mod toml;
 mod typescript;
+mod unwind;
 mod winregistry;
 mod yaml;
 
+pub use extension::{
+    ExtensionDescriptor, ExtensionInit, ExtensionLoad, ExtensionModule, ExtensionPermission,
+    ExtensionRegistrationError, ExtensionRegistry, ExtensionTeardown,
+};
 pub use modules::{ModuleAllowlist, RuntimeModule, RuntimeOptions, UnknownModuleNames};
+
+/// The QuickJS binding used by extension hooks.
+///
+/// Native extensions should use these types, not a separately resolved
+/// `rquickjs`, so `Ctx`, `Module`, and `Persistent` are the same types as the
+/// runtime's. This re-export follows neo-js's own rquickjs dependency.
+pub use rquickjs;
 
 use std::{
     cell::RefCell,
@@ -84,13 +112,13 @@ use rquickjs::{Context, Function, Module, Object, Persistent, Runtime, function:
 /// module allowlist".
 ///
 /// This type is not `#[non_exhaustive]`. Before 1.0, adding a field such as
-/// `Permissions::process`, `Permissions::stdio`, `Permissions::registry`, or
-/// `Permissions::network` is a source-breaking change for complete struct
-/// literals. Construct values with `..Permissions::default()` or name every
-/// field explicitly.
+/// `Permissions::process`, `Permissions::stdio`, `Permissions::registry`,
+/// `Permissions::network`, or `Permissions::sqlite` is a source-breaking
+/// change for complete struct literals. Construct values with
+/// `..Permissions::default()` or name every field explicitly.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Permissions {
-    /// Allow synchronous filesystem access through `neo:fs`, plus file reads
+    /// Allow filesystem access through `neo:fs`, plus file reads
     /// by `neo:hash.digestFile` and file writes by `neo:fetch.download`.
     ///
     /// `neo:fs` provides bounded binary and UTF-8 reads and writes, metadata,
@@ -150,6 +178,16 @@ pub struct Permissions {
     /// [`Self::filesystem`]; without it `neo:fetch.download` reports
     /// `FETCH_PERMISSION` before any file or network activity.
     pub network: bool,
+    /// Allow synchronous, private in-memory databases through `neo:sqlite`.
+    ///
+    /// This gates the optional `neo:sqlite` module; core itself does not link
+    /// SQLite. The module is present only when a host registers the
+    /// `neojs-sqlite` extension, and importing it still requires admission by
+    /// an explicit [`ModuleAllowlist`] when one is configured. It opts into the
+    /// host's native SQLite engine, not a sandbox. Use only trusted SQL: there
+    /// is no cap on SQLite's intermediate heap. It grants no file-backed
+    /// database, filesystem, shell or network API.
+    pub sqlite: bool,
 }
 
 /// An isolated QuickJS runtime and its single context.
@@ -184,6 +222,14 @@ pub struct NeoJs {
     // `neo:fs` keeps its native callbacks private. The state holds the pristine
     // export object built in the fresh realm before user code runs.
     fs: Rc<RefCell<fs::FsState>>,
+    reads: fs::ReadDriver,
+    module_turns: module_turn::ModuleTurns,
+    // Static descriptors and per-runtime extension state. The registry holds no
+    // JS values; the state is created and dropped on this runtime's thread.
+    extension_registry: Rc<extension::ExtensionRegistry>,
+    extensions: Rc<RefCell<extension::ExtensionRuntime>>,
+    #[cfg(test)]
+    before_drive: RefCell<Option<Box<dyn FnOnce()>>>,
     path: Rc<RefCell<path::PathState>>,
     // The runtime-local working directory. It is never installed on the host
     // process and is shared only with this runtime's host callbacks.
@@ -210,6 +256,16 @@ struct TestState {
 
 impl Drop for NeoJs {
     fn drop(&mut self) {
+        self.module_turns.clear(&self._runtime);
+        // Extension teardown runs before core persistent values are released,
+        // and in reverse initialization order. Teardown receives no context and
+        // cannot execute JavaScript from Drop. Each hook and state drop is
+        // unwind-contained.
+        let teardown_panic = self
+            .extensions
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut extensions| extensions.teardown_all(&self.extension_registry));
         // Release persistent values while the runtime is still alive.
         // Host closures may keep the surrounding `TestState` alive, but it no
         // longer holds a JS value by the time the runtime is dropped.
@@ -255,6 +311,16 @@ impl Drop for NeoJs {
         // Request termination of direct children still owned by outstanding handles
         // before the context and runtime disappear.
         process::abort_all(&self.exec);
+        // Every remaining teardown and core cleanup has run. A normal drop
+        // resumes the first teardown panic; a drop already unwinding another
+        // panic contains it so the original unwind is not turned into an abort.
+        if let Some(payload) = teardown_panic {
+            if std::thread::panicking() {
+                payload.discard();
+            } else {
+                payload.resume();
+            }
+        }
     }
 }
 
@@ -318,11 +384,34 @@ impl NeoJs {
     /// selection. Process permission lets `neo:exec` launch programs with the
     /// host user's authority, regardless of the other permission flags and module
     /// selections. This runtime is not an OS sandbox.
+    ///
+    /// Registered extensions are initialized once, in registration order,
+    /// before this method returns. A module is initialized only when it is
+    /// admitted by the allowlist and its permission is granted. An init error
+    /// or panic tears down extensions initialized earlier and returns an owned
+    /// error; a pending JavaScript exception is captured without invoking
+    /// getters. Teardown runs on drop without a `Ctx` and its panics are
+    /// contained. See [`crate::extension`] for the full contract.
     pub fn new_with_options(
         permissions: Permissions,
         options: RuntimeOptions,
     ) -> rquickjs::Result<Self> {
+        // An allowlist may name an extension module only when the same options
+        // registered that extension. Check before constructing the runtime so a
+        // mismatched configuration fails closed with a clear error.
+        if let Some(allowlist) = options.allowlist() {
+            for name in allowlist.extension_names() {
+                if !options.extensions().contains_module(name) {
+                    return Err(rquickjs::Error::new_loading_message(
+                        name,
+                        "allowlisted extension module is not registered",
+                    ));
+                }
+            }
+        }
         let allowed = options.allowed_modules();
+        let extension_registry = Rc::new(options.extensions().clone());
+        let extension_runtime = Rc::new(RefCell::new(extension::ExtensionRuntime::new()));
         // Take one private snapshot for the `neo:os` module and the initial
         // global values. The global remains writable for compatibility; module
         // exports never reread it after user code can mutate it.
@@ -332,6 +421,8 @@ impl NeoJs {
             os::Metadata::default()
         };
         let runtime = Runtime::new()?;
+        let module_turns = module_turn::ModuleTurns::new(&runtime)?;
+        let reads = fs::ReadDriver::default();
         let formats = Rc::new(RefCell::new(loader::ModuleFormats::default()));
         let cwd = Rc::new(RefCell::new(cwd::WorkingDirectory::new()));
         runtime.set_loader(
@@ -339,13 +430,17 @@ impl NeoJs {
                 permissions,
                 formats: Rc::clone(&formats),
                 os_metadata: os_metadata.clone(),
-                allowed,
+                allowed: allowed.clone(),
+                extensions: Rc::clone(&extension_registry),
+                extension_runtime: Rc::clone(&extension_runtime),
             },
             loader::ModuleLoader {
                 permissions,
                 formats: Rc::clone(&formats),
                 os_metadata: os_metadata.clone(),
-                allowed,
+                allowed: allowed.clone(),
+                extensions: Rc::clone(&extension_registry),
+                extension_runtime: Rc::clone(&extension_runtime),
             },
         );
         let context = Context::full(&runtime)?;
@@ -480,7 +575,7 @@ impl NeoJs {
                     .map_err(|_| rquickjs::Error::Unknown)?;
                 let fs_factory = fs::factory(&ctx)?;
                 fs.borrow_mut().factory = Some(Persistent::save(&ctx, fs_factory));
-                let fs_api = fs::install(&ctx, &fs)?;
+                let fs_api = fs::install(&ctx, &fs, reads.clone())?;
                 globals.set("fs", fs_api)?;
             }
             // Both admitted modules share a private callback guard created
@@ -585,13 +680,25 @@ impl NeoJs {
                 stdio.borrow_mut().factory = Some(Persistent::save(&ctx, stdio_factory));
             }
             if allowed.allows(RuntimeModule::Path) {
-                let api = path::api(&ctx, permissions, allowed, Rc::clone(&cwd))?;
+                let api = path::api(&ctx, permissions, &allowed, Rc::clone(&cwd))?;
                 ctx.store_userdata(Rc::clone(&path))
                     .map_err(|_| rquickjs::Error::Unknown)?;
                 path.borrow_mut().api = Some(Persistent::save(&ctx, api));
             }
+            // Extension init runs after core state exists and before user code.
+            // Keep this last in the fallible construction path: a successful
+            // init is only assigned to the shared runtime below, and any later
+            // error would leave that state without a teardown call.
+            let initialized = extension::ExtensionRuntime::initialize(
+                &ctx,
+                &extension_registry,
+                permissions,
+                &allowed,
+            )?;
+            *extension_runtime.borrow_mut() = initialized;
             Ok(())
         })?;
+        module_turns.install(&runtime);
         Ok(Self {
             context,
             filesystem: permissions.filesystem,
@@ -606,6 +713,12 @@ impl NeoJs {
             winregistry,
             fetch,
             fs,
+            reads,
+            module_turns,
+            extension_registry,
+            extensions: extension_runtime,
+            #[cfg(test)]
+            before_drive: RefCell::default(),
             path,
             cwd,
             stdio,
@@ -616,6 +729,7 @@ impl NeoJs {
 
     /// Evaluate JavaScript as a script and return its string result.
     pub fn eval(&self, source: &str) -> Result<String, String> {
+        self.module_turns.ensure_usable()?;
         self.context.with(|ctx| {
             ctx.eval::<String, _>(source).map_err(|error| {
                 use rquickjs::CatchResultExt;
@@ -626,6 +740,7 @@ impl NeoJs {
 
     /// Run JavaScript as a script, discarding its result.
     pub fn run(&self, source: &str) -> Result<(), String> {
+        self.module_turns.ensure_usable()?;
         self.context.with(|ctx| {
             ctx.eval::<(), _>(source).map_err(|error| {
                 use rquickjs::CatchResultExt;
@@ -648,8 +763,13 @@ impl NeoJs {
 
     /// Evaluate an ECMAScript module. The name is the base path for relative imports.
     ///
-    /// Relative imports require filesystem permission. This method runs pending
-    /// QuickJS jobs until evaluation settles, but provides no external event loop.
+    /// Relative imports require filesystem permission. This blocking facade
+    /// drives QuickJS jobs and filesystem read completions to quiescence.
+    /// Earlier script or test execution must not leave pending Promises or
+    /// jobs (`NEO_MODULE_DIRTY`). A live unresolved Promise with no remaining
+    /// source of progress reports `NEO_MODULE_STALLED`, even after the entry
+    /// itself has fulfilled. Stalls, driver step exhaustion, and errors with
+    /// unfinished work abandon the runtime; create a new one to continue.
     ///
     /// With filesystem permission, an existing entry name and each relative
     /// dependency are canonicalized using the filesystem, including symlinks.
@@ -701,6 +821,7 @@ impl NeoJs {
     /// `TS_EXTENSION` error. Any other name is evaluated as JavaScript, byte for
     /// byte, so a `.js` file containing type syntax still fails.
     pub fn run_module(&self, name: &str, source: &str) -> Result<(), String> {
+        self.module_turns.ensure_usable()?;
         if name.starts_with("neo:") {
             return Err("neo: module identities are reserved".to_owned());
         }
@@ -739,10 +860,13 @@ impl NeoJs {
         identity: &str,
         source: &str,
     ) -> Result<(), String> {
+        self.module_turns.ensure_usable()?;
         if name.starts_with("neo:") || identity.starts_with("neo:") {
             return Err("neo: module identities are reserved".to_owned());
         }
         self.formats.borrow().ensure_usable()?;
+        self.module_turns
+            .require_idle(&self.context, &self._runtime)?;
         let stripped = typescript::strip_if_typescript(name, source)?;
         let source = stripped.as_deref().unwrap_or(source);
         let base = self.module_base_dir(identity);
@@ -750,18 +874,30 @@ impl NeoJs {
             .formats
             .borrow_mut()
             .reserve_entry(identity, name, base)?;
-        self.context.with(|ctx| {
-            use rquickjs::CatchResultExt;
+        let turn = self.module_turns.begin();
+        let reads = self.reads.begin();
+        let entry = self.context.with(|ctx| {
             let declared = Module::declare(ctx.clone(), identity, source);
             self.formats
                 .borrow_mut()
                 .complete(identity, token, declared.is_ok());
             declared
                 .and_then(|module| module.eval())
-                .and_then(|(_, promise)| promise.finish::<()>())
-                .catch(&ctx)
-                .map_err(|error| error.to_string())
-        })
+                .map(|(_, promise)| {
+                    module_turn::observe_entry(&promise);
+                    Persistent::save(&ctx, promise)
+                })
+                .map_err(|error| module_turn::js_error(&ctx, error))
+        });
+        let result = entry.and_then(|root| {
+            #[cfg(test)]
+            if let Some(before_drive) = self.before_drive.borrow_mut().take() {
+                before_drive();
+            }
+            turn.drive(&self.context, &self._runtime, &reads, root)
+        });
+        turn.finish(&self.context, &self._runtime, &reads, result.is_err());
+        result
     }
 
     /// Run every test registered through `neo:test` and return cumulative counts.
@@ -787,8 +923,11 @@ impl NeoJs {
     /// This does not decide process status. The CLI exits non-zero when
     /// [`TestReport::all_passed`] is false. Returns an error when the runner
     /// raises an exception or its counts are inconsistent; inconsistent state
-    /// is never treated as success.
+    /// is never treated as success. If module evaluation abandoned the
+    /// runtime, returns `NEO_MODULE_ABORTED` without running registered tests
+    /// or any other script code.
     pub fn run_pending_tests(&self) -> Result<Option<TestReport>, String> {
+        self.module_turns.ensure_usable()?;
         let runner = self.tests.borrow().runner.as_ref().cloned();
         let Some(runner) = runner else {
             return Ok(None);
@@ -974,7 +1113,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            js.eval("fs.readText('Cargo.toml').includes('neo-js') ? 'yes' : 'no'")
+            js.eval("fs.readText('Cargo.toml').includes('neojs-core') ? 'yes' : 'no'")
                 .unwrap(),
             "yes"
         );

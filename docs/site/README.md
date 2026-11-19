@@ -15,8 +15,9 @@ pnpm --dir docs/site install --frozen-lockfile --offline
 ASTRO_TELEMETRY_DISABLED=1 pnpm --dir docs/site check
 ```
 
-The reference check runs `cargo build --locked --offline` from this checkout
-and uses the CLI executable Cargo reports. Cargo reuses unchanged outputs in
+The reference check verifies declaration composition and runs
+`cargo build --locked --offline -p neojs --bin neo-js` from this checkout.
+It uses the CLI executable Cargo reports. Cargo reuses unchanged outputs in
 the checkout's `target/docs-reference/` directory. If Cargo cannot build the
 CLI, the check fails without running a cached executable. Populate the Cargo
 and pnpm dependency caches before running the offline checks.
@@ -32,10 +33,14 @@ once a deployment URL exists.
 
 ## Update the API reference
 
-Edit [`types/neo-js.d.ts`](../../types/neo-js.d.ts), then run from the checkout
-root:
+Edit [`types/neo-js.core.d.ts`](../../types/neo-js.core.d.ts) for built-ins
+or the [`neojs-sqlite` fragment](../../crates/neojs-sqlite/types/neo-sqlite.d.ts).
+Do not hand-edit the composed CLI entry. See the
+[composition instructions](../../types/README.md). From the checkout root:
 
 ```sh
+cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- \
+  --with sqlite --check-cli-manifest --output types/neo-js.d.ts
 pnpm --dir docs/site reference:generate
 pnpm --dir docs/site reference:check
 ```
@@ -44,8 +49,10 @@ Commit the changes under [the generated API directory](src/content/docs/api/).
 Do not put other files in that directory. Add examples or longer explanations
 under [the guides directory](src/content/docs/guides/).
 
-The generator checks declaration module names against `RuntimeModule::name()`
-in Rust. The inventory check requires the permission model to match the
+The generator checks core module names against `RuntimeModule::name()` in
+Rust and publishes the CLI composition, including optional modules linked by
+the CLI. `pnpm reference:compose:check` checks that composition without
+rewriting it. The inventory check requires the permission model to match the
 `--allow-*` options listed in the current CLI's `--help`. It then imports each
 module through the CLI with its unrestricted allowlist: once with every flag,
 once with none, and once per flag. The probe runs in a temporary directory with

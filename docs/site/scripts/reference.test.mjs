@@ -19,6 +19,7 @@ async function fixture(t, runtime = false) {
 	}
 	for (const file of [
 		"types/neo-js.d.ts",
+		"types/neo-js.core.d.ts",
 		"crates/neo-js/src/modules.rs",
 		"docs/site/scripts/reference.mjs",
 		"docs/site/scripts/runtime-inventory.mjs",

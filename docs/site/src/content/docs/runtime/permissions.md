@@ -68,11 +68,21 @@ requires `--allow-fs`, because the module writes the destination; without it
 `download` throws `FETCH_PERMISSION` before any file or network activity. Enable `--allow-net` only for scripts
 you trust with the user's network reachability.
 
+`--allow-sqlite` enables [in-process, in-memory SQLite](/guides/modules/sqlite/)
+in the CLI. It is off by default and independent of file, process, and network
+permissions. Use only trusted SQL. An embedder must register the optional
+extension, grant `Permissions::sqlite`, and admit the exact name in any
+explicit allowlist. No grant enables file-backed databases.
+
 ## Conditional exports and globals
 
 `neo:hash` is importable without a permission flag. Without `--allow-fs` the module does not export `digestFile`; `digest` remains available. Without `--allow-net`, `neo:fetch` is not importable. With `--allow-net` but not `--allow-fs`, `neo:fetch` is importable but `download` throws `FETCH_PERMISSION`.
 
-The globals `os`, `env`, and `fs` are present only if the allowlist admits their matching modules. `env` and `fs` also require their corresponding permissions. `os` needs no flag but discloses bounded host OS metadata. `console` always exists. See [Public host globals](/api/globals/) for signatures.
+The globals `os`, `URL`, `env`, and `fs` are present only if the allowlist
+admits `neo:os`, `neo:path`, `neo:env`, and `neo:fs`, respectively. `env` and
+`fs` also require their permission flags. `os` discloses bounded host OS
+metadata. [`URL`](/guides/modules/path/#file-urls) supports file URLs only.
+`console` always exists. See [Public host globals](/api/globals/) for signatures.
 
 Other built-in modules require no permission flag. The allowlist still applies to every module. TypeScript does not check runtime permissions or allowlists.
 

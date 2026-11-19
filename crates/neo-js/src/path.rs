@@ -15,6 +15,7 @@ use crate::{
 
 const PATH_SOURCE: &str = include_str!("js/path.js");
 const GLOB_SOURCE: &str = include_str!("js/path-glob.js");
+const FILE_URL_SOURCE: &str = include_str!("js/path-url.js");
 const EXPORTS: &[&str] = &[
     "posix",
     "win32",
@@ -30,6 +31,8 @@ const EXPORTS: &[&str] = &[
     "resolve",
     "relative",
     "toNamespacedPath",
+    "toFileUrl",
+    "fromFileUrl",
     "isGlob",
     "globToRegExp",
     "joinGlobs",
@@ -53,11 +56,11 @@ unsafe impl<'js> rquickjs::JsLifetime<'js> for PathState {
     type Changed<'to> = Self;
 }
 
-/// Build the API with an unexported callback for runtime-local cwd text.
+/// Build the path API and its realm-local file URL class before user code.
 pub(crate) fn api<'js>(
     ctx: &Ctx<'js>,
     permissions: Permissions,
-    allowed: AllowedModules,
+    allowed: &AllowedModules,
     cwd: Rc<RefCell<WorkingDirectory>>,
 ) -> Result<Object<'js>> {
     // Requiring a corresponding admitted module prevents `neo:path` from
@@ -73,10 +76,19 @@ pub(crate) fn api<'js>(
             Err(_) => Ok(Value::new_null(ctx.clone())),
         }
     })?;
+    // Use only the pure WHATWG host parser, not `Url`'s file path parser,
+    // which loses empty path segments and drops the host before a drive.
+    let parse_host = Function::new(ctx.clone(), |input: String| {
+        if input.len() > 32 * 1024 {
+            return None;
+        }
+        url::Host::parse(&input).ok().map(|host| host.to_string())
+    })?;
     let factory: Function = ctx.eval(format!(
-        "(function (hostWindows, readCwd) {{ 'use strict'; {GLOB_SOURCE}\n{PATH_SOURCE}\n}})"
+        "(function (hostWindows, readCwd, parseFileHost) {{ 'use strict'; \
+         {GLOB_SOURCE}\n{FILE_URL_SOURCE}\n{PATH_SOURCE}\n}})"
     ))?;
-    factory.call((cfg!(windows), read_cwd))
+    factory.call((cfg!(windows), read_cwd, parse_host))
 }
 
 /// The native export boundary; the cwd callback is not a module export.

@@ -48,8 +48,10 @@ Failure semantics:
   global context. A test that throws is recorded and the run continues, so one
   failure cannot hide the others.
 - The CLI exits non-zero when any executed test failed. Tests registered before
-  an uncaught module error still run, and both failures are reported. A runner
-  error or inconsistent host counts is also a failure, never a silent pass.
+  an ordinary module error still run, and both failures are reported. If the
+  module abandoned the runtime, the CLI reports `NEO_MODULE_ABORTED` alongside
+  the module error and runs no tests or queued jobs. A runner error or
+  inconsistent host counts also causes a failure.
 - `run()` is available for a script that wants results immediately. It returns
   this run's counts and throws `TestFailureError` (`code: "NEO_TEST_FAILURES"`)
   after printing. Catching that error does not make the process succeed: the
@@ -112,7 +114,8 @@ Failure semantics:
 
 When embedding the library, call `NeoJs::run_pending_tests()` after evaluating
 the entry module. It returns `None` when `neo:test` was never imported, or a
-cumulative `TestReport`; it does not print beyond what the module writes to
-`console` and does not choose a process exit status.
+cumulative `TestReport` on a usable runtime. An abandoned runtime returns
+`NEO_MODULE_ABORTED` without running tests or pending jobs. The method does
+not print beyond what the module writes to `console` or choose an exit status.
 
 Declarations: [`neo:test`](/api/modules/test/), [`neo:assert`](/api/modules/assert/).

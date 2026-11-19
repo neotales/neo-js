@@ -8,6 +8,79 @@ typed script example at `examples/typed-script/` in VS Code or another
 TypeScript language server. Its `tsconfig.json` loads the checked-in
 `types/neo-js.d.ts` declarations without installing a package.
 
+## Select declarations
+
+| Declaration input                           | Use                                                                                                      |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `types/neo-js.core.d.ts`                    | A core-only embedder. It omits `neo:sqlite` and other optional modules.                                  |
+| `types/neo-js.d.ts`                         | The CLI build. This generated file combines core and the fragments for linked modules, currently SQLite. |
+| `crates/neojs-sqlite/types/neo-sqlite.d.ts` | The SQLite fragment owned by the optional crate, not a standalone core declaration file.                 |
+
+The declaration files record compiled availability, not permission.
+An import can type-check yet fail at runtime if an extension is not registered,
+the allowlist omits it, or permission is missing. The core-only file does not
+declare `neo:sqlite` even on a CLI that could admit it with `--allow-sqlite`.
+
+## Compose and check declarations offline
+
+Run these commands from the checkout root with the Cargo dependencies already
+cached. Select optional fragments explicitly. Use an isolated target directory
+to keep the build outputs separate.
+
+```sh
+# Print the core-only composition.
+cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types
+
+# Print the CLI composition and verify its selection against the manifest.
+cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- \
+  --with sqlite --check-cli-manifest
+
+# Regenerate the checked-in CLI entry.
+cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- \
+  --with sqlite --check-cli-manifest --output types/neo-js.d.ts
+
+# Verify the CLI entry without writing.
+cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- \
+  --with sqlite --check-cli-manifest --check types/neo-js.d.ts
+```
+
+Core is always included. Repeat `--with` to select more fragments. Unknown or
+duplicate selections fail. `--output -` or no output option prints to stdout;
+`--root PATH` selects another checkout. `--check-cli-manifest` verifies the
+explicit selection in both directions. It does not infer selections. It counts
+ordinary runtime dependencies and default-enabled optional dependencies, not
+dev or build dependencies. Target-specific, workspace-inherited, and renamed
+registered dependencies are not resolved. Neither are non-default feature
+sets or workspace feature unification.
+
+The composer refuses to overwrite inputs, including hard-link and symlink
+aliases. It checks file identity before writing and again before atomically
+replacing the output with a same-directory temporary file. It preserves
+existing output permissions and leaves the old output untouched on failure.
+A concurrent directory change after the last check can still redirect the
+replacement. The composer does not truncate an input inode.
+
+With a local TypeScript 5.8 or later:
+
+```sh
+tsc -p examples/typed-script/tsconfig.json
+tsc -p examples/typed-script/tsconfig.json --lib ES2022,ESNext.Disposable,DOM,DOM.Iterable
+tsc -p examples/typed-script/tsconfig.json --lib ES2022,ESNext.Disposable,WebWorker,WebWorker.Iterable
+tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler \
+  --lib ES2022,ESNext.Disposable --skipLibCheck false types/neo-js.d.ts types/sqlite.test.ts
+tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler \
+  --skipLibCheck false types/neo-js.core.d.ts types/sqlite-absent.test.ts
+```
+
+The last command must fail with exactly one `TS2307` for `neo:sqlite`.
+`examples/typed-script/smoke.sh` checks for that failure and checks that the
+positive fixture does not silently treat `neo:sqlite` as `any`. Deno's
+cached-only check can exercise the composed declarations, but Deno treats
+unknown `scheme:` imports as external. Use `tsc` to verify core-only absence.
+The repository's `types/README.md` has the full smoke and composition checks.
+
+## Syntax the loader accepts
+
 A `.ts` or `.mts` entry, and any relative `.ts` or `.mts` import, is stripped
 to JavaScript before QuickJS sees it. Stripping erases type syntax; it does
 not check types and does not compile anything. A `.js` or `.mjs` file is

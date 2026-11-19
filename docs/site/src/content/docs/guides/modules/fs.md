@@ -3,7 +3,7 @@ title: "Filesystem"
 description: "Filesystem calls, symlinks, permissions, and limits."
 ---
 
-`neo:fs` is a synchronous, bounded subset of the usual filesystem API. It is
+`neo:fs` is a bounded subset of the usual filesystem API. It is
 available only with `--allow-fs` and only when the runtime's module allowlist
 admits `neo:fs`. Both gates are checked before the `fs` global or any native
 callback is built. The global `fs` object and the module expose the same
@@ -13,7 +13,8 @@ functions and `FsError` class.
 | --------------------------------- | ---------------------------------------------------------------------- |
 | `readText(path)`                  | Read a regular file as UTF-8 text.                                     |
 | `writeText(path, data)`           | Write text, creating or truncating the file.                           |
-| `readFile(path)`                  | Read a regular file as a `Uint8Array`.                                 |
+| `readFile(path)`                  | Read a regular file on a worker. Returns `Promise<Uint8Array>`.        |
+| `readFileSync(path)`              | Read a regular file as a `Uint8Array`, blocking the JavaScript thread. |
 | `writeFile(path, data, options?)` | Write a `Uint8Array`; `{overwrite: false}` is create-new.              |
 | `copyFile(source, destination)`   | Stream a regular file into a new file; never overwrite.                |
 | `stat(path)`                      | Metadata, following a final symlink.                                   |
@@ -39,14 +40,41 @@ if (entries.some((entry) => entry.name === "README.md")) {
 
 Relative paths use the runtime's working directory, not the host process's
 mutable directory. `neo:process.chdir` changes only that runtime. If the
-runtime directory is unavailable, a relative operation reports `FS_CWD` and
-never falls back to the host directory. Absolute paths and `..` components
+runtime directory is unavailable, `readFile` rejects with `FS_CWD` during a
+managed turn, and synchronous operations such as `readFileSync` throw
+`FS_CWD`. Neither falls back to the host directory. Absolute paths and `..` components
 still reach everything the host user can reach; the working directory is
 coordination, not confinement.
 
+## Migrate binary reads
+
+`readFile` now returns a Promise on both `fs` and `neo:fs`. Rename an existing
+blocking call to `readFileSync`, or use `await readFile(path)` in a module.
+All other filesystem methods remain synchronous. During managed module
+evaluation, invalid arguments and filesystem errors reject the Promise.
+`readFileSync` still throws. Outside a managed turn, `readFile` throws
+`FS_ASYNC_OUTSIDE_TURN` before any I/O. This includes calls from `NeoJs::eval`,
+`NeoJs::run`, and the CLI's automatic `neo:test` runner after the module returns.
+
+Each managed turn accepts at most four outstanding reads, including
+undelivered results. At most two run on workers. Each outstanding read
+charges `MAX_READ_BYTES` plus the encoded byte length of its resolved path
+against a combined budget of `4 * (MAX_READ_BYTES + MAX_PATH_BYTES)`.
+Exceeding the count or byte budget rejects the read with `FS_LIMIT`. This
+accounts for outstanding reads, not total memory use. It does not cover
+buffers that JavaScript retains after delivery.
+
+`readFile` captures the working directory at the call. The Promise resolves
+to a new `Uint8Array`. Concurrent reads have no guaranteed completion order.
+There is no caller cancellation API. On a failed turn with outstanding reads,
+the driver cancels queued reads and stops running reads between chunks where
+possible. Pending reads reject with `FS_CANCELLED`. An OS call already in
+progress can delay teardown. See [Managed module evaluation](/runtime/loading/#managed-module-evaluation)
+for runtime failure and quiescence rules.
+
 ## Files and sizes
 
-`readFile`, `readText`, `writeFile`, and `writeText` require a regular file.
+`readFile`, `readFileSync`, `readText`, `writeFile`, and `writeText` require a regular file.
 An open may occur before a non-regular object is rejected. An identified
 directory reports `FS_IS_DIRECTORY`; other identified non-regular objects
 report `FS_TYPE`. If opening fails before the type can be identified, the
@@ -75,7 +103,7 @@ reported by `lstat`, `size` is the host's symlink size, not the target size.
 
 The rules are explicit:
 
-- `stat`, `readFile`, `readText`, `writeFile`, `writeText`, `exists`, and
+- `stat`, `readFile`, `readFileSync`, `readText`, `writeFile`, `writeText`, `exists`, and
   `readDir` follow a symlink at the final path component.
 - `lstat` does not follow it and reports `isSymlink: true`.
 - `readDir` follows a symlink to a directory but does not follow entries; an
@@ -195,14 +223,14 @@ that guarantee or make the result of an error uncertain.
 
 ## Limits
 
-| Constant               |   Value | Applies to                              |
-| ---------------------- | ------: | --------------------------------------- |
-| `MAX_PATH_BYTES`       |  32 KiB | Every path argument.                    |
-| `MAX_READ_BYTES`       |  64 MiB | `readText`, `readFile`, and `copyFile`. |
-| `MAX_WRITE_BYTES`      |  64 MiB | `writeText` and `writeFile`.            |
-| `MAX_LIST_ENTRIES`     | 100,000 | Entries returned by `readDir`.          |
-| `MAX_LIST_NAME_BYTES`  |   1 KiB | One directory-entry name.               |
-| `MAX_LIST_TOTAL_BYTES` |  16 MiB | Sum of all names returned by `readDir`. |
+| Constant               |   Value | Applies to                                              |
+| ---------------------- | ------: | ------------------------------------------------------- |
+| `MAX_PATH_BYTES`       |  32 KiB | Every path argument.                                    |
+| `MAX_READ_BYTES`       |  64 MiB | `readText`, `readFile`, `readFileSync`, and `copyFile`. |
+| `MAX_WRITE_BYTES`      |  64 MiB | `writeText` and `writeFile`.                            |
+| `MAX_LIST_ENTRIES`     | 100,000 | Entries returned by `readDir`.                          |
+| `MAX_LIST_NAME_BYTES`  |   1 KiB | One directory-entry name.                               |
+| `MAX_LIST_TOTAL_BYTES` |  16 MiB | Sum of all names returned by `readDir`.                 |
 
 Reads inspect the opened descriptor and its metadata before allocating, then
 read in bounded chunks with fallible reservation. A separate one-byte probe
@@ -226,24 +254,26 @@ message that never contains the supplied path, an OS error string, or file
 contents. Argument type errors are `TypeError`, and exceptions thrown by
 option proxy traps can propagate.
 
-| Code                | Meaning                                                                                                                                                                                                              |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `FS_PATH`           | Invalid or unsupported path syntax, including empty paths, embedded NULs, and on Windows, drive-relative paths; also a parsed root, trailing separator, or final `.` or `..` for `remove`, `rename`, and `copyFile`. |
-| `FS_NOT_FOUND`      | The path does not exist (or a parent does not).                                                                                                                                                                      |
-| `FS_NOT_DIRECTORY`  | A path component, or a listed path, is not a directory.                                                                                                                                                              |
-| `FS_IS_DIRECTORY`   | A file operation was given a directory.                                                                                                                                                                              |
-| `FS_ALREADY_EXISTS` | The OS reported an existing path, e.g. for `copyFile`, non-recursive `mkdir`, a write with `{overwrite: false}`, or a `rename` rejected because the destination directory is non-empty.                              |
-| `FS_NOT_EMPTY`      | The OS required an empty directory, e.g. for non-recursive `remove` or some `rename` replacements.                                                                                                                   |
-| `FS_CROSS_DEVICE`   | The OS reported that the rename crossed filesystems.                                                                                                                                                                 |
-| `FS_DENIED`         | The operating system denied access.                                                                                                                                                                                  |
-| `FS_LIMIT`          | A path, read, write, or listing exceeded a documented bound, or a filesystem quota, storage, or fallible allocation resource was unavailable.                                                                        |
-| `FS_ENCODING`       | Text or a directory-entry name is not valid UTF-8.                                                                                                                                                                   |
-| `FS_DETACHED`       | A `Uint8Array` buffer was detached.                                                                                                                                                                                  |
-| `FS_OUT_OF_BOUNDS`  | A `Uint8Array` view is out of bounds after its resizable buffer shrank.                                                                                                                                              |
-| `FS_CWD`            | A relative operation needs an unavailable runtime working directory.                                                                                                                                                 |
-| `FS_TYPE`           | The path is not a regular file.                                                                                                                                                                                      |
-| `FS_UNSUPPORTED`    | The operation or input is unsupported, e.g. direct removal of a Windows directory symlink or writing from a `SharedArrayBuffer` view.                                                                                |
-| `FS_IO`             | Any other filesystem failure.                                                                                                                                                                                        |
+| Code                    | Meaning                                                                                                                                                                                                              |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FS_PATH`               | Invalid or unsupported path syntax, including empty paths, embedded NULs, and on Windows, drive-relative paths; also a parsed root, trailing separator, or final `.` or `..` for `remove`, `rename`, and `copyFile`. |
+| `FS_NOT_FOUND`          | The path does not exist (or a parent does not).                                                                                                                                                                      |
+| `FS_NOT_DIRECTORY`      | A path component, or a listed path, is not a directory.                                                                                                                                                              |
+| `FS_IS_DIRECTORY`       | A file operation was given a directory.                                                                                                                                                                              |
+| `FS_ALREADY_EXISTS`     | The OS reported an existing path, e.g. for `copyFile`, non-recursive `mkdir`, a write with `{overwrite: false}`, or a `rename` rejected because the destination directory is non-empty.                              |
+| `FS_NOT_EMPTY`          | The OS required an empty directory, e.g. for non-recursive `remove` or some `rename` replacements.                                                                                                                   |
+| `FS_CROSS_DEVICE`       | The OS reported that the rename crossed filesystems.                                                                                                                                                                 |
+| `FS_DENIED`             | The operating system denied access.                                                                                                                                                                                  |
+| `FS_LIMIT`              | A path, read, write, or listing exceeded a documented bound, or a filesystem quota, storage, or fallible allocation resource was unavailable.                                                                        |
+| `FS_ENCODING`           | Text or a directory-entry name is not valid UTF-8.                                                                                                                                                                   |
+| `FS_DETACHED`           | A `Uint8Array` buffer was detached.                                                                                                                                                                                  |
+| `FS_OUT_OF_BOUNDS`      | A `Uint8Array` view is out of bounds after its resizable buffer shrank.                                                                                                                                              |
+| `FS_CWD`                | A relative operation needs an unavailable runtime working directory.                                                                                                                                                 |
+| `FS_TYPE`               | The path is not a regular file.                                                                                                                                                                                      |
+| `FS_UNSUPPORTED`        | The operation or input is unsupported, e.g. direct removal of a Windows directory symlink or writing from a `SharedArrayBuffer` view.                                                                                |
+| `FS_ASYNC_OUTSIDE_TURN` | `readFile` was called outside managed module evaluation.                                                                                                                                                             |
+| `FS_CANCELLED`          | An outstanding `readFile` was cancelled after module evaluation failed.                                                                                                                                              |
+| `FS_IO`                 | Any other filesystem failure.                                                                                                                                                                                        |
 
 ## Authority and races
 

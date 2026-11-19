@@ -15,12 +15,13 @@ description: Run a JavaScript or TypeScript entry file with the neo-js CLI.
 3. Run the script:
 
    ```sh
-   cargo run -p neo-js-cli -- script.js
+   cargo run -p neojs -- script.js
    ```
 
    The script prints `1`.
 
-For a `.ts` or `.mts` entry file, pass that filename instead. The CLI strips
+The Cargo package is `neojs`; the executable is `neo-js`. For a `.ts` or
+`.mts` entry file, pass that filename instead. The CLI strips
 types but does not check them. See [TypeScript support](/runtime/typescript/).
 
 ## Grant host access
@@ -29,7 +30,7 @@ The CLI reads the entry file without `--allow-fs`. Other access is opt-in.
 For example, to run a script that imports `neo:fs` and `neo:env`:
 
 ```sh
-cargo run -p neo-js-cli -- --allow-env --allow-fs script.js
+cargo run -p neojs -- --allow-env --allow-fs script.js
 ```
 
 Grant host access only to scripts you trust. See [host permissions](/runtime/permissions/)
@@ -38,10 +39,10 @@ for the full list of flags and what each flag allows.
 ## Read third-party notices
 
 ```sh
-cargo run -p neo-js-cli -- --third-party-notices
+cargo run -p neojs -- --third-party-notices
 ```
 
 This standalone mode reads no script and needs no permission flags. The text
 covers source adapted for `neo:path`. It is not a complete dependency-license
 inventory. The Rust library returns the same text through
-`neo_js::third_party_notices()` without constructing a runtime.
+`neojs_core::third_party_notices()` without constructing a runtime.

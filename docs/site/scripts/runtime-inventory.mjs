@@ -14,6 +14,7 @@ const permissions = {
 	"neo:fetch": ["--allow-net"],
 	"neo:fs": ["--allow-fs"],
 	"neo:process": ["--allow-run", "--allow-stdio"],
+	"neo:sqlite": ["--allow-sqlite"],
 	"neo:winregistry": ["--allow-registry"],
 	// Separate imports under the CLI's unrestricted allowlist; none needs a flag.
 	"neo:os/schedulers/systemd": [],
@@ -32,7 +33,7 @@ function buildCli() {
 		"--manifest-path",
 		"Cargo.toml",
 		"--package",
-		"neo-js-cli",
+		"neojs",
 		"--bin",
 		"neo-js",
 		"--target-dir",
@@ -47,7 +48,7 @@ function buildCli() {
 	});
 	if (child.error || child.status !== 0) {
 		throw new Error(
-			`Could not build the current neo-js checkout offline (${child.error?.code ?? child.signal ?? `exit ${child.status}`}). Run cargo build --locked --offline -p neo-js-cli --bin neo-js --target-dir target/docs-reference from the checkout root for details.`,
+			`Could not build the current neo-js checkout offline (${child.error?.code ?? child.signal ?? `exit ${child.status}`}). Run cargo build --locked --offline -p neojs --bin neo-js --target-dir target/docs-reference from the checkout root for details.`,
 		);
 	}
 	const executables = child.stdout
@@ -139,6 +140,7 @@ function hasValueExport(module, exported, checker, seen = new Set()) {
 function declaredInventory() {
 	const program = ts.createProgram([declarations], {
 		types: [],
+		lib: ["lib.es2022.d.ts", "lib.esnext.disposable.d.ts"],
 		target: ts.ScriptTarget.ES2022,
 		noEmit: true,
 	});

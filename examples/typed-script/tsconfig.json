@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022"],
+    "lib": ["ES2022", "ESNext.Disposable"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "strict": true,
@@ -12,6 +12,10 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true
   },
-  "files": ["../../types/neo-js.d.ts", "../../types/schedulers.test.ts"],
+  "files": [
+    "../../types/neo-js.d.ts",
+    "../../types/path.test.ts",
+    "../../types/schedulers.test.ts"
+  ],
   "include": ["**/*.ts", "**/*.mts"]
 }

@@ -1,0 +1,67 @@
+// Type fragment owned by neojs-sqlite. The CLI composition includes it because
+// the CLI links this crate. Declaring `neo:sqlite` records compiled
+// availability; it does not grant `Permissions::sqlite` or admit the module
+// through a runtime allowlist. types/neo-js.core.d.ts omits this module.
+
+/** Synchronous SQLite for private in-memory databases. Requires the host's SQLite grant. */
+declare module "neo:sqlite" {
+  /** SQLite NULL, INTEGER (signed 64-bit), REAL, UTF-8 TEXT, or an owned BLOB snapshot. */
+  export type SqliteValue = null | bigint | number | string | Uint8Array;
+
+  /** Stable SQLite failure codes; match on these rather than error messages. */
+  export type SqliteErrorCode =
+    | "SQLITE_ARGUMENT"
+    | "SQLITE_ENCODING"
+    | "SQLITE_LIMIT"
+    | "SQLITE_WORK_LIMIT"
+    | "SQLITE_DENIED"
+    | "SQLITE_CLOSED"
+    | "SQLITE_CONSTRAINT"
+    | "SQLITE_SQL"
+    | "SQLITE_OPEN";
+
+  /** Operational error with no generated stack or SQL, paths, or bound values in its message. */
+  export interface SqliteError extends Error {
+    readonly code: SqliteErrorCode;
+  }
+
+  /** An owned, private database. Use `using` or call `close()` to release it. */
+  export interface Database {
+    /**
+     * Run one statement without result columns. Return the number of SQLite
+     * row changes (including foreign-key actions), as a bigint.
+     * Parameters are own data elements of a dense array bound to anonymous `?`
+     * in order. Numbers must be finite and bind as REAL; bigints bind as
+     * signed 64-bit INTEGER. Strings must be well-formed Unicode; Uint8Array
+     * arguments are copied and require attached, fixed-length non-shared buffers.
+     * Savepoints are not supported. Foreign-key cascade depth is limited to eight.
+     * SQLite's normal conflict and rollback semantics apply on failure.
+     * @throws SqliteError for invalid, denied, failed, oversized or interrupted work.
+     */
+    execute(sql: string, parameters?: readonly SqliteValue[]): bigint;
+
+    /**
+     * Run one read-only statement with result columns, using the same bindings
+     * as `execute`. Return independent rows in result-column order, without
+     * column names. Row order is only guaranteed by SQL `ORDER BY`. All BLOBs
+     * are owned copies. A limit failure returns no partial result.
+     * @throws SqliteError for invalid, denied, failed, oversized or interrupted work.
+     */
+    query(sql: string, parameters?: readonly SqliteValue[]): SqliteValue[][];
+
+    /** Roll back any open transaction and discard the database. Repeat calls do nothing. */
+    close(): void;
+
+    /** Same as `close()`; called when JavaScript `using` leaves its scope. */
+    [Symbol.dispose](): void;
+  }
+
+  /**
+   * Open a new private database with no filename, URI, or attachment support.
+   * Requires `--allow-sqlite` or `Permissions::sqlite`, and admission by any
+   * explicit module allowlist. Synchronous and in-process. Use only trusted
+   * SQL: there is no SQLite intermediate-heap cap or hard execution deadline.
+   * @throws SqliteError if initialization fails or the live-handle limit is reached.
+   */
+  export function openMemory(): Database;
+}

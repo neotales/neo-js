@@ -5,7 +5,7 @@
 //! static, dynamic, and repeated imports, and disabled host modules cannot be
 //! reached through the globals or native callbacks that only they use.
 
-use neo_js::{ModuleAllowlist, NeoJs, Permissions, RuntimeModule, RuntimeOptions};
+use neojs_core::{ModuleAllowlist, NeoJs, Permissions, RuntimeModule, RuntimeOptions};
 
 /// Every permission, so a test can separate "allowlisted" from "permitted".
 fn everything() -> Permissions {
@@ -16,6 +16,7 @@ fn everything() -> Permissions {
         process: true,
         registry: true,
         network: true,
+        sqlite: true,
     }
 }
 
@@ -347,7 +348,7 @@ fn hash_file_is_part_of_hash_not_fs() {
         .run_module(
             "fs-only.js",
             "import {readText} from 'neo:fs';
-             if (!readText('Cargo.toml').includes('neo-js')) throw Error('fs');
+             if (!readText('Cargo.toml').includes('neojs-core')) throw Error('fs');
              if (typeof __neoHashFile !== 'undefined') throw Error('hash callback leaked');",
         )
         .unwrap();

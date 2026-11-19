@@ -7,7 +7,7 @@ description: "Public globals added by the neo-js host."
 
 This page lists the public globals added by neo-js, not QuickJS built-ins or private host callbacks.
 
-The host always installs `console`. `os` requires that the allowlist admit `neo:os`, but needs no permission flag. `env` requires `--allow-env` and admission of `neo:env`. `fs` requires `--allow-fs` and admission of `neo:fs`. See [host permissions and module access](/runtime/permissions/).
+The host always installs `console`. `os` and `URL` require that the allowlist admit `neo:os` and `neo:path`, respectively, but need no permission flag. `env` requires `--allow-env` and admission of `neo:env`. `fs` requires `--allow-fs` and admission of `neo:fs`. See [host permissions and module access](/runtime/permissions/).
 
 ## console
 
@@ -20,9 +20,22 @@ declare const console: {
 };
 ```
 
+## URL
+
+The host installs a [file-only `URL` constructor](/guides/modules/path/#file-urls). The declaration file describes it as [`FileURLConstructor`](/api/modules/path/#fileurlconstructor) without redeclaring the DOM or WebWorker global.
+
 ## os
 
 ```ts
+// Generated declarations for the selected compiled modules. Do not edit.
+// Inputs: types/neo-js.core.d.ts, crates/neojs-sqlite/types/neo-sqlite.d.ts
+// Selection: core, sqlite
+// See types/README.md for the compose-types command.
+
+// Core declarations for neojs-core. Optional modules owned by separate crates
+// are added by composition; see types/README.md. This file deliberately omits
+// `neo:sqlite`, because neojs-core does not compile or register it.
+
 /**
  * Host OS information. `platform` and `arch` identify the Rust compilation
  * target, not necessarily a separately detected host. Optional fields follow
@@ -58,7 +71,7 @@ declare const env: {
 /**
  * The `neo:fs` API. Available only with `--allow-fs` and when the runtime's
  * module allowlist admits `neo:fs`. Relative paths use the runtime's working
- * directory, not the host process's. Every call is synchronous and blocking.
+ * directory, not the host process's. Only `readFile` is asynchronous.
  *
  * This is not a sandbox: a script with this object has the host user's
  * filesystem authority. Reads and writes are bounded; see the `neo:fs`
@@ -68,7 +81,14 @@ declare const fs: {
   readText(path: string): string;
   /** Same text validation and error precedence as `neo:fs.writeText`. */
   writeText(path: string, data: string): void;
-  readFile(path: string): Uint8Array;
+  /**
+   * Read bytes during managed module evaluation. Outside it, this throws
+   * `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. At most four reads are
+   * outstanding and two can run on workers. There is no caller cancellation
+   * API; teardown cancels cooperatively and may wait for an OS call.
+   */
+  readFile(path: string): Promise<Uint8Array>;
+  readFileSync(path: string): Uint8Array;
   writeFile(
     path: string,
     data: Uint8Array,

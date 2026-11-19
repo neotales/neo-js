@@ -4,7 +4,8 @@
  * The module exports two frozen namespaces, `posix` and `win32`, with the same
  * synchronous functions: `join`, `normalize`, `basename`, `dirname`, `extname`,
  * `isAbsolute`, `parse`, `format`, `common`, `resolve`, `relative`, and
- * `toNamespacedPath`, and the glob helpers, plus `sep` and `delimiter`.
+ * `toNamespacedPath`, the file URL helpers, and the glob helpers, plus `sep`
+ * and `delimiter`.
  * Named exports select `win32` on Windows and `posix` elsewhere,
  * independently of `neo:os`.
  *
@@ -15,7 +16,8 @@
  * compares components case-insensitively. No Unicode normalization occurs. A path is a
  * sequence of UTF-16 code units, and every code unit except the separators and
  * dots described below is opaque. Unpaired surrogates are preserved, not
- * rejected or repaired. A NUL (U+0000) in any argument throws `TypeError`: a
+ * rejected or repaired, except by file URL conversion (which uses USVString
+ * semantics). A NUL (U+0000) in any path argument throws `TypeError`: a
  * NUL terminates C paths and cannot appear in a usable path, so returning a
  * lexical result containing one would look usable when it is not.
  *
@@ -1139,6 +1141,8 @@ function toNamespacedPathWin32(path) {
   return '\\\\?\\' + resolved;
 }
 
+const fileUrls = fileUrlApi(parseFileHost);
+
 const posix = freeze({
   ...globApi(false, normalizePosixText),
   sep: '/',
@@ -1155,6 +1159,8 @@ const posix = freeze({
   resolve: resolvePosix,
   relative: relativePosix,
   toNamespacedPath: assertPath,
+  toFileUrl: (path) => fileUrls.toFileUrl(path, false, isAbsolutePosix),
+  fromFileUrl: (url) => fileUrls.fromFileUrl(url, false),
 });
 
 const win32 = freeze({
@@ -1173,15 +1179,17 @@ const win32 = freeze({
   resolve: resolveWin32,
   relative: relativeWin32,
   toNamespacedPath: toNamespacedPathWin32,
+  toFileUrl: (path) => fileUrls.toFileUrl(path, true, isAbsoluteWin32),
+  fromFileUrl: (url) => fileUrls.fromFileUrl(url, true),
 });
 
 const native = hostWindows ? win32 : posix;
 const { join, normalize, basename, dirname, extname, isAbsolute, parse, format,
-  common, resolve, relative, toNamespacedPath, isGlob, globToRegExp, normalizeGlob,
+  common, resolve, relative, toNamespacedPath, toFileUrl, fromFileUrl, isGlob, globToRegExp, normalizeGlob,
   joinGlobs, match, matchesGlob } = native;
 return {
   posix, win32, join, normalize, basename, dirname, extname, isAbsolute, parse, format,
-  common, resolve, relative, toNamespacedPath, isGlob, globToRegExp, normalizeGlob,
+  common, resolve, relative, toNamespacedPath, toFileUrl, fromFileUrl, isGlob, globToRegExp, normalizeGlob,
   joinGlobs, match, matchesGlob,
   SEPARATOR: native.sep,
   DELIMITER: native.delimiter,

@@ -7,15 +7,20 @@ description: "TypeScript declarations for neo:fs."
 
 Declarations for `neo:fs`. See [host permissions and module access](/runtime/permissions/) before importing.
 
-Synchronous, bounded filesystem access. Requires `--allow-fs` and a runtime
+Bounded filesystem access. Requires `--allow-fs` and a runtime
 allowlist that admits `neo:fs`.
 
-Every operation is blocking. Relative paths resolve against the runtime's
-working directory; an unavailable runtime directory throws `FS_CWD` rather
-than falling back to the host directory. Absolute paths and `..` components
-still reach everything the host user can reach. This is not a sandbox.
+During managed module evaluation, `readFile` reads on a worker and returns
+a `Promise<Uint8Array>`. `readFileSync` and the other operations block the
+JavaScript thread. Relative paths resolve against the runtime's working
+directory, with no fallback to the host directory. If that directory is
+unavailable, `readFile` rejects with `FS_CWD` during a managed turn and
+synchronous operations throw `FS_CWD`. Outside a managed turn, `readFile`
+instead throws `FS_ASYNC_OUTSIDE_TURN` before I/O. Absolute paths and `..`
+components still reach everything the host user can reach. This is not a
+sandbox.
 
-`readFile`, `readText`, `writeFile`, and `writeText` require a regular file.
+`readFile`, `readFileSync`, `readText`, `writeFile`, and `writeText` require a regular file.
 An open may occur before a non-regular object is rejected. If the type is
 identified, the error is `FS_IS_DIRECTORY` or `FS_TYPE`; an open failure
 can take precedence. Device-open side effects and latency are not bounded.
@@ -25,7 +30,7 @@ bounded at `MAX_PATH_BYTES`. `FS_LIMIT` also covers quota, storage-full,
 and fallible allocation failures; this cannot catch every failure inside
 QuickJS or the process allocator.
 
-`stat`, `readFile`, `readText`, `writeFile`, `writeText`, `exists`, and
+`stat`, `readFile`, `readFileSync`, `readText`, `writeFile`, `writeText`, `exists`, and
 `readDir` follow a symlink at the final path component. `lstat` does not.
 `readDir` does not follow entries and reports a symlink entry with
 `isSymlink: true`. `remove` never follows a symlink at the target, and
@@ -82,6 +87,8 @@ export type FsErrorCode =
   | "FS_CWD"
   | "FS_TYPE"
   | "FS_UNSUPPORTED"
+  | "FS_ASYNC_OUTSIDE_TURN"
+  | "FS_CANCELLED"
   | "FS_IO";
 ```
 
@@ -258,13 +265,33 @@ export function writeText(path: string, data: string): void;
 
 ```ts
 /**
- * Read a regular file as bytes.
+ * Read a regular file on a worker, using the runtime directory captured
+ * at the call. Only available during managed module evaluation; otherwise
+ * throws `FS_ASYNC_OUTSIDE_TURN` before I/O. In a managed turn, invalid
+ * arguments and I/O errors reject the Promise. A module turn accepts up
+ * to four outstanding reads (including undelivered results) and runs up
+ * to two on workers. Each outstanding read charges `MAX_READ_BYTES` plus
+ * the encoded byte length of its resolved path against a turn budget of
+ * `4 * (MAX_READ_BYTES + MAX_PATH_BYTES)`. Excess work rejects with
+ * `FS_LIMIT`. This budget does not cover buffers JavaScript retains after
+ * delivery. There is no caller cancellation API. Turn teardown cancels
+ * cooperatively and may wait for an OS call to return. Use `readFileSync`
+ * to block.
+ */
+export function readFile(path: string): Promise<Uint8Array>;
+```
+
+## readFileSync
+
+```ts
+/**
+ * Read a regular file as bytes, blocking the JavaScript thread.
  *
  * Returns a `Uint8Array` view over a new buffer. The same regular-file and
  * `MAX_READ_BYTES` rules as `readText` apply. The result is a copy, not a
  * live view of the file.
  */
-export function readFile(path: string): Uint8Array;
+export function readFileSync(path: string): Uint8Array;
 ```
 
 ## copyFile

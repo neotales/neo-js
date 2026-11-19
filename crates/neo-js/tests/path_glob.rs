@@ -1,6 +1,6 @@
 //! Integration tests for the public `neo:path` glob helpers.
 
-use neo_js::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
+use neojs_core::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
 
 fn run(source: &str) {
     let js = NeoJs::new_with_options(

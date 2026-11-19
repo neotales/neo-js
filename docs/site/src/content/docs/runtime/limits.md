@@ -5,9 +5,12 @@ description: "What neo-js does not provide or isolate."
 
 This is a first implementation, not an isolation boundary. It does not limit
 CPU or memory use. Do not run untrusted scripts without OS-level isolation.
-The runtime has no external event loop. TypeScript support erases types
+The runtime drives QuickJS jobs and asynchronous binary reads during
+[managed module evaluation](/runtime/loading/#managed-module-evaluation).
+It has no general external event loop. TypeScript support erases types
 without checking them or producing source maps. The loader rejects constructs
-that need a transform. Host APIs are synchronous. The callback guards in
+that need a transform. Among the CLI's host modules, only `neo:fs.readFile`
+is asynchronous. The callback guards in
 [`neo:test` and `neo:assert`](/guides/modules/testing/) reject Promise returns.
 `neo:toml` and `neo:yaml` parse text only: neither has a file loader, expands
 no alias or variable, and reads no environment.
@@ -21,7 +24,8 @@ buffered rather than streamed. Reading stdin blocks with no timeout, and
 `neo:process` stream `close()` is a no-op. The runtime working directory is local to a `NeoJs`
 instance and is not a sandbox. The [Windows registry module](/guides/modules/winregistry/)
 operates only on Windows. [`neo:path`](/guides/modules/path/) is lexical.
-It does not resolve symlinks, enforce containment, or provide file-URL helpers.
+It does not resolve symlinks or enforce containment. Its `URL` class accepts
+only file URLs, not the full WHATWG API.
 The [glob helpers](/guides/modules/path/#glob-matching) do not inspect files.
 The raw `RegExp` has no evaluation budget. Path resolution's runtime cwd
 fallback requires a matching permission and allowlist entry.
@@ -40,3 +44,5 @@ arbitrary-precision strings; there is no npm `includePrerelease` option.
 store, key derivation, password-based encryption, or public-key operation.
 `neo:age` provides X25519 age file encryption but no key store, passphrase,
 SSH-key, plugin, or post-quantum recipient support.
+[`neo:sqlite`](/guides/modules/sqlite/) runs trusted SQL synchronously in
+process. Its limits are not a hard deadline or intermediate-memory cap.

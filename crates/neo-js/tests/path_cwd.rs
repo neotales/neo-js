@@ -1,6 +1,6 @@
 //! Embedding tests for `neo:path` capability and runtime cwd boundaries.
 
-use neo_js::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
+use neojs_core::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
 
 #[test]
 fn cwd_requires_both_a_grant_and_its_corresponding_allowlist_entry() {
@@ -75,6 +75,7 @@ if (globalThis.expectCwd) {
         environment: true,
         network: true,
         registry: true,
+        sqlite: true,
     };
     let path = RuntimeModule::Path;
     let path_fs = [path, RuntimeModule::Fs];

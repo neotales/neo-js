@@ -1,3 +1,12 @@
+// Generated declarations for the selected compiled modules. Do not edit.
+// Inputs: types/neo-js.core.d.ts, crates/neojs-sqlite/types/neo-sqlite.d.ts
+// Selection: core, sqlite
+// See types/README.md for the compose-types command.
+
+// Core declarations for neojs-core. Optional modules owned by separate crates
+// are added by composition; see types/README.md. This file deliberately omits
+// `neo:sqlite`, because neojs-core does not compile or register it.
+
 /**
  * Host OS information. `platform` and `arch` identify the Rust compilation
  * target, not necessarily a separately detected host. Optional fields follow
@@ -25,7 +34,7 @@ declare const env: {
 /**
  * The `neo:fs` API. Available only with `--allow-fs` and when the runtime's
  * module allowlist admits `neo:fs`. Relative paths use the runtime's working
- * directory, not the host process's. Every call is synchronous and blocking.
+ * directory, not the host process's. Only `readFile` is asynchronous.
  *
  * This is not a sandbox: a script with this object has the host user's
  * filesystem authority. Reads and writes are bounded; see the `neo:fs`
@@ -35,7 +44,14 @@ declare const fs: {
   readText(path: string): string;
   /** Same text validation and error precedence as `neo:fs.writeText`. */
   writeText(path: string, data: string): void;
-  readFile(path: string): Uint8Array;
+  /**
+   * Read bytes during managed module evaluation. Outside it, this throws
+   * `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. At most four reads are
+   * outstanding and two can run on workers. There is no caller cancellation
+   * API; teardown cancels cooperatively and may wait for an OS call.
+   */
+  readFile(path: string): Promise<Uint8Array>;
+  readFileSync(path: string): Uint8Array;
   writeFile(
     path: string,
     data: Uint8Array,
@@ -101,15 +117,20 @@ declare module "neo:env" {
 }
 
 /**
- * Synchronous, bounded filesystem access. Requires `--allow-fs` and a runtime
+ * Bounded filesystem access. Requires `--allow-fs` and a runtime
  * allowlist that admits `neo:fs`.
  *
- * Every operation is blocking. Relative paths resolve against the runtime's
- * working directory; an unavailable runtime directory throws `FS_CWD` rather
- * than falling back to the host directory. Absolute paths and `..` components
- * still reach everything the host user can reach. This is not a sandbox.
+ * During managed module evaluation, `readFile` reads on a worker and returns
+ * a `Promise<Uint8Array>`. `readFileSync` and the other operations block the
+ * JavaScript thread. Relative paths resolve against the runtime's working
+ * directory, with no fallback to the host directory. If that directory is
+ * unavailable, `readFile` rejects with `FS_CWD` during a managed turn and
+ * synchronous operations throw `FS_CWD`. Outside a managed turn, `readFile`
+ * instead throws `FS_ASYNC_OUTSIDE_TURN` before I/O. Absolute paths and `..`
+ * components still reach everything the host user can reach. This is not a
+ * sandbox.
  *
- * `readFile`, `readText`, `writeFile`, and `writeText` require a regular file.
+ * `readFile`, `readFileSync`, `readText`, `writeFile`, and `writeText` require a regular file.
  * An open may occur before a non-regular object is rejected. If the type is
  * identified, the error is `FS_IS_DIRECTORY` or `FS_TYPE`; an open failure
  * can take precedence. Device-open side effects and latency are not bounded.
@@ -119,7 +140,7 @@ declare module "neo:env" {
  * and fallible allocation failures; this cannot catch every failure inside
  * QuickJS or the process allocator.
  *
- * `stat`, `readFile`, `readText`, `writeFile`, `writeText`, `exists`, and
+ * `stat`, `readFile`, `readFileSync`, `readText`, `writeFile`, `writeText`, `exists`, and
  * `readDir` follow a symlink at the final path component. `lstat` does not.
  * `readDir` does not follow entries and reports a symlink entry with
  * `isSymlink: true`. `remove` never follows a symlink at the target, and
@@ -174,6 +195,8 @@ declare module "neo:fs" {
     | "FS_CWD"
     | "FS_TYPE"
     | "FS_UNSUPPORTED"
+    | "FS_ASYNC_OUTSIDE_TURN"
+    | "FS_CANCELLED"
     | "FS_IO";
 
   /**
@@ -285,13 +308,29 @@ declare module "neo:fs" {
   export function writeText(path: string, data: string): void;
 
   /**
-   * Read a regular file as bytes.
+   * Read a regular file on a worker, using the runtime directory captured
+   * at the call. Only available during managed module evaluation; otherwise
+   * throws `FS_ASYNC_OUTSIDE_TURN` before I/O. In a managed turn, invalid
+   * arguments and I/O errors reject the Promise. A module turn accepts up
+   * to four outstanding reads (including undelivered results) and runs up
+   * to two on workers. Each outstanding read charges `MAX_READ_BYTES` plus
+   * the encoded byte length of its resolved path against a turn budget of
+   * `4 * (MAX_READ_BYTES + MAX_PATH_BYTES)`. Excess work rejects with
+   * `FS_LIMIT`. This budget does not cover buffers JavaScript retains after
+   * delivery. There is no caller cancellation API. Turn teardown cancels
+   * cooperatively and may wait for an OS call to return. Use `readFileSync`
+   * to block.
+   */
+  export function readFile(path: string): Promise<Uint8Array>;
+
+  /**
+   * Read a regular file as bytes, blocking the JavaScript thread.
    *
    * Returns a `Uint8Array` view over a new buffer. The same regular-file and
    * `MAX_READ_BYTES` rules as `readText` apply. The result is a copy, not a
    * live view of the file.
    */
-  export function readFile(path: string): Uint8Array;
+  export function readFileSync(path: string): Uint8Array;
 
   /**
    * Synchronously stream bytes from a regular file into a new regular file.
@@ -957,9 +996,10 @@ declare module "neo:ansi" {
  * do not perform filesystem I/O or check containment, existence, symlinks or
  * junctions. They never read the process environment or per-drive directories.
  *
- * Every path must be a primitive string; a boxed `String`, `URL`, number,
- * `null`, `undefined`, or other value throws `TypeError`, as does any NUL
- * (U+0000) in a string argument. `basename`'s `suffix` must be a string.
+ * Every path must be a primitive string; a boxed `String`, number, `null`,
+ * `undefined`, or other value throws `TypeError`, as does any NUL (U+0000) in
+ * a string argument. Only `fromFileUrl` accepts a URL object, and it must
+ * have this realm's private URL brand. `basename`'s `suffix` must be a string.
  * `format` requires a non-null, non-array object whose `root`, `dir`, `base`,
  * `ext`, and `name` fields are strings or absent.
  *
@@ -968,10 +1008,49 @@ declare module "neo:ansi" {
  * This fallback is available only in the host dialect and requires admitted
  * `neo:fs` with filesystem permission, or admitted `neo:process` with
  * process or stdio permission. It observes runtime `chdir` and never changes
- * or falls back to the host process's cwd. Glob operations never use cwd.
- * File-URL helpers are not implemented.
+ * or falls back to the host process's cwd. Glob and file URL helpers are
+ * lexical and never use cwd.
  */
 declare module "neo:path" {
+  /**
+   * An instance of neo-js's realm-local `globalThis.URL`, installed before
+   * user code when `neo:path` is admitted. This is a file-only subset, not a
+   * DOM URL: there is no `searchParams`, `URLSearchParams`, static URL
+   * parsing helper, object URL API, or support for non-file schemes and
+   * bases. The constructor accepts a primitive string or a same-realm URL
+   * and an optional file URL base.
+   * This declaration deliberately does not augment the global DOM/Worker
+   * `URL` type. TypeScript checks this interface structurally; at runtime the
+   * conversion checks the object's private realm-local brand.
+   */
+  export interface FileURL {
+    href: string;
+    /** Always the string `"null"` in neo-js. */
+    readonly origin: string;
+    protocol: string;
+    username: string;
+    password: string;
+    host: string;
+    hostname: string;
+    port: string;
+    pathname: string;
+    search: string;
+    hash: string;
+    toString(): string;
+    toJSON(): string;
+  }
+
+  /**
+   * Type of the realm's global constructor for projects without DOM or
+   * WebWorker libs. For example, `(globalThis as { URL?: FileURLConstructor }).URL`
+   * is defined when `neo:path` is admitted. Prefer {@link toFileUrl} when
+   * constructing a URL from a path.
+   */
+  export interface FileURLConstructor {
+    new(input: string | FileURL, base?: string | FileURL): FileURL;
+    readonly prototype: FileURL;
+  }
+
   /** A parsed path; every field is a string. */
   export interface ParsedPath {
     /** `/`, or a Windows root such as `C:\`, `C:`, `\\server\share\`, or `""`. */
@@ -1108,6 +1187,31 @@ declare module "neo:path" {
     toNamespacedPath(path: string): string;
 
     /**
+     * Convert an absolute path to a branded file URL without using cwd or
+     * doing I/O. POSIX collapses leading slashes; Windows recognizes UNC
+     * hosts, translates separators, and percent-encodes line breaks in
+     * the pathname. URL dot segments are normalized, lone surrogates
+     * become U+FFFD, and carets in the pathname serialize as `%5E`.
+     * Relative paths and NUL throw `TypeError`. Input and serialized URL
+     * length limits are 65,536 UTF-16 code units each, or 8,192 code units
+     * for host text. Overflow throws `RangeError`; these are not memory caps.
+     */
+    toFileUrl(path: string): FileURL;
+
+    /**
+     * Decode only the pathname of a file URL string or branded URL from
+     * this realm. POSIX ignores the host; Windows keeps remote hosts as
+     * UNC roots, including when the first segment looks like a drive.
+     * Query and fragment do not enter the path. Escaped `/` and `\` are
+     * decoded, so the result is not a containment check. Bare or malformed
+     * percent escapes remain literal; invalid escaped UTF-8 throws
+     * `URIError`. Invalid URLs, a raw NUL in a string argument, and decoded
+     * pathname NUL throw `TypeError`.
+     * Uses the same limits as {@link PathApi.toFileUrl}.
+     */
+    fromFileUrl(url: string | FileURL): string;
+
+    /**
      * Heuristically detect glob-like syntax, using backslash as the escape
      * in both dialects. A true result does not imply that compilation will
      * succeed. Rejects non-strings and NUL with `TypeError`; over 4096 UTF-16
@@ -1217,6 +1321,10 @@ declare module "neo:path" {
   export const relative: PathApi<string, string>["relative"];
   /** The host dialect's {@link PathApi.toNamespacedPath}. */
   export const toNamespacedPath: PathApi<string, string>["toNamespacedPath"];
+  /** The host dialect's {@link PathApi.toFileUrl}. */
+  export const toFileUrl: PathApi<string, string>["toFileUrl"];
+  /** The host dialect's {@link PathApi.fromFileUrl}. */
+  export const fromFileUrl: PathApi<string, string>["fromFileUrl"];
   /** The host dialect's {@link PathApi.isGlob}. */
   export const isGlob: PathApi<string, string>["isGlob"];
   /** The host dialect's {@link PathApi.globToRegExp}. */
@@ -2930,4 +3038,72 @@ declare module "neo:age" {
    * or out-of-bounds view.
    */
   export function decrypt(identity: string, ciphertext: Uint8Array): Uint8Array;
+}
+
+// Type fragment owned by neojs-sqlite. The CLI composition includes it because
+// the CLI links this crate. Declaring `neo:sqlite` records compiled
+// availability; it does not grant `Permissions::sqlite` or admit the module
+// through a runtime allowlist. types/neo-js.core.d.ts omits this module.
+
+/** Synchronous SQLite for private in-memory databases. Requires the host's SQLite grant. */
+declare module "neo:sqlite" {
+  /** SQLite NULL, INTEGER (signed 64-bit), REAL, UTF-8 TEXT, or an owned BLOB snapshot. */
+  export type SqliteValue = null | bigint | number | string | Uint8Array;
+
+  /** Stable SQLite failure codes; match on these rather than error messages. */
+  export type SqliteErrorCode =
+    | "SQLITE_ARGUMENT"
+    | "SQLITE_ENCODING"
+    | "SQLITE_LIMIT"
+    | "SQLITE_WORK_LIMIT"
+    | "SQLITE_DENIED"
+    | "SQLITE_CLOSED"
+    | "SQLITE_CONSTRAINT"
+    | "SQLITE_SQL"
+    | "SQLITE_OPEN";
+
+  /** Operational error with no generated stack or SQL, paths, or bound values in its message. */
+  export interface SqliteError extends Error {
+    readonly code: SqliteErrorCode;
+  }
+
+  /** An owned, private database. Use `using` or call `close()` to release it. */
+  export interface Database {
+    /**
+     * Run one statement without result columns. Return the number of SQLite
+     * row changes (including foreign-key actions), as a bigint.
+     * Parameters are own data elements of a dense array bound to anonymous `?`
+     * in order. Numbers must be finite and bind as REAL; bigints bind as
+     * signed 64-bit INTEGER. Strings must be well-formed Unicode; Uint8Array
+     * arguments are copied and require attached, fixed-length non-shared buffers.
+     * Savepoints are not supported. Foreign-key cascade depth is limited to eight.
+     * SQLite's normal conflict and rollback semantics apply on failure.
+     * @throws SqliteError for invalid, denied, failed, oversized or interrupted work.
+     */
+    execute(sql: string, parameters?: readonly SqliteValue[]): bigint;
+
+    /**
+     * Run one read-only statement with result columns, using the same bindings
+     * as `execute`. Return independent rows in result-column order, without
+     * column names. Row order is only guaranteed by SQL `ORDER BY`. All BLOBs
+     * are owned copies. A limit failure returns no partial result.
+     * @throws SqliteError for invalid, denied, failed, oversized or interrupted work.
+     */
+    query(sql: string, parameters?: readonly SqliteValue[]): SqliteValue[][];
+
+    /** Roll back any open transaction and discard the database. Repeat calls do nothing. */
+    close(): void;
+
+    /** Same as `close()`; called when JavaScript `using` leaves its scope. */
+    [Symbol.dispose](): void;
+  }
+
+  /**
+   * Open a new private database with no filename, URI, or attachment support.
+   * Requires `--allow-sqlite` or `Permissions::sqlite`, and admission by any
+   * explicit module allowlist. Synchronous and in-process. Use only trusted
+   * SQL: there is no SQLite intermediate-heap cap or hard execution deadline.
+   * @throws SqliteError if initialization fails or the live-handle limit is reached.
+   */
+  export function openMemory(): Database;
 }

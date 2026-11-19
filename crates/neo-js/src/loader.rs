@@ -14,6 +14,7 @@ use rquickjs::{
 
 use crate::{
     Permissions,
+    extension::{ExtensionRegistry, ExtensionRuntime},
     modules::{AllowedModules, RuntimeModule},
 };
 
@@ -64,6 +65,10 @@ pub(crate) struct ModuleLoader {
     pub os_metadata: crate::os::Metadata,
     /// Optional fail-closed module allowlist. `None` bits are unrestricted.
     pub allowed: AllowedModules,
+    /// Registered extension descriptors, used only for exact name lookup.
+    pub extensions: Rc<ExtensionRegistry>,
+    /// Per-runtime extension state shared with `NeoJs` for teardown.
+    pub extension_runtime: Rc<RefCell<ExtensionRuntime>>,
 }
 
 #[derive(Default)]
@@ -262,6 +267,22 @@ impl Resolver for ModuleLoader {
             }
             return Ok(name.to_owned());
         }
+        // Extension module names are exact and registered. The allowlist check
+        // runs here, before QuickJS consults its module cache, so neither a
+        // static nor a dynamic import can reach a withdrawn extension module.
+        if let Some(registration) = self.extensions.registration(name) {
+            if !self.allowed.allows_name(name) {
+                return Err(Error::new_resolving_message(
+                    base,
+                    name,
+                    "module is not enabled by this runtime's allowlist",
+                ));
+            }
+            if !registration.permission().granted(&self.permissions) {
+                return Err(Error::new_resolving(base, name));
+            }
+            return Ok(name.to_owned());
+        }
         if self.permissions.filesystem && (name.starts_with("./") || name.starts_with("../")) {
             crate::typescript::validate_extension(name)
                 .map_err(|error| Error::new_resolving_message(base, name, error))?;
@@ -319,6 +340,25 @@ impl Loader for ModuleLoader {
             if !self.module_permitted(module) {
                 return Err(Error::new_loading(name));
             }
+        }
+        // Defense in depth: repeat both gates before dispatching to an
+        // extension. `try_borrow_mut` makes a re-entrant load fail closed
+        // instead of panicking while the same extension state is borrowed.
+        if let Some(registration) = self.extensions.registration(name) {
+            if !self.allowed.allows_name(name) {
+                return Err(Error::new_loading_message(
+                    name,
+                    "module is not enabled by this runtime's allowlist",
+                ));
+            }
+            if !registration.permission().granted(&self.permissions) {
+                return Err(Error::new_loading(name));
+            }
+            let extension_runtime = Rc::clone(&self.extension_runtime);
+            let mut runtime = extension_runtime.try_borrow_mut().map_err(|_| {
+                Error::new_loading_message(name, "extension state is already in use")
+            })?;
+            return runtime.load(&self.extensions, registration.descriptor(), ctx, name);
         }
         if name == "neo:crypto" {
             return Module::declare_def::<crate::crypto::CryptoModule, _>(ctx.clone(), name);
