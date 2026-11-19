@@ -24,39 +24,39 @@ use std::{
 };
 
 /// Per-pool limits. Pending counts queued, running and undelivered jobs.
-struct Limits {
-    workers: NonZeroUsize,
-    queued: NonZeroUsize,
-    pending: NonZeroUsize,
-    bytes: usize,
+pub(super) struct Limits {
+    pub(super) workers: NonZeroUsize,
+    pub(super) queued: NonZeroUsize,
+    pub(super) pending: NonZeroUsize,
+    pub(super) bytes: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum AdmitError {
+pub(super) enum AdmitError {
     Closed,
     TooLarge,
     Full,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Outcome<Output> {
+pub(super) enum Outcome<Output> {
     Finished(Output),
     Panicked,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct Completion<Output> {
-    id: u64,
-    outcome: Outcome<Output>,
+pub(super) struct Completion<Output> {
+    pub(super) id: u64,
+    pub(super) outcome: Outcome<Output>,
 }
 
 /// Shared shutdown request. Work that can stop early checks between bounded
 /// steps; a blocked OS call cannot be interrupted by this flag.
 #[derive(Default)]
-struct Cancellation(AtomicBool);
+pub(super) struct Cancellation(AtomicBool);
 
 impl Cancellation {
-    fn requested(&self) -> bool {
+    pub(super) fn requested(&self) -> bool {
         self.0.load(Ordering::Relaxed)
     }
 }
@@ -93,7 +93,7 @@ struct Shared<Input, Output> {
 }
 
 /// An owner-driven pool with no detached threads, including on spawn failure.
-struct Pool<Input, Output> {
+pub(super) struct Pool<Input, Output> {
     shared: Arc<Shared<Input, Output>>,
     limits: Limits,
     workers: Vec<JoinHandle<()>>,
@@ -129,7 +129,7 @@ impl Drop for JoinWorkers<'_> {
 
 /// Exclusive permission to take a snapshot and enqueue one job. Dropping it
 /// without sending changes nothing.
-struct Admission<'a, Input, Output> {
+pub(super) struct Admission<'a, Input, Output> {
     pool: &'a mut Pool<Input, Output>,
     bytes: usize,
 }
@@ -137,7 +137,7 @@ struct Admission<'a, Input, Output> {
 impl<Input, Output> Admission<'_, Input, Output> {
     /// Send a fully owned snapshot with an owner-supplied correlation ID.
     /// The owner must not reuse an ID until the previous completion is taken.
-    fn send(self, id: u64, input: Input) {
+    pub(super) fn send(self, id: u64, input: Input) {
         let shared = &self.pool.shared;
         let mut state = shared.state.lock().unwrap();
         state.queued.push_back(Request {
@@ -155,7 +155,10 @@ impl<Input: Send + 'static, Output: Send + 'static> Pool<Input, Output> {
     /// Start the fixed worker set. All workers run the same Rust-only
     /// operation, outside the queue lock. Unwinding from an operation reports
     /// `Panicked` and does not retire a worker.
-    fn new(limits: Limits, execute: fn(Input, &Cancellation) -> Output) -> io::Result<Self> {
+    pub(super) fn new(
+        limits: Limits,
+        execute: fn(Input, &Cancellation) -> Output,
+    ) -> io::Result<Self> {
         let mut pool = Self {
             shared: Arc::new(Shared {
                 state: Mutex::default(),
@@ -181,7 +184,10 @@ impl<Input, Output> Pool<Input, Output> {
     /// Check admission before allocating or copying an owned snapshot.
     /// `bytes` is the caller's upper bound for the job's owned payload,
     /// including any buffered result; the operation must enforce that bound.
-    fn reserve(&mut self, bytes: usize) -> Result<Admission<'_, Input, Output>, AdmitError> {
+    pub(super) fn reserve(
+        &mut self,
+        bytes: usize,
+    ) -> Result<Admission<'_, Input, Output>, AdmitError> {
         let state = self.shared.state.lock().unwrap();
         if self.shared.cancelled.requested() {
             return Err(AdmitError::Closed);
@@ -202,17 +208,23 @@ impl<Input, Output> Pool<Input, Output> {
     }
 
     /// Take the next ready completion and free its admission charge. Return
-    /// immediately if idle, or wait for at most `timeout` if work is pending.
-    /// Pass zero to poll. Delivery is in completion, not submission, order.
-    fn receive(&mut self, timeout: Duration) -> Option<Completion<Output>> {
+    /// immediately if idle, or wait if work is pending. `None` waits without
+    /// a deadline; zero polls. Delivery is in completion order.
+    pub(super) fn receive(&mut self, timeout: Option<Duration>) -> Option<Completion<Output>> {
         let shared = &self.shared;
         let state = shared.state.lock().unwrap();
-        let (mut state, _) = shared
-            .completion
-            .wait_timeout_while(state, timeout, |state| {
-                state.ready.is_empty() && state.pending != 0
-            })
-            .unwrap();
+        let waiting =
+            |state: &mut State<Input, Output>| state.ready.is_empty() && state.pending != 0;
+        let mut state = match timeout {
+            Some(timeout) => {
+                shared
+                    .completion
+                    .wait_timeout_while(state, timeout, waiting)
+                    .unwrap()
+                    .0
+            }
+            None => shared.completion.wait_while(state, waiting).unwrap(),
+        };
         let (bytes, completion) = state.ready.pop_front()?;
         state.pending -= 1;
         state.bytes -= bytes;

@@ -67,11 +67,11 @@ fn concurrent_workers_and_queue_saturation() {
     let (third, third_started, third_release) = gated_job(30);
     submit(&mut pool, 3, 1, third);
     assert_eq!(pool.reserve(1).err(), Some(AdmitError::Full));
-    assert_eq!(pool.receive(Duration::ZERO), None);
+    assert_eq!(pool.receive(Some(Duration::ZERO)), None);
 
     second_release.send(()).unwrap();
     assert_eq!(
-        pool.receive(TIMEOUT),
+        pool.receive(Some(TIMEOUT)),
         Some(Completion {
             id: 2,
             outcome: Outcome::Finished(20),
@@ -79,10 +79,10 @@ fn concurrent_workers_and_queue_saturation() {
     );
     assert_eq!(third_started.recv_timeout(TIMEOUT).unwrap(), worker_b);
     third_release.send(()).unwrap();
-    assert_eq!(pool.receive(TIMEOUT).unwrap().id, 3);
+    assert_eq!(pool.receive(Some(TIMEOUT)).unwrap().id, 3);
     first_release.send(()).unwrap();
-    assert_eq!(pool.receive(TIMEOUT).unwrap().id, 1);
-    assert_eq!(pool.receive(Duration::ZERO), None);
+    assert_eq!(pool.receive(Some(TIMEOUT)).unwrap().id, 1);
+    assert_eq!(pool.receive(Some(Duration::ZERO)), None);
 }
 
 enum Echo {
@@ -115,16 +115,16 @@ fn undelivered_completions_hold_pending_and_byte_charges() {
     // Starting the second job proves the first completion is queued.
     running.recv_timeout(TIMEOUT).unwrap();
     assert_eq!(pool.reserve(0).err(), Some(AdmitError::Full));
-    let first = pool.receive(TIMEOUT).unwrap();
+    let first = pool.receive(Some(TIMEOUT)).unwrap();
     assert_eq!(first.id, 1);
     assert_eq!(first.outcome, Outcome::Finished(vec![42; 5]));
     submit(&mut pool, 3, 5, Echo::Bytes(vec![7; 5]));
-    let second = pool.receive(TIMEOUT).unwrap();
+    let second = pool.receive(Some(TIMEOUT)).unwrap();
     assert_eq!(second.id, 2);
     // There is now a job slot but the byte charge still blocks admission.
     assert_eq!(pool.reserve(1).err(), Some(AdmitError::Full));
     assert_eq!(
-        pool.receive(TIMEOUT).unwrap().outcome,
+        pool.receive(Some(TIMEOUT)).unwrap().outcome,
         Outcome::Finished(vec![7; 5])
     );
     assert!(pool.reserve(5).is_ok());
@@ -155,14 +155,14 @@ fn worker_panic_with_panicking_payload_releases_capacity_and_preserves_worker() 
     let Some(Completion {
         outcome: Outcome::Finished(worker),
         ..
-    }) = pool.receive(TIMEOUT)
+    }) = pool.receive(Some(TIMEOUT))
     else {
         panic!("expected the original worker ID");
     };
     submit(&mut pool, 2, 10, Err(NotifyOnDrop(dropped)));
     assert_eq!(pool.reserve(1).err(), Some(AdmitError::Full));
     assert_eq!(
-        pool.receive(TIMEOUT),
+        pool.receive(Some(TIMEOUT)),
         Some(Completion {
             id: 2,
             outcome: Outcome::Panicked,
@@ -171,7 +171,7 @@ fn worker_panic_with_panicking_payload_releases_capacity_and_preserves_worker() 
     assert_eq!(payload_dropped.try_recv(), Ok(()));
     submit(&mut pool, 3, 10, Ok(()));
     assert_eq!(
-        pool.receive(TIMEOUT),
+        pool.receive(Some(TIMEOUT)),
         Some(Completion {
             id: 3,
             outcome: Outcome::Finished(worker),
@@ -330,9 +330,9 @@ fn verify_drop(panicking: bool) {
 #[test]
 fn idle_and_closed_pool_return_without_waiting() {
     let mut pool = Pool::new(limits(2, 1, 1, 0), |(), _| ()).unwrap();
-    assert!(pool.receive(TIMEOUT).is_none());
+    assert!(pool.receive(Some(TIMEOUT)).is_none());
     pool.shutdown();
     pool.shutdown();
     assert_eq!(pool.reserve(0).err(), Some(AdmitError::Closed));
-    assert!(pool.receive(TIMEOUT).is_none());
+    assert!(pool.receive(Some(TIMEOUT)).is_none());
 }

@@ -1,11 +1,12 @@
-//! Synchronous, bounded filesystem access for `neo:fs`.
+//! Bounded filesystem access for `neo:fs`.
 //!
 //! The module is available only when [`crate::Permissions::filesystem`] is
 //! granted and the runtime's module allowlist admits [`crate::RuntimeModule::Fs`].
 //! Both gates are checked before the `fs` global or any native callback is
-//! constructed. Every operation is synchronous and blocking; nothing here
-//! starts a shell, a child process, or a network request directly. The OS may
-//! still perform network I/O for network paths and filesystems.
+//! constructed. Only `readFile` runs on workers; `readFileSync` and all
+//! other operations block. Nothing here starts a shell, a child process, or
+//! a network request directly. The OS may still perform network I/O for
+//! network paths and filesystems.
 //!
 //! # Authority
 //!
@@ -159,9 +160,9 @@
 //! symlink, junction, verbatim-path, `FILE_ATTRIBUTE_*`, and
 //! `DirectoryNotEmpty` details are operating-system dependent.
 
-// Exercise the private worker foundation without installing any runtime hooks.
-#[cfg(test)]
+mod read_async;
 mod worker;
+pub(crate) use read_async::{ReadDriver, ReadTurn};
 
 use std::{
     cell::RefCell,
@@ -195,10 +196,11 @@ pub(crate) const MAX_LIST_NAME_BYTES: usize = 1024;
 /// Largest sum of directory-entry names `readDir` returns, in UTF-8 bytes.
 pub(crate) const MAX_LIST_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
-const EXPORTS: [&str; 19] = [
+const EXPORTS: [&str; 20] = [
     "readText",
     "writeText",
     "readFile",
+    "readFileSync",
     "writeFile",
     "stat",
     "lstat",
@@ -236,10 +238,12 @@ enum Code {
     NotRegular,
     Io,
     Unsupported,
+    AsyncOutsideTurn,
+    Cancelled,
 }
 
 impl Code {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 18] = [
         Self::Path,
         Self::NotFound,
         Self::NotDirectory,
@@ -256,6 +260,8 @@ impl Code {
         Self::NotRegular,
         Self::Io,
         Self::Unsupported,
+        Self::AsyncOutsideTurn,
+        Self::Cancelled,
     ];
 
     const fn as_str(self) -> &'static str {
@@ -276,6 +282,8 @@ impl Code {
             Self::NotRegular => "FS_TYPE",
             Self::Io => "FS_IO",
             Self::Unsupported => "FS_UNSUPPORTED",
+            Self::AsyncOutsideTurn => "FS_ASYNC_OUTSIDE_TURN",
+            Self::Cancelled => "FS_CANCELLED",
         }
     }
 
@@ -300,6 +308,10 @@ impl Code {
             Self::NotRegular => "the path is not a regular file",
             Self::Io => "filesystem operation failed",
             Self::Unsupported => "this filesystem operation or input is unsupported",
+            Self::AsyncOutsideTurn => {
+                "readFile requires managed module evaluation; use readFileSync here"
+            }
+            Self::Cancelled => "filesystem request was cancelled after module evaluation failed",
         }
     }
 }
@@ -615,7 +627,16 @@ fn copy_typed<'js>(
     )
 }
 
-fn read_bounded(mut reader: impl Read, capacity: usize, max: usize) -> Result<Vec<u8>, FsError> {
+fn read_bounded(reader: impl Read, capacity: usize, max: usize) -> Result<Vec<u8>, FsError> {
+    read_bounded_until(reader, capacity, max, || false)
+}
+
+fn read_bounded_until(
+    mut reader: impl Read,
+    capacity: usize,
+    max: usize,
+    cancelled: impl Fn() -> bool,
+) -> Result<Vec<u8>, FsError> {
     if capacity > max {
         return Err(FsError::new(Code::Limit));
     }
@@ -625,6 +646,9 @@ fn read_bounded(mut reader: impl Read, capacity: usize, max: usize) -> Result<Ve
         .map_err(|_| FsError::new(Code::Limit))?;
     let mut buffer = [0u8; 8192];
     loop {
+        if cancelled() {
+            return Err(FsError::new(Code::Cancelled));
+        }
         if bytes.len() == max {
             // A separate one-byte probe detects growth without asking Vec to
             // grow to max+1 merely to discover it.
@@ -1266,7 +1290,11 @@ fn entries_outcome<'js>(
     }
 }
 
-fn build_native<'js>(ctx: &Ctx<'js>, cwd: Rc<RefCell<WorkingDirectory>>) -> JsResult<Object<'js>> {
+fn build_native<'js>(
+    ctx: &Ctx<'js>,
+    cwd: Rc<RefCell<WorkingDirectory>>,
+    driver: ReadDriver,
+) -> JsResult<Object<'js>> {
     let native = Object::new_proto(ctx.clone(), None)?;
 
     let snapshot_cwd = Rc::clone(&cwd);
@@ -1343,7 +1371,7 @@ fn build_native<'js>(ctx: &Ctx<'js>, cwd: Rc<RefCell<WorkingDirectory>>) -> JsRe
 
     let read_file_cwd = Rc::clone(&cwd);
     native.set(
-        "readFile",
+        "readFileSync",
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'js>, path: String| -> JsResult<Object<'js>> {
@@ -1351,6 +1379,7 @@ fn build_native<'js>(ctx: &Ctx<'js>, cwd: Rc<RefCell<WorkingDirectory>>) -> JsRe
             },
         )?,
     )?;
+    read_async::install(ctx, &native, driver, Rc::clone(&cwd))?;
 
     let write_file_cwd = Rc::clone(&cwd);
     native.set(
@@ -1525,7 +1554,11 @@ pub(crate) fn factory<'js>(ctx: &Ctx<'js>) -> JsResult<Function<'js>> {
 /// `FsError` identities, but the module's copy is a separate object holding the
 /// original values. Replacing a property on `fs` therefore cannot replace an
 /// imported function.
-pub(crate) fn install<'js>(ctx: &Ctx<'js>, state: &Rc<RefCell<FsState>>) -> JsResult<Object<'js>> {
+pub(crate) fn install<'js>(
+    ctx: &Ctx<'js>,
+    state: &Rc<RefCell<FsState>>,
+    driver: ReadDriver,
+) -> JsResult<Object<'js>> {
     let (factory, cwd) = {
         let state = state.borrow();
         (
@@ -1534,7 +1567,7 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, state: &Rc<RefCell<FsState>>) -> JsRe
         )
     };
     let factory = factory.restore(ctx)?;
-    let native = build_native(ctx, cwd)?;
+    let native = build_native(ctx, cwd, driver)?;
     let config = build_config(ctx)?;
     let api: Object = factory.call((native, config))?;
 

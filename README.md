@@ -1443,7 +1443,7 @@ permissions. `neo:fs` and `neo:exec` do not consult this module.
 
 ## Filesystem
 
-`neo:fs` is a synchronous, bounded subset of the usual filesystem API. It is
+`neo:fs` is a bounded subset of the usual filesystem API. It is
 available only with `--allow-fs` and only when the runtime's module allowlist
 admits `neo:fs`. Both gates are checked before the `fs` global or any native
 callback is built. The global `fs` object and the module expose the same
@@ -1453,7 +1453,8 @@ functions and `FsError` class.
 | --- | --- |
 | `readText(path)` | Read a regular file as UTF-8 text. |
 | `writeText(path, data)` | Write text, creating or truncating the file. |
-| `readFile(path)` | Read a regular file as a `Uint8Array`. |
+| `readFile(path)` | Read a regular file on a worker; returns a `Promise<Uint8Array>`. |
+| `readFileSync(path)` | Read a regular file as a `Uint8Array`, blocking the JavaScript thread. |
 | `writeFile(path, data, options?)` | Write a `Uint8Array`; `{overwrite: false}` is create-new. |
 | `copyFile(source, destination)` | Stream a regular file into a new file; never overwrite. |
 | `stat(path)` | Metadata, following a final symlink. |
@@ -1484,9 +1485,53 @@ never falls back to the host directory. Absolute paths and `..` components
 still reach everything the host user can reach; the working directory is
 coordination, not confinement.
 
+### Binary read migration
+
+`readFile` now returns a Promise on both `fs` and `neo:fs`. Rename an existing
+blocking call to `readFileSync`, or use `await readFile(path)` in a module.
+All other filesystem methods remain synchronous. During module evaluation,
+invalid arguments and filesystem errors reject the Promise; `readFileSync`
+still throws. Outside a managed module evaluation (for example, a Rust
+embedder calling `NeoJs::eval`, `NeoJs::run`, or the CLI's automatic
+`neo:test` runner after the module has returned), `readFile` throws
+`FS_ASYNC_OUTSIDE_TURN` before any I/O.
+
+Each managed evaluation can have four accepted reads outstanding, including
+results not yet delivered; at most two run concurrently on workers. Each
+reserves up to the maximum read size plus its resolved path, with a combined
+budget of four times that maximum. Excess work rejects with `FS_LIMIT`;
+these bounds do not cover buffers that JavaScript retains after delivery.
+The working directory is captured at the call. The Promise resolves to a
+new `Uint8Array`; no order between concurrent reads is guaranteed.
+
+The blocking Rust module facade and CLI drive QuickJS jobs and the read
+workers to quiescence, including for top-level `await` and dynamic imports.
+Before the module starts, pending Promises or queued jobs left by `eval`,
+`run`, or the host test runner cause `NEO_MODULE_DIRTY`; they are not executed
+in a later module turn. Within a module, live unresolved Promises without any
+source of progress cause `NEO_MODULE_STALLED`, including detached dynamic
+imports waiting on top-level `await`. A rejection left unhandled at
+quiescence is `NEO_UNHANDLED_REJECTION`. The driver allows 100,000 steps and
+tracks at most 4,096 pending Promise identities and 128 unhandled
+rejections; exceeding these bounds reports `NEO_MODULE_LIMIT`, not a timeout.
+The tracker does not keep otherwise collectible Promises or their results
+alive. It checks for unreachable cycles before refusing pending work and
+checks for any cleanup jobs that collection queued. A collected unhandled
+rejection still counts as unhandled. Live never-settled Promises prevent
+quiescence even if they can never resume.
+
+There is no caller cancellation API. On a module failure with outstanding
+reads, queued reads are cancelled, running reads stop between chunks where
+possible, and pending reads reject with `FS_CANCELLED`. A stall, dirty
+module entry, exhausted step or pending-Promise budget, failed turn with
+unfinished work, or Rust panic during a managed turn leaves the runtime
+unusable (`NEO_MODULE_ABORTED`). Remaining reactions are not run; on Rust
+unwind the owner drops settlement handles without calling JavaScript.
+An OS call already in progress can delay teardown.
+
 ### Files and sizes
 
-`readFile`, `readText`, `writeFile`, and `writeText` require a regular file.
+`readFile`, `readFileSync`, `readText`, `writeFile`, and `writeText` require a regular file.
 An open may occur before a non-regular object is rejected. An identified
 directory reports `FS_IS_DIRECTORY`; other identified non-regular objects
 report `FS_TYPE`. If opening fails before the type can be identified, the
@@ -1638,7 +1683,7 @@ that guarantee or make the result of an error uncertain.
 | Constant | Value | Applies to |
 | --- | ---: | --- |
 | `MAX_PATH_BYTES` | 32 KiB | Every path argument. |
-| `MAX_READ_BYTES` | 64 MiB | `readText`, `readFile`, and `copyFile`. |
+| `MAX_READ_BYTES` | 64 MiB | `readText`, `readFile`, `readFileSync`, and `copyFile`. |
 | `MAX_WRITE_BYTES` | 64 MiB | `writeText` and `writeFile`. |
 | `MAX_LIST_ENTRIES` | 100,000 | Entries returned by `readDir`. |
 | `MAX_LIST_NAME_BYTES` | 1 KiB | One directory-entry name. |
@@ -1683,6 +1728,8 @@ option proxy traps can propagate.
 | `FS_CWD` | A relative operation needs an unavailable runtime working directory. |
 | `FS_TYPE` | The path is not a regular file. |
 | `FS_UNSUPPORTED` | The operation or input is unsupported, e.g. direct removal of a Windows directory symlink or writing from a `SharedArrayBuffer` view. |
+| `FS_ASYNC_OUTSIDE_TURN` | `readFile` was called outside managed module evaluation. |
+| `FS_CANCELLED` | An outstanding `readFile` was cancelled after module evaluation failed. |
 | `FS_IO` | Any other filesystem failure. |
 
 ### Authority and races
@@ -2120,9 +2167,11 @@ Failure semantics:
 - Tests run synchronously, in registration order, in the entry module's single
   global context. A test that throws is recorded and the run continues, so one
   failure cannot hide the others.
-- The CLI exits non-zero when any executed test failed. Tests registered before
-  an uncaught module error still run, and both failures are reported. A runner
-  error or inconsistent host counts is also a failure, never a silent pass.
+- The CLI exits non-zero when any executed test failed. After an ordinary
+  module error, registered tests still run and both failures are reported.
+  If module evaluation abandoned the runtime, the CLI instead reports
+  `NEO_MODULE_ABORTED` alongside the module error and runs no tests or queued
+  jobs. A runner error or inconsistent host counts is never a silent pass.
 - `run()` is available for a script that wants results immediately. It returns
   this run's counts and throws `TestFailureError` (`code: "NEO_TEST_FAILURES"`)
   after printing. Catching that error does not make the process succeed: the
@@ -2185,8 +2234,10 @@ Failure semantics:
 
 When embedding the library, call `NeoJs::run_pending_tests()` after evaluating
 the entry module. It returns `None` when `neo:test` was never imported, or a
-cumulative `TestReport`; it does not print beyond what the module writes to
-`console` and does not choose a process exit status.
+cumulative `TestReport` on a usable runtime. On an abandoned runtime it
+returns `NEO_MODULE_ABORTED` without executing tests or pending jobs. It
+does not print beyond what the module writes to `console` and does not
+choose a process exit status.
 
 ## Embed the runtime
 
@@ -2257,12 +2308,12 @@ source-breaking changes; no compatibility guarantee is implied.
 
 This is a first implementation, not an isolation boundary. It does not limit
 CPU or memory use. Do not run untrusted scripts without OS-level isolation.
-The runtime has no external event loop. TypeScript support erases types only:
+The module driver supports QuickJS jobs and asynchronous binary reads, not a
+general external event loop. TypeScript support erases types only:
 there is no type checking, constructs that need a transform are rejected, and
-no source map is produced. Every host API, including `neo:test` and
-`neo:assert`, is synchronous; there is
-no asynchronous counterpart to await, and a Promise returned to a synchronous
-API is rejected or treated as a failure rather than silently left pending.
+no source map is produced. Only `neo:fs.readFile` is asynchronous; `neo:test`
+and `neo:assert` remain synchronous, and a Promise returned to a synchronous
+callback API is rejected or treated as a failure rather than silently left pending.
 `neo:toml` and `neo:yaml` parse text only: neither has a file loader, expands
 no alias or variable, and reads no environment.
 Test support is registration-based: it does not discover test files, isolate

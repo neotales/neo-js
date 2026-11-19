@@ -92,9 +92,9 @@ fn print_third_party_notices() -> ExitCode {
 
 /// Run the entry module, then any tests it registered with `neo:test`.
 ///
-/// Tests run even when module evaluation failed, so a test registered before
-/// an uncaught error is still executed and reported. Every error is collected;
-/// one failure does not hide another.
+/// Tests registered before an ordinary module error still run. An abandoned
+/// runtime refuses to execute them and reports `NEO_MODULE_ABORTED` alongside
+/// the module error, rather than running code with unfinished work.
 fn execute(requested_script: &Path, args: &Args) -> Result<(), Vec<String>> {
     let script =
         std::fs::canonicalize(requested_script).map_err(|error| vec![error.to_string()])?;

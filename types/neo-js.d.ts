@@ -25,7 +25,7 @@ declare const env: {
 /**
  * The `neo:fs` API. Available only with `--allow-fs` and when the runtime's
  * module allowlist admits `neo:fs`. Relative paths use the runtime's working
- * directory, not the host process's. Every call is synchronous and blocking.
+ * directory, not the host process's. Only `readFile` is asynchronous.
  *
  * This is not a sandbox: a script with this object has the host user's
  * filesystem authority. Reads and writes are bounded; see the `neo:fs`
@@ -35,7 +35,14 @@ declare const fs: {
   readText(path: string): string;
   /** Same text validation and error precedence as `neo:fs.writeText`. */
   writeText(path: string, data: string): void;
-  readFile(path: string): Uint8Array;
+  /**
+   * Read bytes during managed module evaluation. Outside it, this throws
+   * `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. At most four reads are
+   * outstanding and two can run on workers. There is no caller cancellation
+   * API; teardown cancels cooperatively and may wait for an OS call.
+   */
+  readFile(path: string): Promise<Uint8Array>;
+  readFileSync(path: string): Uint8Array;
   writeFile(
     path: string,
     data: Uint8Array,
@@ -109,7 +116,7 @@ declare module "neo:env" {
  * than falling back to the host directory. Absolute paths and `..` components
  * still reach everything the host user can reach. This is not a sandbox.
  *
- * `readFile`, `readText`, `writeFile`, and `writeText` require a regular file.
+ * `readFile`, `readFileSync`, `readText`, `writeFile`, and `writeText` require a regular file.
  * An open may occur before a non-regular object is rejected. If the type is
  * identified, the error is `FS_IS_DIRECTORY` or `FS_TYPE`; an open failure
  * can take precedence. Device-open side effects and latency are not bounded.
@@ -119,7 +126,7 @@ declare module "neo:env" {
  * and fallible allocation failures; this cannot catch every failure inside
  * QuickJS or the process allocator.
  *
- * `stat`, `readFile`, `readText`, `writeFile`, `writeText`, `exists`, and
+ * `stat`, `readFile`, `readFileSync`, `readText`, `writeFile`, `writeText`, `exists`, and
  * `readDir` follow a symlink at the final path component. `lstat` does not.
  * `readDir` does not follow entries and reports a symlink entry with
  * `isSymlink: true`. `remove` never follows a symlink at the target, and
@@ -174,6 +181,8 @@ declare module "neo:fs" {
     | "FS_CWD"
     | "FS_TYPE"
     | "FS_UNSUPPORTED"
+    | "FS_ASYNC_OUTSIDE_TURN"
+    | "FS_CANCELLED"
     | "FS_IO";
 
   /**
@@ -285,13 +294,25 @@ declare module "neo:fs" {
   export function writeText(path: string, data: string): void;
 
   /**
-   * Read a regular file as bytes.
+   * Read a regular file on a worker, using the runtime directory captured
+   * at the call. Only available during managed module evaluation; otherwise
+   * throws `FS_ASYNC_OUTSIDE_TURN` before I/O. In a managed turn, invalid
+   * arguments and I/O errors reject the Promise. A module turn accepts up
+   * to four outstanding reads (including undelivered results) and runs up
+   * to two on workers; excess work rejects with `FS_LIMIT`. There is no
+   * caller cancellation API. Turn teardown cancels cooperatively and may
+   * wait for an OS call to return. Use `readFileSync` to block.
+   */
+  export function readFile(path: string): Promise<Uint8Array>;
+
+  /**
+   * Read a regular file as bytes, blocking the JavaScript thread.
    *
    * Returns a `Uint8Array` view over a new buffer. The same regular-file and
    * `MAX_READ_BYTES` rules as `readText` apply. The result is a copy, not a
    * live view of the file.
    */
-  export function readFile(path: string): Uint8Array;
+  export function readFileSync(path: string): Uint8Array;
 
   /**
    * Synchronously stream bytes from a regular file into a new regular file.

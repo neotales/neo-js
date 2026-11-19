@@ -53,6 +53,7 @@ mod fs;
 mod hash;
 mod js_text;
 mod loader;
+mod module_turn;
 mod modules;
 mod os;
 mod process;
@@ -89,7 +90,7 @@ use rquickjs::{Context, Function, Module, Object, Persistent, Runtime, function:
 /// field explicitly.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Permissions {
-    /// Allow synchronous filesystem access through `neo:fs`, plus file reads
+    /// Allow filesystem access through `neo:fs`, plus file reads
     /// by `neo:hash.digestFile` and file writes by `neo:fetch.download`.
     ///
     /// `neo:fs` provides bounded binary and UTF-8 reads and writes, metadata,
@@ -178,6 +179,10 @@ pub struct NeoJs {
     // `neo:fs` keeps its native callbacks private. The state holds the pristine
     // export object built in the fresh realm before user code runs.
     fs: Rc<RefCell<fs::FsState>>,
+    reads: fs::ReadDriver,
+    module_turns: module_turn::ModuleTurns,
+    #[cfg(test)]
+    before_drive: RefCell<Option<Box<dyn FnOnce()>>>,
     // The runtime-local working directory. It is never installed on the host
     // process and is shared only with this runtime's host callbacks.
     cwd: Rc<RefCell<cwd::WorkingDirectory>>,
@@ -203,6 +208,7 @@ struct TestState {
 
 impl Drop for NeoJs {
     fn drop(&mut self) {
+        self.module_turns.clear(&self._runtime);
         // Release persistent values while the runtime is still alive.
         // Host closures may keep the surrounding `TestState` alive, but it no
         // longer holds a JS value by the time the runtime is dropped.
@@ -322,6 +328,8 @@ impl NeoJs {
             os::Metadata::default()
         };
         let runtime = Runtime::new()?;
+        let module_turns = module_turn::ModuleTurns::new(&runtime)?;
+        let reads = fs::ReadDriver::default();
         let formats = Rc::new(RefCell::new(loader::ModuleFormats::default()));
         let cwd = Rc::new(RefCell::new(cwd::WorkingDirectory::new()));
         runtime.set_loader(
@@ -469,7 +477,7 @@ impl NeoJs {
                     .map_err(|_| rquickjs::Error::Unknown)?;
                 let fs_factory = fs::factory(&ctx)?;
                 fs.borrow_mut().factory = Some(Persistent::save(&ctx, fs_factory));
-                let fs_api = fs::install(&ctx, &fs)?;
+                let fs_api = fs::install(&ctx, &fs, reads.clone())?;
                 globals.set("fs", fs_api)?;
             }
             // Both admitted modules share a private callback guard created
@@ -575,6 +583,7 @@ impl NeoJs {
             }
             Ok(())
         })?;
+        module_turns.install(&runtime);
         Ok(Self {
             context,
             filesystem: permissions.filesystem,
@@ -589,6 +598,10 @@ impl NeoJs {
             winregistry,
             fetch,
             fs,
+            reads,
+            module_turns,
+            #[cfg(test)]
+            before_drive: RefCell::default(),
             cwd,
             stdio,
             exec,
@@ -598,6 +611,7 @@ impl NeoJs {
 
     /// Evaluate JavaScript as a script and return its string result.
     pub fn eval(&self, source: &str) -> Result<String, String> {
+        self.module_turns.ensure_usable()?;
         self.context.with(|ctx| {
             ctx.eval::<String, _>(source).map_err(|error| {
                 use rquickjs::CatchResultExt;
@@ -608,6 +622,7 @@ impl NeoJs {
 
     /// Run JavaScript as a script, discarding its result.
     pub fn run(&self, source: &str) -> Result<(), String> {
+        self.module_turns.ensure_usable()?;
         self.context.with(|ctx| {
             ctx.eval::<(), _>(source).map_err(|error| {
                 use rquickjs::CatchResultExt;
@@ -630,8 +645,13 @@ impl NeoJs {
 
     /// Evaluate an ECMAScript module. The name is the base path for relative imports.
     ///
-    /// Relative imports require filesystem permission. This method runs pending
-    /// QuickJS jobs until evaluation settles, but provides no external event loop.
+    /// Relative imports require filesystem permission. This blocking facade
+    /// drives QuickJS jobs and filesystem read completions to quiescence.
+    /// Earlier script or test execution must not leave pending Promises or
+    /// jobs (`NEO_MODULE_DIRTY`). A live unresolved Promise with no remaining
+    /// source of progress reports `NEO_MODULE_STALLED`, even after the entry
+    /// itself has fulfilled. Stalls, driver step exhaustion, and errors with
+    /// unfinished work abandon the runtime; create a new one to continue.
     ///
     /// With filesystem permission, an existing entry name and each relative
     /// dependency are canonicalized using the filesystem, including symlinks.
@@ -683,6 +703,7 @@ impl NeoJs {
     /// `TS_EXTENSION` error. Any other name is evaluated as JavaScript, byte for
     /// byte, so a `.js` file containing type syntax still fails.
     pub fn run_module(&self, name: &str, source: &str) -> Result<(), String> {
+        self.module_turns.ensure_usable()?;
         if name.starts_with("neo:") {
             return Err("neo: module identities are reserved".to_owned());
         }
@@ -721,10 +742,13 @@ impl NeoJs {
         identity: &str,
         source: &str,
     ) -> Result<(), String> {
+        self.module_turns.ensure_usable()?;
         if name.starts_with("neo:") || identity.starts_with("neo:") {
             return Err("neo: module identities are reserved".to_owned());
         }
         self.formats.borrow().ensure_usable()?;
+        self.module_turns
+            .require_idle(&self.context, &self._runtime)?;
         let stripped = typescript::strip_if_typescript(name, source)?;
         let source = stripped.as_deref().unwrap_or(source);
         let base = self.module_base_dir(identity);
@@ -732,18 +756,30 @@ impl NeoJs {
             .formats
             .borrow_mut()
             .reserve_entry(identity, name, base)?;
-        self.context.with(|ctx| {
-            use rquickjs::CatchResultExt;
+        let turn = self.module_turns.begin();
+        let reads = self.reads.begin();
+        let entry = self.context.with(|ctx| {
             let declared = Module::declare(ctx.clone(), identity, source);
             self.formats
                 .borrow_mut()
                 .complete(identity, token, declared.is_ok());
             declared
                 .and_then(|module| module.eval())
-                .and_then(|(_, promise)| promise.finish::<()>())
-                .catch(&ctx)
-                .map_err(|error| error.to_string())
-        })
+                .map(|(_, promise)| {
+                    module_turn::observe_entry(&promise);
+                    Persistent::save(&ctx, promise)
+                })
+                .map_err(|error| module_turn::js_error(&ctx, error))
+        });
+        let result = entry.and_then(|root| {
+            #[cfg(test)]
+            if let Some(before_drive) = self.before_drive.borrow_mut().take() {
+                before_drive();
+            }
+            turn.drive(&self.context, &self._runtime, &reads, root)
+        });
+        turn.finish(&self.context, &self._runtime, &reads, result.is_err());
+        result
     }
 
     /// Run every test registered through `neo:test` and return cumulative counts.
@@ -769,8 +805,11 @@ impl NeoJs {
     /// This does not decide process status. The CLI exits non-zero when
     /// [`TestReport::all_passed`] is false. Returns an error when the runner
     /// raises an exception or its counts are inconsistent; inconsistent state
-    /// is never treated as success.
+    /// is never treated as success. If module evaluation abandoned the
+    /// runtime, returns `NEO_MODULE_ABORTED` without running registered tests
+    /// or any other script code.
     pub fn run_pending_tests(&self) -> Result<Option<TestReport>, String> {
+        self.module_turns.ensure_usable()?;
         let runner = self.tests.borrow().runner.as_ref().cloned();
         let Some(runner) = runner else {
             return Ok(None);

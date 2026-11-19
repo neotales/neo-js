@@ -62,9 +62,11 @@ fn permission_and_allowlist_gate_the_global_and_the_module() {
         &allowed,
         "import * as module from 'neo:fs';
          if (typeof fs.readFile !== 'function') throw Error('missing global readFile');
+         if (typeof fs.readFileSync !== 'function') throw Error('missing global readFileSync');
          if (typeof fs.readText !== 'function') throw Error('missing global readText');
          if (typeof module.writeFile !== 'function') throw Error('missing module writeFile');
          if (module.readFile !== fs.readFile) throw Error('module and global differ');
+         if (module.readFileSync !== fs.readFileSync) throw Error('sync module and global differ');
          if (typeof module.rename !== 'function' || module.rename !== fs.rename) {
            throw Error('missing or mismatched rename');
          }
@@ -80,6 +82,237 @@ fn permission_and_allowlist_gate_the_global_and_the_module() {
 }
 
 #[test]
+fn binary_read_rejects_asynchronously_and_sync_read_still_throws() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = literal(&dir.path().join("not-here"));
+    let file = dir.path().join("fixture");
+    fs::write(&file, [0, 255, 7]).unwrap();
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{readFile, readFileSync, FsError}} from 'neo:fs';
+            const p = readFile({missing});
+            if (!(p instanceof Promise)) throw Error('expected a native Promise');
+            try {{ await p; throw Error('expected rejection'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
+            }}
+            try {{ readFileSync({missing}); throw Error('expected synchronous throw'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
+            }}
+            try {{ await readFile(null); throw Error('expected type rejection'); }}
+            catch (error) {{ if (!(error instanceof TypeError)) throw error; }}
+            Object.defineProperty(Uint8Array.prototype, 'then', {{
+                get() {{ throw Error('result escaped through then'); }}, configurable: true
+            }});
+            const bytes = await fs.readFile({file});
+            if (!(bytes instanceof Uint8Array) || bytes.length !== 3 || bytes[1] !== 255 ||
+                Object.hasOwn(bytes, 'then')) throw Error('wrong bytes');"#,
+            file = literal(&file),
+        ),
+    );
+    js.run(
+        "try { fs.readFile('fixture'); throw Error('dispatched outside managed turn'); }
+         catch (error) { if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn computed_dynamic_import_and_transitive_top_level_await_use_captured_cwd() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    fs::write(first.path().join("bytes"), b"a").unwrap();
+    fs::write(second.path().join("bytes"), b"b").unwrap();
+    fs::write(
+        first.path().join("leaf.js"),
+        format!(
+            "import {{readFile}} from 'neo:fs';
+             import {{chdir}} from 'neo:process';
+             const pending = readFile('bytes'); chdir({});
+             export const before = (await pending)[0];
+             export const after = (await readFile('bytes'))[0];",
+            literal(second.path()),
+        ),
+    )
+    .unwrap();
+    fs::write(
+        first.path().join("dep.js"),
+        "export {before, after} from './leaf.js';",
+    )
+    .unwrap();
+    let entry = first.path().join("entry.js");
+    let js = chunked_runtime();
+    js.run_module(
+        entry.to_str().unwrap(),
+        &format!(
+            "import {{chdir}} from 'neo:process'; chdir({});
+             const pieces = ['.', 'dep.js'];
+             const dep = await import(pieces.join('/'));
+             if (dep.before !== 97 || dep.after !== 98) throw Error('cwd not captured');",
+            literal(first.path()),
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn owner_reports_unhandled_read_rejections_and_stalled_modules() {
+    let dir = tempfile::tempdir().unwrap();
+    let js = runtime();
+    let missing = literal(&dir.path().join("not-here"));
+    js.run_module(
+        "caught.js",
+        &format!(
+            "const pending = fs.readFile({missing});
+             await Promise.resolve(); pending.catch(() => {{}});"
+        ),
+    )
+    .unwrap();
+    let unhandled = js
+        .run_module("unhandled.js", &format!("fs.readFile({missing});"))
+        .unwrap_err();
+    assert!(unhandled.contains("NEO_UNHANDLED_REJECTION"));
+    let stalled = js
+        .run_module(
+            "stalled.js",
+            "await new Promise(resolve => globalThis.resume = resolve);
+             throw Error('a later turn must not run this');",
+        )
+        .unwrap_err();
+    assert!(stalled.contains("NEO_MODULE_STALLED"));
+    assert!(
+        js.run_module("cannot-resume.js", "resume();")
+            .unwrap_err()
+            .contains("NEO_MODULE_ABORTED")
+    );
+}
+
+#[test]
+fn out_of_turn_jobs_or_resolvers_cannot_enter_a_managed_module() {
+    let filename = "should-never-read";
+    for initial in [
+        format!("Promise.resolve().then(() => fs.readFile('{filename}'));"),
+        format!(
+            "new Promise(resolve => globalThis.resume = resolve).then(() => fs.readFile('{filename}'));"
+        ),
+    ] {
+        let js = runtime();
+        js.run(&initial).unwrap();
+        let refusal = js.run_module("next.js", "").unwrap_err();
+        assert!(refusal.contains("NEO_MODULE_DIRTY"), "{refusal}");
+        assert!(js.eval("'x'").unwrap_err().contains("NEO_MODULE_ABORTED"));
+    }
+    let js = runtime();
+    js.eval("Promise.resolve().then(() => fs.readFile('should-never-read')); 'saved'")
+        .unwrap();
+    assert!(
+        js.run_module("eval-next.js", "")
+            .unwrap_err()
+            .contains("NEO_MODULE_DIRTY")
+    );
+    let js = runtime();
+    js.run_module(
+        "register.js",
+        "import test from 'neo:test';
+         test('schedules a job', () => { Promise.resolve().then(() => fs.readFile('no')); });",
+    )
+    .unwrap();
+    assert!(js.run_pending_tests().unwrap().unwrap().all_passed());
+    assert!(
+        js.run_module("test-next.js", "")
+            .unwrap_err()
+            .contains("NEO_MODULE_DIRTY")
+    );
+}
+
+#[test]
+fn detached_dynamic_import_cannot_hide_stalled_top_level_await() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("pending.js"),
+        "await new Promise(resolve => globalThis.resume = resolve);",
+    )
+    .unwrap();
+    let entry = dir.path().join("entry.js");
+    let js = runtime();
+    let error = js
+        .run_module(
+            entry.to_str().unwrap(),
+            "void import(['.', 'pending.js'].join('/'));",
+        )
+        .unwrap_err();
+    assert!(error.contains("NEO_MODULE_STALLED"), "{error}");
+    assert!(
+        js.run("resume();")
+            .unwrap_err()
+            .contains("NEO_MODULE_ABORTED")
+    );
+}
+
+#[test]
+fn settled_async_dependency_is_cached_across_successful_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("payload");
+    fs::write(&file, b"a").unwrap();
+    fs::write(
+        dir.path().join("dep.js"),
+        format!(
+            "import {{readFile}} from 'neo:fs';
+             export const byte = (await readFile({}))[0];",
+            literal(&file),
+        ),
+    )
+    .unwrap();
+    let js = runtime();
+    for (entry, byte) in [("first.js", b'a'), ("second.js", b'b')] {
+        fs::write(&file, [byte]).unwrap();
+        js.run_module(
+            dir.path().join(entry).to_str().unwrap(),
+            "const loaded = await import(['.', 'dep.js'].join('/'));
+             if (loaded.byte !== 97) throw Error('dependency did not retain cached result');",
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn async_path_errors_keep_codes_after_public_error_constructor_tampering() {
+    let js = runtime();
+    run(
+        &js,
+        r#"import {readFile, FsError, MAX_PATH_BYTES} from 'neo:fs';
+           Object.setPrototypeOf(FsError, function () { throw Error('intercepted'); });
+           for (const [path, code] of [
+               ['', 'FS_PATH'], ['\uD800', 'FS_ENCODING'],
+               ['x'.repeat(MAX_PATH_BYTES + 1), 'FS_LIMIT'], ['x\0', 'FS_PATH'],
+           ]) {
+               try { await readFile(path); throw Error('expected rejection'); }
+               catch (error) {
+                   if (!(error instanceof FsError) || error.code !== code) throw error;
+               }
+           }"#,
+    );
+}
+
+#[test]
+fn a_failed_module_cannot_submit_reads_through_jobs_in_a_later_turn() {
+    let js = runtime();
+    let failure = js
+        .run_module(
+            "failed.js",
+            "Promise.resolve().then(() => fs.readFile('should-not-be-read'));
+             throw Error('entry failure');",
+        )
+        .unwrap_err();
+    assert!(failure.contains("entry failure"));
+    let next = js.run_module("next.js", "").unwrap_err();
+    assert!(next.contains("NEO_MODULE_ABORTED"));
+}
+
+#[test]
 fn text_and_binary_round_trip_with_unicode_names_and_content() {
     let dir = tempfile::tempdir().unwrap();
     let text = dir.path().join("héllo-文件-😀.txt");
@@ -87,7 +320,7 @@ fn text_and_binary_round_trip_with_unicode_names_and_content() {
 
     let js = runtime();
     let source = r#"
-        import {readText, writeText, readFile, writeFile} from 'neo:fs';
+        import {readText, writeText, readFileSync, writeFile} from 'neo:fs';
         const textPath = __TEXT__;
         const binaryPath = __BINARY__;
         const text = '\uFEFFline 1\r\nhéllo 世界 😀\u0000tail';
@@ -98,7 +331,7 @@ fn text_and_binary_round_trip_with_unicode_names_and_content() {
         const bytes = new Uint8Array(256);
         for (let index = 0; index < 256; index++) bytes[index] = index;
         writeFile(binaryPath, bytes);
-        const back = readFile(binaryPath);
+        const back = readFileSync(binaryPath);
         if (!(back instanceof Uint8Array)) throw Error('not a Uint8Array');
         if (back.length !== 256) throw Error('wrong length');
         for (let index = 0; index < 256; index++) {
@@ -107,7 +340,7 @@ fn text_and_binary_round_trip_with_unicode_names_and_content() {
 
         // A subarray writes only its own view, not the whole backing buffer.
         writeFile(binaryPath, bytes.subarray(10, 13));
-        const view = readFile(binaryPath);
+        const view = readFileSync(binaryPath);
         if (view.length !== 3 || view[0] !== 10 || view[1] !== 11 || view[2] !== 12) {
             throw Error('subarray length');
         }
@@ -150,7 +383,7 @@ fn stable_errors_never_include_the_supplied_path() {
     fs::write(dir.path().join("existing.txt"), "still usable").unwrap();
     let js = runtime();
     let source = r#"
-        import {readText, readFile, writeText, writeFile, stat, exists, readDir, mkdir, remove, FsError} from 'neo:fs';
+        import {readText, readFileSync, writeText, writeFile, stat, exists, readDir, mkdir, remove, FsError} from 'neo:fs';
 
         function expectFsError(code, action) {
             try { action(); }
@@ -174,7 +407,7 @@ fn stable_errors_never_include_the_supplied_path() {
         const missing = __MISSING__;
         const error = expectFsError('FS_NOT_FOUND', () => readText(missing));
         if (error.message.includes(missing)) throw Error('path leaked in message');
-        expectFsError('FS_NOT_FOUND', () => readFile(missing));
+        expectFsError('FS_NOT_FOUND', () => readFileSync(missing));
         expectFsError('FS_NOT_FOUND', () => stat(missing));
         expectFsError('FS_NOT_FOUND', () => remove(missing));
 
@@ -190,7 +423,7 @@ fn stable_errors_never_include_the_supplied_path() {
         expectFsError('FS_ENCODING', () => writeText(missing, 'bad\uD800'));
 
         expectTypeError(() => readText(123));
-        expectTypeError(() => readFile(null));
+        expectTypeError(() => readFileSync(null));
         expectTypeError(() => writeFile(missing, 'text'));
         expectTypeError(() => writeFile(missing, new DataView(new ArrayBuffer(2))));
         expectTypeError(() => writeFile(missing, new Uint16Array([1])));
@@ -233,14 +466,14 @@ fn binary_write_snapshots_live_view_bounds_and_rejects_invalid_views_before_opti
     fs::write(&file, [7, 8, 9]).unwrap();
 
     let source = r#"
-        import {writeFile, readFile, FsError} from 'neo:fs';
+        import {writeFile, readFileSync, FsError} from 'neo:fs';
         const file = __FILE__;
         let traps = 0;
         const options = new Proxy({}, {
             ownKeys() { traps++; return []; },
         });
         function assertBytes(expected) {
-            const actual = readFile(file);
+            const actual = readFileSync(file);
             if (actual.length !== expected.length) throw Error('wrong length: ' + actual);
             for (let i = 0; i < actual.length; i++) {
                 if (actual[i] !== expected[i]) throw Error('wrong byte: ' + actual);
@@ -375,7 +608,7 @@ fn options_are_own_data_properties_and_paths_snapshot_cwd_before_proxy_traps() {
     let js = chunked_runtime();
     let source = r#"
         import {chdir} from 'neo:process';
-        import {readFile, readText, writeFile, mkdir, remove, exists} from 'neo:fs';
+        import {readText, writeFile, mkdir, remove, exists} from 'neo:fs';
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
@@ -467,7 +700,7 @@ fn symlink_semantics_are_explicit() {
 
     let js = runtime();
     let source = r#"
-        import {readText, readFile, stat, lstat, exists, readDir, remove, FsError} from 'neo:fs';
+        import {readText, readFileSync, stat, lstat, exists, readDir, remove, FsError} from 'neo:fs';
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
@@ -496,7 +729,7 @@ fn symlink_semantics_are_explicit() {
         if (exists(dangling) !== false) throw Error('exists dangling');
         if (lstat(dangling).isSymlink !== true) throw Error('lstat dangling');
         expectFsError('FS_NOT_FOUND', () => stat(dangling));
-        if (readFile(link)[0] !== 97) throw Error('read did not follow link');
+        if (readFileSync(link)[0] !== 97) throw Error('read did not follow link');
 
         const entries = readDir(dir);
         const names = entries.map((entry) => entry.name);
@@ -1084,7 +1317,7 @@ fn reads_are_bounded_before_allocation_and_sizes_stay_decimal() {
     drop(handle);
 
     let source = r#"
-        import {readText, readFile, writeFile, stat, exists, FsError} from 'neo:fs';
+        import {readText, readFileSync, writeFile, stat, exists, FsError} from 'neo:fs';
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
@@ -1098,7 +1331,13 @@ fn reads_are_bounded_before_allocation_and_sizes_stay_decimal() {
         const output = __OUTPUT__;
 
         expectFsError('FS_LIMIT', () => readText(big));
-        expectFsError('FS_LIMIT', () => readFile(big));
+        expectFsError('FS_LIMIT', () => readFileSync(big));
+        try {
+            await fs.readFile(big);
+            throw Error('oversize async read fulfilled');
+        } catch (error) {
+            if (error.code !== 'FS_LIMIT') throw error;
+        }
         if (stat(big).size !== String(fs.MAX_READ_BYTES + 1)) throw Error('size rounding');
 
         // Check the limit before resolving or opening: the output must not exist.
@@ -1226,7 +1465,7 @@ fn module_exports_survive_global_prototype_and_callback_replacement() {
 
     let js = runtime();
     let source = r#"
-        import {readText, readFile, stat, readDir, FsError} from 'neo:fs';
+        import {readText, readFileSync, stat, readDir, FsError} from 'neo:fs';
         const oldError = Error;
         const oldParse = JSON.parse;
         try {
@@ -1247,7 +1486,7 @@ fn module_exports_survive_global_prototype_and_callback_replacement() {
             });
 
             if (readText(__FILE__) !== 'payload') throw new oldError('readText broke');
-            if (readFile(__FILE__).length !== 7) throw new oldError('readFile broke');
+            if (readFileSync(__FILE__).length !== 7) throw new oldError('readFileSync broke');
             if (stat(__FILE__).size !== '7') throw new oldError('stat broke');
             const oldArrayProto = Array.prototype;
             Object.defineProperty(oldArrayProto, '0', {
