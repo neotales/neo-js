@@ -8,11 +8,20 @@ Version** while `main.mts` is open. Try completion on `os.` or hover over
 `stdout.write`. The config lists `../../types/neo-js.d.ts` as an input so the
 editor sees both the ambient globals and the `neo:` modules. That file is the
 generated CLI composition: core declarations plus the optional modules the CLI
-links, currently `neo:sqlite`. A host built without `neojs-sqlite` should use
-`../../types/neo-js.core.d.ts` instead, where the import is a type error. See
-`../../types/README.md` for the fragments and regeneration command. Keep the
-checkout layout, or copy the declaration into your own project and update
-`files` to match.
+links and registers, currently `neo:os` and `neo:sqlite`. For an embedder,
+match the declaration selection to the extensions the host registers:
+
+- Neither extension: use `../../types/neo-js.core.d.ts`.
+- Only `neojs-os`: compose with `--with os`.
+- Only `neojs-sqlite`: compose with `--with sqlite`.
+- Both extensions: use the existing CLI composition or compose with
+  `--with os --with sqlite`.
+
+Do not select declarations based on which runtime permissions a script has.
+The declaration files grant no permissions and do not override an allowlist.
+See [`types/README.md`](../../types/README.md) for the composer command. Keep
+the checkout layout, or copy the chosen declaration into your own project
+and update `files` to match.
 
 The config checks ES2022 plus `ESNext.Disposable` without loading DOM or
 automatic `@types` packages. `ESNext.Disposable` supplies `Symbol.dispose`,
@@ -33,8 +42,9 @@ cargo run --offline -p neojs -- --allow-stdio examples/typed-script/main.mts
 ```
 
 The script prints the target platform and architecture from `neo:os` and, when
-available, the operating-system release from the `os` global. OS metadata
-needs no permission in the CLI. `neo:process` needs `--allow-stdio` for this
+available, the operating-system release from the `os` global. The CLI registers
+the optional `neojs-os` crate, so OS metadata needs no permission. `neo:process`
+needs `--allow-stdio` for this
 example; no filesystem permission is needed. The runtime enforces permissions,
 not TypeScript. A script can type-check and still fail to import a module when
 its permission is absent or an embedder excludes it.
@@ -64,8 +74,8 @@ Run `./examples/typed-script/smoke.sh` from a POSIX shell to verify the
 checked-in composition, check the types, run the example, and verify the
 missing permission causes a failure. With `tsc` on `PATH`, the smoke test also
 checks for declaration collisions with the DOM and WebWorker libs separately,
-checks that the composed entry admits `neo:sqlite`, checks that the core entry
-rejects it with exactly `TS2307`, and checks that the positive fixture fails
-when the fragment is removed. Without `tsc`, it reports that the tsc-only
+checks that the composed entry admits `neo:os` and `neo:sqlite`, checks that
+the core entry rejects each with exactly `TS2307`, and checks that the positive
+SQLite fixture fails when the fragment is removed. Without `tsc`, it reports that the tsc-only
 absence check was not run, uses cached-only Deno, and still runs the
 fragment-removal mutation. No command installs dependencies.

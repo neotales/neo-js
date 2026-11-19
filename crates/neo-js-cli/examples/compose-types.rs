@@ -3,7 +3,7 @@
 //! Run from the checkout root:
 //!
 //! ```sh
-//! cargo run --offline -p neojs --example compose-types -- --with sqlite \
+//! cargo run --offline -p neojs --example compose-types -- --with os --with sqlite \
 //!   --check-cli-manifest --check types/neo-js.d.ts
 //! ```
 //!

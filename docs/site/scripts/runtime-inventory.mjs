@@ -16,6 +16,8 @@ const permissions = {
 	"neo:process": ["--allow-run", "--allow-stdio"],
 	"neo:sqlite": ["--allow-sqlite"],
 	"neo:winregistry": ["--allow-registry"],
+	// The CLI registers neojs-os; the exact extension name needs no flag.
+	"neo:os": [],
 	// Separate imports under the CLI's unrestricted allowlist; none needs a flag.
 	"neo:os/schedulers/systemd": [],
 	"neo:os/schedulers/windows": [],

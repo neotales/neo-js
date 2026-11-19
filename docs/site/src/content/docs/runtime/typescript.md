@@ -10,16 +10,28 @@ TypeScript language server. Its `tsconfig.json` loads the checked-in
 
 ## Select declarations
 
-| Declaration input                           | Use                                                                                                      |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `types/neo-js.core.d.ts`                    | A core-only embedder. It omits `neo:sqlite` and other optional modules.                                  |
-| `types/neo-js.d.ts`                         | The CLI build. This generated file combines core and the fragments for linked modules, currently SQLite. |
-| `crates/neojs-sqlite/types/neo-sqlite.d.ts` | The SQLite fragment owned by the optional crate, not a standalone core declaration file.                 |
+| Declaration input                           | Use                                                                                                   |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `types/neo-js.core.d.ts`                    | A core-only embedder. It omits `neo:os`, `os`, and `neo:sqlite`.                                      |
+| `types/neo-js.d.ts`                         | The CLI build. This generated file combines core and the fragments for `neojs-os` and `neojs-sqlite`. |
+| `crates/neojs-os/types/neo-os.d.ts`         | The `neo:os` and `os` fragment owned by `neojs-os`.                                                   |
+| `crates/neojs-sqlite/types/neo-sqlite.d.ts` | The SQLite fragment owned by the optional crate, not a standalone core declaration file.              |
 
-The declaration files record compiled availability, not permission.
+Choose declarations for the extensions the host links and registers, not for
+the permissions a script receives:
+
+- Neither: use `types/neo-js.core.d.ts`.
+- Only `neojs-os`: compose with `--with os`.
+- Only `neojs-sqlite`: compose with `--with sqlite`.
+- Both: use `types/neo-js.d.ts` or compose with `--with os --with sqlite`.
+
+The declaration files record module availability in the host build, not permission.
 An import can type-check yet fail at runtime if an extension is not registered,
-the allowlist omits it, or permission is missing. The core-only file does not
-declare `neo:sqlite` even on a CLI that could admit it with `--allow-sqlite`.
+the allowlist omits it, or a required permission is missing. `neo:os` needs
+both registration and allowlist admission but no permission flag.
+`neo:sqlite` also needs `Permissions::sqlite`. Neither module nor the `os`
+global is present in the core-only declarations, even when checking a script
+intended for the CLI.
 
 ## Compose and check declarations offline
 
@@ -31,17 +43,23 @@ to keep the build outputs separate.
 # Print the core-only composition.
 cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types
 
+# Print a composition for a host that registers only neojs-os.
+cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- --with os
+
+# Print a composition for a host that registers only neojs-sqlite.
+cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- --with sqlite
+
 # Print the CLI composition and verify its selection against the manifest.
 cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- \
-  --with sqlite --check-cli-manifest
+  --with os --with sqlite --check-cli-manifest
 
 # Regenerate the checked-in CLI entry.
 cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- \
-  --with sqlite --check-cli-manifest --output types/neo-js.d.ts
+  --with os --with sqlite --check-cli-manifest --output types/neo-js.d.ts
 
 # Verify the CLI entry without writing.
 cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- \
-  --with sqlite --check-cli-manifest --check types/neo-js.d.ts
+  --with os --with sqlite --check-cli-manifest --check types/neo-js.d.ts
 ```
 
 Core is always included. Repeat `--with` to select more fragments. Unknown or
@@ -70,10 +88,13 @@ tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler
   --lib ES2022,ESNext.Disposable --skipLibCheck false types/neo-js.d.ts types/sqlite.test.ts
 tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler \
   --skipLibCheck false types/neo-js.core.d.ts types/sqlite-absent.test.ts
+tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler \
+  --skipLibCheck false types/neo-js.core.d.ts types/os-absent.test.ts
 ```
 
-The last command must fail with exactly one `TS2307` for `neo:sqlite`.
-`examples/typed-script/smoke.sh` checks for that failure and checks that the
+The last two commands must each fail with exactly one `TS2307`, for
+`neo:sqlite` and `neo:os` respectively.
+`examples/typed-script/smoke.sh` checks for those failures and checks that the
 positive fixture does not silently treat `neo:sqlite` as `any`. Deno's
 cached-only check can exercise the composed declarations, but Deno treats
 unknown `scheme:` imports as external. Use `tsc` to verify core-only absence.

@@ -1,8 +1,89 @@
-//! Bounded, read-only operating-system metadata exposed by `neo:os`.
+//! Optional, bounded, read-only operating-system metadata for `neojs-core`.
+//!
+//! This crate supplies the exact `neo:os` module and the `os` global through
+//! [`neojs_core::extension`]. `neojs-core` itself does not compile this module,
+//! does not install the `os` global, and contains no built-in `neo:os`
+//! implementation. Registering this extension restores the previous behavior;
+//! the CLI does so explicitly.
 //!
 //! Linux reads os-release, Windows reads fixed OS identity values from the
-//! registry, and macOS queries its product version. No probe runs a command
-//! or takes a script-provided path or key.
+//! registry, and macOS queries its product version. No probe runs a command or
+//! takes a script-provided path or key.
+//!
+//! # Registration
+//!
+//! Register [`os_extension`] on the runtime options and name the exact module
+//! in any explicit allowlist. `neo:os` needs no permission flag:
+//! [`ExtensionPermission::None`] still means the runtime allowlist must admit
+//! the name.
+//!
+//! ```rust
+//! use neojs_core::{NeoJs, Permissions, RuntimeOptions};
+//! use neojs_os::{MODULE_NAME, with_os};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let options = with_os(RuntimeOptions::new())?.module_names([MODULE_NAME])?;
+//! let runtime = NeoJs::new_with_options(Permissions::default(), options)?;
+//! runtime.run_module(
+//!     "main.js",
+//!     "import {platform} from 'neo:os'; if (platform !== os.platform) throw Error('os');",
+//! )?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The `os` global is installed by the extension's initialization hook, which
+//! core runs before user code only when the allowlist admits at least one of
+//! the extension's modules. With an explicit allowlist that omits `neo:os`,
+//! neither the module nor the global exists. [`RuntimeOptions::default`] stays
+//! unrestricted and admits a registered extension.
+//!
+//! # Migration from the built-in module
+//!
+//! `neo:os` was previously a [`neojs_core::RuntimeModule`] variant compiled
+//! into `neojs-core`, and core installed the `os` global itself. That variant
+//! no longer exists, so code that named `RuntimeModule::Os` does not compile,
+//! and a core-only runtime no longer has `neo:os` or the global. Migrate as
+//! follows:
+//!
+//! ```rust,compile_fail
+//! # use neojs_core::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
+//! # fn before() -> Result<NeoJs, Box<dyn std::error::Error>> {
+//! // Before: this no longer compiles, because RuntimeModule::Os is gone.
+//! let js = NeoJs::new_with_options(
+//!     Permissions::default(),
+//!     RuntimeOptions::new().modules([RuntimeModule::Os]),
+//! )?;
+//! # Ok(js)
+//! # }
+//! ```
+//!
+//! Replace the built-in selection with an exact extension name:
+//!
+//! ```rust
+//! # use neojs_core::{NeoJs, Permissions, RuntimeOptions};
+//! # use neojs_os::{MODULE_NAME, with_os};
+//! # fn after() -> Result<NeoJs, Box<dyn std::error::Error>> {
+//! let options = with_os(RuntimeOptions::new())?.module_names([MODULE_NAME])?;
+//! let js = NeoJs::new_with_options(Permissions::default(), options)?;
+//! # Ok(js)
+//! # }
+//! ```
+//!
+//! [`neojs_core::ModuleAllowlist::all`] contains built-in modules only, so it
+//! no longer admits `neo:os`. Use
+//! [`neojs_core::ModuleAllowlist::all_with_extensions`] or add
+//! [`MODULE_NAME`] explicitly. A dependency on the `neojs` CLI is unchanged:
+//! it registers this extension itself, so `--allow-*` flags and the `os`
+//! global behave as before. The `neo:os/schedulers/*` modules remain built
+//! into core and are unaffected.
+
+use std::any::Any;
+
+use neojs_core::rquickjs::{Ctx, Error, Module, Object, Result as JsResult, module::Declared};
+use neojs_core::{
+    ExtensionDescriptor, ExtensionPermission, ExtensionRegistrationError, RuntimeOptions,
+};
 
 #[cfg(any(target_os = "macos", test))]
 mod macos;
@@ -20,14 +101,74 @@ const MAX_VALUE_BYTES: usize = 4096;
 /// Optional descriptive host metadata. `version` identifies the OS release
 /// or Windows build, never a Unix kernel release.
 #[derive(Clone, Default)]
-pub(crate) struct Metadata {
-    pub(crate) version: Option<String>,
-    pub(crate) codename: Option<String>,
-    pub(crate) variant: Option<String>,
+struct Metadata {
+    version: Option<String>,
+    codename: Option<String>,
+    variant: Option<String>,
+}
+
+/// The exact `neo:` module name supplied by this crate.
+///
+/// Use this constant when constructing an explicit
+/// [`neojs_core::ModuleAllowlist`] or calling
+/// [`RuntimeOptions::module_names`], so the name is not retyped.
+pub const MODULE_NAME: &str = "neo:os";
+
+/// Build the static extension descriptor that supplies `neo:os` and `os`.
+///
+/// The descriptor gates the module on [`ExtensionPermission::None`], takes one
+/// private metadata snapshot and installs the `os` global during runtime
+/// construction, and declares `neo:os` from that snapshot when it is imported.
+/// Register it with [`RuntimeOptions::with_extension`],
+/// [`RuntimeOptions::with_extensions`], or [`with_os`].
+///
+/// Registering the same extension twice is rejected by core like any duplicate
+/// extension or module name.
+pub fn os_extension() -> ExtensionDescriptor {
+    ExtensionDescriptor::new("neojs-os", load)
+        .with_module(MODULE_NAME, ExtensionPermission::None)
+        .with_init(init)
+}
+
+/// Register `neo:os` on `options` and return the updated options.
+///
+/// This is [`RuntimeOptions::with_extension`] with [`os_extension`]. It grants
+/// no permission, because `neo:os` needs none, and does not change an explicit
+/// allowlist; call [`RuntimeOptions::module_names`] with [`MODULE_NAME`] when
+/// the options carry one. A duplicate registration is an error and produces no
+/// options value.
+pub fn with_os(options: RuntimeOptions) -> Result<RuntimeOptions, ExtensionRegistrationError> {
+    options.with_extension(os_extension())
+}
+
+/// Per-runtime metadata captured once, before user code can run.
+struct OsExtensionState {
+    metadata: Metadata,
+}
+
+/// Take the private snapshot and install the writable `os` global.
+fn init(ctx: &Ctx<'_>, _allowed: &[&str]) -> JsResult<Box<dyn Any>> {
+    let metadata = metadata();
+    let os = Object::new(ctx.clone())?;
+    os.set("platform", std::env::consts::OS)?;
+    os.set("arch", std::env::consts::ARCH)?;
+    os.set("version", metadata.version.clone())?;
+    os.set("codename", metadata.codename.clone())?;
+    os.set("variant", metadata.variant.clone())?;
+    ctx.globals().set("os", os)?;
+    Ok(Box::new(OsExtensionState { metadata }))
+}
+
+/// Declare the module from the snapshot installed by [`init`].
+fn load<'js>(ctx: &Ctx<'js>, state: &mut dyn Any, name: &str) -> JsResult<Module<'js, Declared>> {
+    let state = state
+        .downcast_ref::<OsExtensionState>()
+        .ok_or_else(|| Error::new_loading_message(name, "operating-system state is unavailable"))?;
+    Module::declare(ctx.clone(), name, module_source(&state.metadata))
 }
 
 /// Collects optional, bounded host metadata without invoking external tools.
-pub(crate) fn metadata() -> Metadata {
+fn metadata() -> Metadata {
     #[cfg(target_os = "linux")]
     {
         metadata_from_paths(
@@ -198,7 +339,7 @@ fn parse_value(raw: &str) -> Option<String> {
 /// Generates the module from the runtime's private metadata snapshot. JSON
 /// string literals safely encode host text and `null ?? undefined` preserves
 /// the public undefined-for-unavailable contract.
-pub(crate) fn module_source(metadata: &Metadata) -> String {
+fn module_source(metadata: &Metadata) -> String {
     fn literal(value: &Option<String>) -> String {
         serde_json::to_string(value).expect("serializing OS metadata cannot fail")
     }

@@ -3,7 +3,7 @@
 //! The example command is:
 //!
 //! ```sh
-//! cargo run --offline -p neojs --example compose-types -- --with sqlite \
+//! cargo run --offline -p neojs --example compose-types -- --with os --with sqlite \
 //!   --check-cli-manifest --check types/neo-js.d.ts
 //! ```
 
@@ -63,28 +63,36 @@ fn assert_no_duplicate_modules(source: &str) {
 
 #[test]
 fn checked_in_cli_composition_is_current() {
-    let expected = declarations::compose(&root(), &["sqlite"]).unwrap();
+    let expected = declarations::compose(&root(), &["os", "sqlite"]).unwrap();
     let actual = read("types/neo-js.d.ts");
     assert_eq!(
         actual, expected,
         "types/neo-js.d.ts is stale; regenerate with \
          cargo run --offline -p neojs --example compose-types -- \
-         --with sqlite --check-cli-manifest --output types/neo-js.d.ts"
+         --with os --with sqlite --check-cli-manifest --output types/neo-js.d.ts"
     );
 }
 
 #[test]
-fn core_declarations_omit_optional_sqlite() {
+fn core_declarations_omit_optional_modules() {
     let core = read(declarations::CORE_PATH);
-    assert!(
-        !declared_modules(&core).contains(&"neo:sqlite"),
-        "core declarations must not declare the optional neo:sqlite module"
-    );
+    for name in ["neo:os", "neo:sqlite"] {
+        assert!(
+            !declared_modules(&core).contains(&name),
+            "core declarations must not declare the optional {name} module"
+        );
+    }
 
     let core_only = declarations::compose(&root(), &[]).unwrap();
+    for name in ["neo:os", "neo:sqlite"] {
+        assert!(
+            !declared_modules(&core_only).contains(&name),
+            "a core-only composition must not declare {name}"
+        );
+    }
     assert!(
-        !declared_modules(&core_only).contains(&"neo:sqlite"),
-        "a core-only composition must not declare neo:sqlite"
+        !core_only.contains("neo-os.d.ts"),
+        "a core-only composition must not name the optional OS fragment"
     );
     assert!(
         !core_only.contains("neo-sqlite.d.ts"),
@@ -105,7 +113,7 @@ fn enabling_sqlite_adds_exactly_one_module_declaration() {
             .filter(|module| **module == "neo:sqlite")
             .count(),
         1,
-        "the CLI composition must declare neo:sqlite exactly once"
+        "the SQLite selection must declare neo:sqlite exactly once"
     );
     assert!(composed.contains("// Selection: core, sqlite\n"));
     assert_no_duplicate_modules(&composed);
@@ -113,9 +121,29 @@ fn enabling_sqlite_adds_exactly_one_module_declaration() {
 }
 
 #[test]
+fn enabling_os_adds_exactly_one_module_declaration_and_the_global() {
+    let composed = declarations::compose(&root(), &["os"]).unwrap();
+    assert_eq!(
+        declared_modules(&composed)
+            .iter()
+            .filter(|module| **module == "neo:os")
+            .count(),
+        1,
+        "the OS selection must declare neo:os exactly once"
+    );
+    assert!(composed.contains("// Selection: core, os\n"));
+    assert!(composed.contains("declare const os:"));
+    assert_no_duplicate_modules(&composed);
+    assert!(
+        !declared_modules(&read(declarations::CORE_PATH)).contains(&"neo:os"),
+        "the OS fragment must own neo:os"
+    );
+}
+
+#[test]
 fn composition_is_deterministic_and_offline() {
-    let first = declarations::compose(&root(), &["sqlite"]).unwrap();
-    let second = declarations::compose(&root(), &["sqlite"]).unwrap();
+    let first = declarations::compose(&root(), &["os", "sqlite"]).unwrap();
+    let second = declarations::compose(&root(), &["os", "sqlite"]).unwrap();
     assert_eq!(first, second, "composition must not depend on run order");
     assert!(
         !first.contains(env!("CARGO_MANIFEST_DIR")),
@@ -204,6 +232,7 @@ fn rejects_hard_link_aliases_of_inputs() {
     let dir = workdir();
     let inputs = [
         declarations::CORE_PATH,
+        "crates/neojs-os/types/neo-os.d.ts",
         "crates/neojs-sqlite/types/neo-sqlite.d.ts",
         declarations::CLI_MANIFEST_PATH,
     ];
@@ -336,7 +365,7 @@ fn rejects_unknown_and_duplicate_selections() {
         unknown.contains("unknown optional fragment `nope`"),
         "{unknown}"
     );
-    assert!(unknown.contains("available: sqlite"), "{unknown}");
+    assert!(unknown.contains("available: os, sqlite"), "{unknown}");
 
     let duplicate = declarations::run(args(&["--with", "sqlite", "--with", "sqlite"])).unwrap_err();
     assert!(
@@ -372,11 +401,17 @@ fn rejects_conflicting_and_incomplete_arguments() {
 fn manifest_fixture() -> tempfile::TempDir {
     let dir = workdir();
     fs::create_dir_all(dir.path().join("types")).unwrap();
+    fs::create_dir_all(dir.path().join("crates/neojs-os/types")).unwrap();
     fs::create_dir_all(dir.path().join("crates/neojs-sqlite/types")).unwrap();
     fs::create_dir_all(dir.path().join("crates/neo-js-cli")).unwrap();
     fs::write(
         dir.path().join(declarations::CORE_PATH),
         "declare module \"neo:core\" {}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("crates/neojs-os/types/neo-os.d.ts"),
+        "declare module \"neo:os\" {}\ndeclare const os: { platform: string };\n",
     )
     .unwrap();
     fs::write(
@@ -398,6 +433,7 @@ fn run_with_root(root: &Path, extra: &[&str]) -> Result<Option<String>, String> 
 }
 
 const CORE_DEPENDENCY: &str = "[dependencies]\nneojs-core = { path = \"../neo-js\" }\n";
+const OS_DEPENDENCY: &str = "neojs-os = { path = \"../neojs-os\" }\n";
 const SQLITE_DEPENDENCY: &str = "neojs-sqlite = { path = \"../neojs-sqlite\" }\n";
 
 #[test]
@@ -425,6 +461,29 @@ fn manifest_check_requires_both_directions() {
         run_with_root(root, &["--with", "sqlite", "--check-cli-manifest"]).is_ok(),
         "selecting the dependency's fragment matches the manifest"
     );
+}
+
+#[test]
+fn manifest_check_covers_the_os_fragment() {
+    let dir = manifest_fixture();
+    let root = dir.path();
+
+    write_manifest(root, &format!("{CORE_DEPENDENCY}{OS_DEPENDENCY}"));
+    let error = run_with_root(root, &["--check-cli-manifest"]).unwrap_err();
+    assert!(
+        error.contains("links `neojs-os`")
+            && error.contains("omits `os`")
+            && error.contains("add `--with os`"),
+        "{error}"
+    );
+    assert!(
+        run_with_root(root, &["--with", "os", "--check-cli-manifest"]).is_ok(),
+        "selecting the OS fragment matches a manifest that links neojs-os"
+    );
+
+    write_manifest(root, CORE_DEPENDENCY);
+    let error = run_with_root(root, &["--with", "os", "--check-cli-manifest"]).unwrap_err();
+    assert!(error.contains("does not link `neojs-os`"), "{error}");
 }
 
 #[test]

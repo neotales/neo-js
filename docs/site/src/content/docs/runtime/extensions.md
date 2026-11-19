@@ -79,4 +79,6 @@ aborting, as in the filesystem worker.
 [`neojs_core::extension`](https://docs.rs/neojs-core/latest/neojs_core/extension/index.html)
 has the full hook contract and a native `ModuleDef` example. The
 [SQLite guide](/guides/modules/sqlite/#embed-sqlite) shows registration of a
-separately packaged extension.
+separately packaged extension that needs a permission grant. The
+[OS metadata guide](/guides/modules/os/#embed-os-metadata) shows `neojs-os`,
+which needs exact registration and allowlist admission but no permission flag.

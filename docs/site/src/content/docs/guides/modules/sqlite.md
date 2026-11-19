@@ -129,8 +129,10 @@ built-ins only. To include registered extensions, use
 exact name to your allowlist. This migration keeps the JavaScript API,
 permission, default-deny behavior, and SQL restrictions.
 
-Use the [CLI declarations](/runtime/typescript/#select-declarations) if your
-host includes SQLite. The core-only declaration file omits `neo:sqlite`.
-Declarations never grant permission.
+For an embedder that registers only `neojs-sqlite`, compose declarations
+with `--with sqlite`. The CLI composition also declares `neo:os` and `os`;
+use it only when the host registers both extensions. The core-only file
+omits `neo:sqlite`. See [Select declarations](/runtime/typescript/#select-declarations).
+Declarations never grant permission or override an allowlist.
 
 Declarations: [`neo:sqlite`](/api/modules/sqlite/).

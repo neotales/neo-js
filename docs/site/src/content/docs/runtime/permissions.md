@@ -80,8 +80,10 @@ explicit allowlist. No grant enables file-backed databases.
 
 The globals `os`, `URL`, `env`, and `fs` are present only if the allowlist
 admits `neo:os`, `neo:path`, `neo:env`, and `neo:fs`, respectively. `env` and
-`fs` also require their permission flags. `os` discloses bounded host OS
-metadata. [`URL`](/guides/modules/path/#file-urls) supports file URLs only.
+`fs` also require their permission flags. [`os`](/guides/modules/os/) requires
+the registered `neojs-os` extension and discloses bounded host OS metadata.
+The CLI registers the extension. It needs no permission flag.
+[`URL`](/guides/modules/path/#file-urls) supports file URLs only.
 `console` always exists. See [Public host globals](/api/globals/) for signatures.
 
 Other built-in modules require no permission flag. The allowlist still applies to every module. TypeScript does not check runtime permissions or allowlists.
@@ -97,6 +99,7 @@ allowlist checks each exact name independently:
 | `neo:os/schedulers/windows` | `RuntimeModule::SchedulerWindows` |
 | `neo:scheduler`             | `RuntimeModule::Scheduler`        |
 
-`RuntimeModule::Os` admits `neo:os`, not its scheduler specifiers. The
+Registering or admitting `neo:os` does not admit its scheduler specifiers.
+The schedulers are built into core even when `neojs-os` is absent. The
 deprecated `neo:scheduler` exposes both generators through the legacy name
 only. It does not admit either platform-specific import.

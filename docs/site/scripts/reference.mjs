@@ -149,9 +149,9 @@ async function referencePages() {
 		"index.md",
 		page(
 			"API reference",
-			"Globals and TypeScript declarations for the built-in neo: modules.",
+			"Globals and TypeScript declarations for the CLI's built-in and registered neo: modules.",
 			[
-				"The module pages reproduce the CLI exports and signatures in `types/neo-js.d.ts`, including types that do not exist at runtime. The CLI composition includes `neojs-sqlite`; a core-only embedder does not provide `neo:sqlite`. See [declaration selection](/runtime/typescript/#select-declarations).",
+				"The module pages reproduce the CLI exports and signatures in `types/neo-js.d.ts`, including types that do not exist at runtime. The CLI composition includes `neojs-os` and `neojs-sqlite`. Core alone does not provide `neo:os`, the `os` global, or `neo:sqlite`. See [declaration selection](/runtime/typescript/#select-declarations).",
 				"A declaration does not grant access. See [Host permissions and module access](/runtime/permissions/) for permission flags, conditional exports, and module allowlists.",
 				"## Globals",
 				"[Public host globals](/api/globals/), including `console` and the file-only `URL` constructor.",
@@ -167,7 +167,7 @@ async function referencePages() {
 			"Public globals added by the neo-js host.",
 			[
 				"This page lists the public globals added by neo-js, not QuickJS built-ins or private host callbacks.",
-				"The host always installs `console`. `os` and `URL` require that the allowlist admit `neo:os` and `neo:path`, respectively, but need no permission flag. `env` requires `--allow-env` and admission of `neo:env`. `fs` requires `--allow-fs` and admission of `neo:fs`. See [host permissions and module access](/runtime/permissions/).",
+				"The host always installs `console`. `os` requires registration of `neojs-os` and allowlist admission of `neo:os`. `URL` requires admission of `neo:path`. Neither needs a permission flag. `env` requires `--allow-env` and admission of `neo:env`. `fs` requires `--allow-fs` and admission of `neo:fs`. See [host permissions and module access](/runtime/permissions/).",
 				"## console",
 				"The declaration file does not currently declare `console`. The host implements these synchronous methods and joins their string arguments with spaces before writing a line to stdout or stderr.",
 				codeBlock(

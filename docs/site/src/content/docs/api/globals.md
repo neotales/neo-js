@@ -7,7 +7,7 @@ description: "Public globals added by the neo-js host."
 
 This page lists the public globals added by neo-js, not QuickJS built-ins or private host callbacks.
 
-The host always installs `console`. `os` and `URL` require that the allowlist admit `neo:os` and `neo:path`, respectively, but need no permission flag. `env` requires `--allow-env` and admission of `neo:env`. `fs` requires `--allow-fs` and admission of `neo:fs`. See [host permissions and module access](/runtime/permissions/).
+The host always installs `console`. `os` requires registration of `neojs-os` and allowlist admission of `neo:os`. `URL` requires admission of `neo:path`. Neither needs a permission flag. `env` requires `--allow-env` and admission of `neo:env`. `fs` requires `--allow-fs` and admission of `neo:fs`. See [host permissions and module access](/runtime/permissions/).
 
 ## console
 
@@ -24,40 +24,19 @@ declare const console: {
 
 The host installs a [file-only `URL` constructor](/guides/modules/path/#file-urls). The declaration file describes it as [`FileURLConstructor`](/api/modules/path/#fileurlconstructor) without redeclaring the DOM or WebWorker global.
 
-## os
+## env
 
 ```ts
 // Generated declarations for the selected compiled modules. Do not edit.
-// Inputs: types/neo-js.core.d.ts, crates/neojs-sqlite/types/neo-sqlite.d.ts
-// Selection: core, sqlite
+// Inputs: types/neo-js.core.d.ts, crates/neojs-os/types/neo-os.d.ts, crates/neojs-sqlite/types/neo-sqlite.d.ts
+// Selection: core, os, sqlite
 // See types/README.md for the compose-types command.
 
 // Core declarations for neojs-core. Optional modules owned by separate crates
 // are added by composition; see types/README.md. This file deliberately omits
-// `neo:sqlite`, because neojs-core does not compile or register it.
+// `neo:os` and `neo:sqlite`, because neojs-core does not compile or register
+// them.
 
-/**
- * Host OS information. `platform` and `arch` identify the Rust compilation
- * target, not necessarily a separately detected host. Optional fields follow
- * the same platform-specific rules as the `neo:os` exports. This discloses
- * bounded, best-effort OS metadata without filesystem or registry permission;
- * it does not grant arbitrary filesystem or registry access or invoke a
- * subprocess. The object exists only when `neo:os` is admitted by the runtime
- * module allowlist. Global properties remain writable; named module exports
- * use the runtime's private snapshot.
- */
-declare const os: {
-  platform: string;
-  arch: string;
-  version: string | undefined;
-  codename: string | undefined;
-  variant: string | undefined;
-};
-```
-
-## env
-
-```ts
 /** Available only with --allow-env. */
 declare const env: {
   get(name: string): string | undefined;
@@ -111,5 +90,34 @@ declare const fs: {
   MAX_LIST_ENTRIES: number;
   MAX_LIST_NAME_BYTES: number;
   MAX_LIST_TOTAL_BYTES: number;
+};
+```
+
+## os
+
+```ts
+// Type fragment owned by neojs-os. The CLI composition includes it because the
+// CLI links this crate. Declaring `neo:os` records compiled availability; it
+// does not grant permission (none is needed) or admit the module through a
+// runtime allowlist. types/neo-js.core.d.ts omits both this module and the
+// `os` global.
+
+/**
+ * Host OS information. `platform` and `arch` identify the Rust compilation
+ * target, not necessarily a separately detected host. Optional fields follow
+ * the same platform-specific rules as the `neo:os` exports. This discloses
+ * bounded, best-effort OS metadata without filesystem or registry permission;
+ * it does not grant arbitrary filesystem or registry access or invoke a
+ * subprocess. The object exists only when the host links `neojs-os`,
+ * registers its extension, and admits `neo:os` in any explicit runtime
+ * module allowlist. No permission flag is required. Global properties
+ * remain writable; named module exports use the runtime's private snapshot.
+ */
+declare const os: {
+  platform: string;
+  arch: string;
+  version: string | undefined;
+  codename: string | undefined;
+  variant: string | undefined;
 };
 ```

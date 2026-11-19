@@ -34,13 +34,15 @@ once a deployment URL exists.
 ## Update the API reference
 
 Edit [`types/neo-js.core.d.ts`](../../types/neo-js.core.d.ts) for built-ins
-or the [`neojs-sqlite` fragment](../../crates/neojs-sqlite/types/neo-sqlite.d.ts).
+or the fragment owned by the optional crate:
+[`neojs-os`](../../crates/neojs-os/types/neo-os.d.ts) or
+[`neojs-sqlite`](../../crates/neojs-sqlite/types/neo-sqlite.d.ts).
 Do not hand-edit the composed CLI entry. See the
 [composition instructions](../../types/README.md). From the checkout root:
 
 ```sh
 cargo run --locked --offline -p neojs --target-dir target/docs-reference --example compose-types -- \
-  --with sqlite --check-cli-manifest --output types/neo-js.d.ts
+  --with os --with sqlite --check-cli-manifest --output types/neo-js.d.ts
 pnpm --dir docs/site reference:generate
 pnpm --dir docs/site reference:check
 ```

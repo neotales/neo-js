@@ -30,11 +30,14 @@
 //! [extension module documentation](extension) for the hook contract and a
 //! complete native-module example.
 //!
-//! Optional modules are not compiled into this crate. In particular, SQLite is
-//! supplied by the separate `neojs-sqlite` package, which registers the exact
+//! Optional modules are not compiled into this crate. SQLite is supplied by
+//! the separate `neojs-sqlite` package, which registers the exact
 //! `neo:sqlite` name and keeps `rusqlite` out of this crate's dependency graph.
 //! [`Permissions::sqlite`] remains the gate, but it grants nothing unless that
-//! extension is registered.
+//! extension is registered. Operating-system metadata is supplied by
+//! `neojs-os`, which registers `neo:os`, installs the `os` global, and reads
+//! the bounded host metadata. Core itself no longer adds either one, so a
+//! core-only runtime has no `neo:os` import and no `os` global.
 //!
 //! The allowlist is a host-capability boundary, not an OS sandbox. It does not
 //! limit CPU, memory, or the JavaScript language, and a script still shares one
@@ -70,7 +73,6 @@ mod js_text;
 mod loader;
 mod module_turn;
 mod modules;
-mod os;
 mod path;
 mod process;
 mod semver;
@@ -412,14 +414,6 @@ impl NeoJs {
         let allowed = options.allowed_modules();
         let extension_registry = Rc::new(options.extensions().clone());
         let extension_runtime = Rc::new(RefCell::new(extension::ExtensionRuntime::new()));
-        // Take one private snapshot for the `neo:os` module and the initial
-        // global values. The global remains writable for compatibility; module
-        // exports never reread it after user code can mutate it.
-        let os_metadata = if allowed.allows(RuntimeModule::Os) {
-            os::metadata()
-        } else {
-            os::Metadata::default()
-        };
         let runtime = Runtime::new()?;
         let module_turns = module_turn::ModuleTurns::new(&runtime)?;
         let reads = fs::ReadDriver::default();
@@ -429,7 +423,6 @@ impl NeoJs {
             loader::ModuleLoader {
                 permissions,
                 formats: Rc::clone(&formats),
-                os_metadata: os_metadata.clone(),
                 allowed: allowed.clone(),
                 extensions: Rc::clone(&extension_registry),
                 extension_runtime: Rc::clone(&extension_runtime),
@@ -437,7 +430,6 @@ impl NeoJs {
             loader::ModuleLoader {
                 permissions,
                 formats: Rc::clone(&formats),
-                os_metadata: os_metadata.clone(),
                 allowed: allowed.clone(),
                 extensions: Rc::clone(&extension_registry),
                 extension_runtime: Rc::clone(&extension_runtime),
@@ -476,18 +468,6 @@ impl NeoJs {
                 })?,
             )?;
             globals.set("console", console)?;
-
-            // `os` is the global behind `neo:os`. With an explicit allowlist
-            // that omits `neo:os`, neither the module nor this global exists.
-            if allowed.allows(RuntimeModule::Os) {
-                let os = Object::new(ctx.clone())?;
-                os.set("platform", std::env::consts::OS)?;
-                os.set("arch", std::env::consts::ARCH)?;
-                os.set("version", os_metadata.version.clone())?;
-                os.set("codename", os_metadata.codename.clone())?;
-                os.set("variant", os_metadata.variant.clone())?;
-                globals.set("os", os)?;
-            }
 
             if permissions.process && allowed.allows(RuntimeModule::Exec) {
                 let exec_cwd = Rc::clone(&cwd);
@@ -1022,7 +1002,9 @@ mod tests {
                 .unwrap(),
             "undefined,undefined,undefined"
         );
-        assert_eq!(js.eval("os.platform").unwrap(), std::env::consts::OS);
+        // Core no longer installs the optional `os` global. A host that
+        // registers `neojs_os::os_extension` gets it back.
+        assert_eq!(js.eval("typeof os").unwrap(), "undefined");
     }
 
     #[test]
@@ -1129,8 +1111,7 @@ mod tests {
         js.run_module(
             "main.js",
             "import {valid, compare} from 'neo:semver';
-             import {platform} from 'neo:os';
-             if (!platform || !valid('1.2.3') || valid('01.2.3') ||
+             if (!valid('1.2.3') || valid('01.2.3') ||
                  compare('1.0.0-alpha', '1.0.0') !== -1 ||
                  compare('1.0.0+one', '1.0.0+two') !== 0) throw Error('semver');",
         )

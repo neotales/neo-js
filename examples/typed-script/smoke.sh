@@ -11,7 +11,7 @@ trap 'rm -rf "$mutation"' 0
 # The checked-in CLI composition must match the explicit selection and the
 # CLI manifest. The tool never selects fragments from the manifest itself.
 cargo run --offline --quiet -p neojs --example compose-types -- \
-  --with sqlite --check-cli-manifest --check types/neo-js.d.ts
+  --with os --with sqlite --check-cli-manifest --check types/neo-js.d.ts
 
 # Prove the positive SQLite fixture is load-bearing. Deno types an unknown
 # `scheme:` specifier as `any`, and a checker would otherwise accept the
@@ -50,6 +50,27 @@ if command -v tsc >/dev/null 2>&1; then
     exit 1
   fi
 
+  # The same core entry must reject neo:os with exactly TS2307.
+  if os_errors=$(tsc --noEmit --strict --target ES2022 --module ESNext \
+    --moduleResolution Bundler --skipLibCheck false --pretty false \
+    types/neo-js.core.d.ts types/os-absent.test.ts 2>&1); then
+    printf '%s\n' 'Core declarations unexpectedly admitted neo:os.' >&2
+    exit 1
+  fi
+  os_errors=$(printf '%s\n' "$os_errors" | tr -d '\r')
+  os_error_count=$(printf '%s\n' "$os_errors" | grep -c 'error TS' || true)
+  if [ "$os_error_count" -ne 1 ]; then
+    printf 'Core-only OS check produced %s diagnostics, expected exactly one TS2307:\n%s\n' \
+      "$os_error_count" "$os_errors" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$os_errors" | grep -Eq \
+    "error TS2307: Cannot find module 'neo:os' or its corresponding type declarations\.$"; then
+    printf 'Core-only check did not report the expected TS2307 for neo:os:\n%s\n' \
+      "$os_errors" >&2
+    exit 1
+  fi
+
   # The fixture's negative assertions must fail without the fragment.
   if mutation_errors=$(tsc --noEmit --strict --target ES2022 --module ESNext \
     --moduleResolution Bundler --lib ES2022,ESNext.Disposable --skipLibCheck false \
@@ -65,7 +86,7 @@ if command -v tsc >/dev/null 2>&1; then
       exit 1
       ;;
   esac
-  printf '%s\n' 'tsc: ES2022, DOM, WebWorker, and composed SQLite checks passed; core rejects neo:sqlite with exactly TS2307; the fixture fails without its fragment'
+  printf '%s\n' 'tsc: ES2022, DOM, WebWorker, and composed module checks passed; core rejects neo:os and neo:sqlite with exactly TS2307; the fixture fails without its fragment'
 elif command -v deno >/dev/null 2>&1; then
   printf '%s\n' 'tsc unavailable: using Deno; the tsc project and optional lib checks are unverified.'
   deno check --cached-only --no-config types/neo-js.d.ts types/path.test.ts \

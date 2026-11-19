@@ -9,7 +9,7 @@
 		"fmt:check": "oxfmt --check",
 		"reference:generate": "node scripts/reference.mjs",
 		"reference:check": "pnpm reference:compose:check && node scripts/reference.mjs --check && node scripts/runtime-inventory.mjs",
-		"reference:compose:check": "cargo run --locked --offline --manifest-path ../../Cargo.toml --target-dir ../../target/docs-reference -p neojs --example compose-types -- --with sqlite --check-cli-manifest --check ../../types/neo-js.d.ts",
+		"reference:compose:check": "cargo run --locked --offline --manifest-path ../../Cargo.toml --target-dir ../../target/docs-reference -p neojs --example compose-types -- --with os --with sqlite --check-cli-manifest --check ../../types/neo-js.d.ts",
 		"reference:test": "node --test scripts/reference.test.mjs"
 	},
 	"dependencies": {
