@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use neo_js::{NeoJs, Permissions};
+use neo_js::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
 
 fn js_string(value: &str) -> String {
     serde_json::to_string(value).unwrap()
@@ -79,13 +79,45 @@ fn process_module_is_absent_without_permission() {
 }
 
 #[test]
+fn elevation_requires_an_admitted_process_module_and_existing_permission() {
+    let entry = "import {isElevated} from 'neo:process';";
+    let allowed = RuntimeOptions::new().modules([RuntimeModule::Process]);
+    let denied = RuntimeOptions::new().modules([RuntimeModule::Path]);
+    let no_permissions = NeoJs::new_with_options(Permissions::default(), allowed).unwrap();
+    assert!(no_permissions.run_module("elevation.js", entry).is_err());
+
+    for permissions in [
+        Permissions {
+            process: true,
+            ..Permissions::default()
+        },
+        Permissions {
+            stdio: true,
+            ..Permissions::default()
+        },
+    ] {
+        let js = NeoJs::new_with_options(permissions, denied.clone()).unwrap();
+        assert!(js.run_module("elevation.js", entry).is_err());
+        assert_eq!(
+            js.eval("typeof globalThis.isElevated").unwrap(),
+            "undefined"
+        );
+        assert_eq!(
+            js.eval("typeof globalThis.__neoProcess").unwrap(),
+            "undefined"
+        );
+    }
+}
+
+#[test]
 fn stdio_and_process_each_expose_the_module() {
     let stdio = runtime(false, true, false);
     stdio
         .run_module(
             "stdio.js",
-            "import process, {cwd, chdir, stdin, stdout, stderr, ChangeDirectoryError} from 'neo:process';
+            "import process, {cwd, chdir, isElevated, stdin, stdout, stderr, ChangeDirectoryError} from 'neo:process';
              if (typeof cwd !== 'function' || typeof chdir !== 'function') throw Error('directory');
+             if (typeof isElevated !== 'function' || process.isElevated !== isElevated) throw Error('elevation');
              if (typeof stdin.readSync !== 'function' || typeof stdin.read !== 'function') throw Error('stdin');
              if (typeof stdout.writeSync !== 'function' || typeof stderr.write !== 'function') throw Error('writers');
              if (typeof ChangeDirectoryError !== 'function') throw Error('error class');
@@ -98,9 +130,26 @@ fn stdio_and_process_each_expose_the_module() {
     process
         .run_module(
             "process.js",
-            "import {stdin} from 'neo:process';
+            "import {isElevated, stdin} from 'neo:process';
+             if (typeof isElevated !== 'function') throw Error('elevation');
              if (typeof stdin.readSync !== 'function') throw Error('stdin');
              if (stdin.readSync(new Uint8Array(0)) !== 0) throw Error('zero read');",
+        )
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn elevation_reads_the_live_effective_uid() {
+    // SAFETY: geteuid takes no arguments and is infallible.
+    let expected = unsafe { libc::geteuid() } == 0;
+    runtime(false, true, false)
+        .run_module(
+            "elevation.js",
+            &format!(
+                "import {{isElevated}} from 'neo:process';
+                 if (isElevated() !== {expected}) throw Error('wrong effective UID status');"
+            ),
         )
         .unwrap();
 }

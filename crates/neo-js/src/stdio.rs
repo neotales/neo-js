@@ -1,5 +1,5 @@
-//! Synchronous standard streams and the runtime working directory exposed as
-//! `neo:process`.
+//! Synchronous standard streams, runtime working directory, and host process
+//! elevation status exposed as `neo:process`.
 //!
 //! The module is importable with [`crate::Permissions::process`] or
 //! [`crate::Permissions::stdio`]. Writing `stdout`/`stderr`, and reading or
@@ -12,6 +12,7 @@
 //!
 //! `chdir` validates the target with a directory metadata check but reads no
 //! file contents. `cwd` returns the runtime's stored path.
+//! `isElevated` reads process status without changing privileges.
 //!
 //! Every host callback is private to the module factory. Nothing is installed
 //! on the global object, so user code cannot replace a callback before or after
@@ -41,27 +42,39 @@ use rquickjs::{
     module::{Declarations, Exports, ModuleDef},
 };
 
-use crate::cwd::{CwdError, WorkingDirectory};
+use crate::{
+    cwd::{CwdError, WorkingDirectory},
+    elevation::{self, ElevationError},
+};
 
-const EXPORTS: [&str; 7] = [
+const EXPORTS: [&str; 9] = [
     "default",
     "cwd",
     "chdir",
+    "isElevated",
     "stdin",
     "stdout",
     "stderr",
     "ChangeDirectoryError",
+    "ElevationError",
 ];
 
 /// Persistent factory and working-directory state for `neo:process`.
 pub(crate) struct ProcessState {
     pub(crate) factory: Option<Persistent<Function<'static>>>,
     cwd: Rc<RefCell<WorkingDirectory>>,
+    #[cfg(test)]
+    query_elevation: fn() -> Result<bool, ElevationError>,
 }
 
 impl ProcessState {
     pub(crate) fn new(cwd: Rc<RefCell<WorkingDirectory>>) -> Self {
-        Self { factory: None, cwd }
+        Self {
+            factory: None,
+            cwd,
+            #[cfg(test)]
+            query_elevation: elevation::is_elevated,
+        }
     }
 }
 
@@ -104,6 +117,14 @@ impl ModuleDef for ProcessModule {
                 let cwd = Rc::clone(&cwd);
                 move |directory: String| chdir_response(&cwd, &directory)
             })?,
+        )?;
+        #[cfg(not(test))]
+        let query_elevation = elevation::is_elevated;
+        #[cfg(test)]
+        let query_elevation = state.borrow().query_elevation;
+        native.set(
+            "isElevated",
+            Function::new(ctx.clone(), move || elevation_response(query_elevation()))?,
         )?;
         native.set(
             "writeStdoutBytes",
@@ -176,12 +197,22 @@ pub(crate) fn factory<'js>(ctx: &Ctx<'js>) -> JsResult<Function<'js>> {
                 }
             }
 
+            class ElevationError extends NativeError {
+                constructor(message) {
+                    super(message);
+                    defineProperty(this, 'name', {
+                        __proto__: null,
+                        value: 'ElevationError',
+                        writable: true,
+                        configurable: true,
+                    });
+                }
+            }
+
             function unwrap(text, ErrorClass) {
                 const response = parseJSON(text);
                 if (response.ok) return response.value;
-                const error = ErrorClass === ChangeDirectoryError
-                    ? new ChangeDirectoryError(response.message)
-                    : new NativeError(response.message);
+                const error = new ErrorClass(response.message);
                 defineProperty(error, 'code', {
                     __proto__: null,
                     value: response.code,
@@ -246,14 +277,19 @@ pub(crate) fn factory<'js>(ctx: &Ctx<'js>) -> JsResult<Function<'js>> {
                     }
                     unwrap(native.chdir(directory), ChangeDirectoryError);
                 }
+                function isElevated() {
+                    return unwrap(native.isElevated(), ElevationError);
+                }
 
                 return {
                     cwd,
                     chdir,
+                    isElevated,
                     stdin,
                     stdout,
                     stderr,
                     ChangeDirectoryError,
+                    ElevationError,
                 };
             };
         })()"#,
@@ -265,12 +301,23 @@ fn ok_response(value: serde_json::Value) -> String {
 }
 
 fn error_response(error: CwdError) -> String {
+    coded_error(error.code, error.message)
+}
+
+fn coded_error(code: &str, message: &str) -> String {
     serde_json::json!({
         "ok": false,
-        "code": error.code,
-        "message": error.message,
+        "code": code,
+        "message": message,
     })
     .to_string()
+}
+
+fn elevation_response(status: Result<bool, ElevationError>) -> String {
+    match status {
+        Ok(elevated) => ok_response(elevated.into()),
+        Err(error) => coded_error(error.code, error.message),
+    }
 }
 
 fn io_error() -> String {
@@ -378,6 +425,44 @@ fn read_stdin<'js>(data: TypedArray<'js, u8>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{NeoJs, Permissions};
+
+    #[test]
+    fn elevation_exports_boolean_results_and_typed_failures() {
+        for (query, expected) in [
+            ((|| Ok(false)) as fn() -> _, "false"),
+            (|| Ok(true), "true"),
+            (|| Err(elevation::QUERY_FAILED), "'PROCESS_ELEVATION'"),
+            (
+                || Err(elevation::UNSUPPORTED),
+                "'PROCESS_ELEVATION_UNSUPPORTED'",
+            ),
+        ] {
+            let js = NeoJs::new(Permissions {
+                stdio: true,
+                ..Permissions::default()
+            })
+            .unwrap();
+            js.stdio.borrow_mut().query_elevation = query;
+            js.run_module(
+                "elevation.js",
+                &format!(
+                    "import process, {{isElevated, ElevationError}} from 'neo:process';
+                     if (process.isElevated !== isElevated ||
+                         process.ElevationError !== ElevationError) throw Error('invalid exports');
+                     let result;
+                     try {{ result = isElevated(); }}
+                     catch (error) {{
+                         if (!(error instanceof ElevationError) || !(error instanceof Error) ||
+                             error.name !== 'ElevationError') throw error;
+                         result = error.code;
+                     }}
+                     if (result !== {expected}) throw Error('invalid elevation result');"
+                ),
+            )
+            .unwrap();
+        }
+    }
 
     struct FailingWriter;
     impl Write for FailingWriter {

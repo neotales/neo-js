@@ -48,6 +48,7 @@ mod age;
 mod crypto;
 mod cwd;
 mod dotenv;
+mod elevation;
 mod fetch;
 mod fs;
 mod hash;
@@ -105,8 +106,9 @@ pub struct Permissions {
     ///
     /// A script that reads stdin consumes input the embedder or an interactive
     /// user may be using, so this is an explicit opt-in. It also makes
-    /// `neo:process` importable for its stdout/stderr writers and the runtime
-    /// working directory. [`Self::process`] grants the same stdin access
+    /// `neo:process` importable for its stdout/stderr writers, the runtime
+    /// working directory, and the host process's elevation status.
+    /// [`Self::process`] grants the same stdin access
     /// because it already permits arbitrary child programs with the host
     /// user's privileges; `stdio` is the narrower way to allow stdin alone.
     /// Standard output and standard error writes are already reachable through

@@ -55,8 +55,9 @@ pub enum RuntimeModule {
     Os,
     /// `neo:path` — lexical path helpers.
     Path,
-    /// `neo:process` — runtime streams and working directory; also requires
-    /// [`crate::Permissions::process`] or [`crate::Permissions::stdio`].
+    /// `neo:process` — streams, runtime working directory, and host process
+    /// elevation status; also requires [`crate::Permissions::process`] or
+    /// [`crate::Permissions::stdio`].
     Process,
     /// `neo:scheduler` — deprecated combined scheduler compatibility module.
     ///

@@ -46,9 +46,9 @@ using, so it is an explicit opt-in; reads are synchronous and can block until
 input or end of file. `--allow-run` also grants this access, because it already
 permits arbitrary child programs under the host user's authority. `--allow-stdio`
 is the narrower choice when only standard I/O is needed. `--allow-run` or
-`--allow-stdio` makes `neo:process` importable for its stdout and stderr writers
-and its runtime-local working directory; without one of them the module is
-absent.
+`--allow-stdio` makes `neo:process` importable for its stdout and stderr writers,
+runtime-local working directory, and host process elevation status; without one
+of them the module is absent.
 
 `--allow-net` permits the synchronous `neo:fetch` module. It grants broad
 outbound HTTP and HTTPS authority under the current user's network access,
@@ -481,11 +481,13 @@ bounded number of supervisors and workers, not a bound on memory used by the
 caller or processes spawned by the child. OS scheduling means prompt failure
 notification is not a hard real-time guarantee.
 
-### Process streams and working directory
+### Process streams, working directory, and elevation
 
 With `--allow-run` or `--allow-stdio`, `neo:process` exports `stdin`,
-`stdout`, `stderr`, `cwd()`, `chdir()`, and `ChangeDirectoryError`; the same
-values are also available on its default export. `stdout` and `stderr`
+`stdout`, `stderr`, `cwd()`, `chdir()`, `isElevated()`, `ChangeDirectoryError`,
+and `ElevationError`; the same values are also available on its default export.
+An embedder's explicit module allowlist must also include `neo:process`.
+`stdout` and `stderr`
 accept a string (UTF-8) or a `Uint8Array` and write binary data synchronously
 without an intermediate buffer. Each write is flushed and returns the number of bytes
 written. `stdin.read` and `stdin.readSync` write into a caller-supplied
@@ -507,6 +509,31 @@ while ((count = stdin.readSync(buffer)) !== null) {
 stderr.write("done\n");
 console.log(cwd());
 chdir("subdirectory");
+```
+
+`isElevated()` synchronously reports whether the host process has effective
+UID 0 on Unix or an elevated primary process token on Windows (`TokenElevation`).
+On Windows it checks the token the process is running with, not whether the
+account belongs to Administrators or could approve a UAC prompt. The check
+does not grant or change privileges, launch a child process, or access the
+registry. It does not predict whether a particular operation will succeed.
+If the token query fails, the function throws `ElevationError` with code
+`PROCESS_ELEVATION`; on unsupported platforms it throws the same error type
+with code `PROCESS_ELEVATION_UNSUPPORTED`.
+
+```js
+import {ElevationError, isElevated} from "neo:process";
+
+try {
+  if (isElevated()) {
+    console.log("The host process reports elevated status.");
+  } else {
+    console.log("The host process reports non-elevated status.");
+  }
+} catch (error) {
+  if (!(error instanceof ElevationError)) throw error;
+  console.error(`Could not determine elevation: ${error.code}`);
+}
 ```
 
 The working directory is owned by the runtime, not the host process. `chdir()`
@@ -2268,7 +2295,7 @@ no alias or variable, and reads no environment.
 Test support is registration-based: it does not discover test files, isolate
 tests, enforce a timeout, or run tests in parallel. Process support is limited
 to the synchronous, buffered `exec` and `spawn` calls of `neo:exec` and the
-synchronous `neo:process` stream and working-directory API; there are no
+synchronous `neo:process` stream, working-directory, and elevation API; there are no
 asynchronous or streaming child process APIs. Spawned-child handles hold one
 slot each until their terminal call or runtime drop, and their results are
 buffered rather than streamed. Reading stdin blocks with no timeout, and

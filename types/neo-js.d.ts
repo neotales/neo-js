@@ -1781,10 +1781,12 @@ declare module "neo:test" {
 }
 
 /**
- * Synchronous standard streams and a runtime-local working directory.
+ * Synchronous standard streams, a runtime-local working directory, and host
+ * process elevation status.
  *
  * The module is available with `--allow-run` or `--allow-stdio`; without one of
- * those flags the import fails and no host callback is installed. Reading the
+ * those flags the import fails and no host callback is installed. If the
+ * embedder uses a module allowlist, it must include `neo:process`. Reading the
  * host's standard input requires one of those flags too; `--allow-stdio` is the
  * narrower choice. Writing `stdout` and `stderr` needs no separate permission
  * because `console` already reaches those streams.
@@ -1861,6 +1863,13 @@ declare module "neo:process" {
     constructor(message: string, options?: { cause?: unknown });
   }
 
+  /** Thrown when `isElevated` cannot determine the host process elevation. */
+  export class ElevationError extends Error {
+    /** Set by `isElevated` when it throws; absent on manually constructed errors. */
+    readonly code?: "PROCESS_ELEVATION" | "PROCESS_ELEVATION_UNSUPPORTED";
+    constructor(message: string);
+  }
+
   /** The host standard output stream. */
   export const stdout: StdWriter;
   /** The host standard error stream. */
@@ -1888,13 +1897,26 @@ declare module "neo:process" {
    */
   export function chdir(directory: string): void;
 
+  /**
+   * Report whether the host process has effective UID 0 on Unix or an elevated
+   * primary process token on Windows. Each call takes a fresh snapshot. It does
+   * not check Windows Administrators membership, change privileges, or predict
+   * whether an operation will succeed.
+   *
+   * @throws ElevationError with code `PROCESS_ELEVATION` when the token query
+   * fails or `PROCESS_ELEVATION_UNSUPPORTED` on an unsupported platform.
+   */
+  export function isElevated(): boolean;
+
   const _default: {
     cwd: typeof cwd;
     chdir: typeof chdir;
+    isElevated: typeof isElevated;
     stdin: StdReader;
     stdout: StdWriter;
     stderr: StdWriter;
     ChangeDirectoryError: typeof ChangeDirectoryError;
+    ElevationError: typeof ElevationError;
   };
   export default _default;
 }
