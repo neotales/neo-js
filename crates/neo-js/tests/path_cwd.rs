@@ -21,6 +21,15 @@ const foreign = windows ? path.posix : path.win32;
 const absolute = windows ? 'C:\\base' : '/base';
 if (path.resolve(absolute, 'x') !== path.join(absolute, 'x')) throw Error('absolute');
 if (path.relative(absolute, path.join(absolute, 'x')) !== 'x') throw Error('relative');
+for (const api of [path, path.posix, path.win32]) {
+  const sep = api.sep ?? path.SEPARATOR;
+  const pattern = api.joinGlobs(['**', '*.js'], { globstar: true });
+  if (pattern !== '**' + sep + '*.js' || !api.isGlob(pattern)) throw Error('lexical join');
+  if (api.normalizeGlob('**/..', { globstar: true }) !== '**' + sep + '..')
+    throw Error('lexical normalize');
+  if (!api.globToRegExp(pattern).test('relative/file.js') ||
+      !api.matchesGlob('relative/file.js', pattern)) throw Error('lexical match');
+}
 checkError(() => foreign.resolve('child'), 'PATH_CWD_DIALECT');
 if (!windows) {
   checkError(() => path.win32.resolve('C:child'), 'PATH_CWD_DIALECT');

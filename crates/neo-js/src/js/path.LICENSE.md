@@ -1,6 +1,6 @@
 # Third-party notices for `neo:path`
 
-`crates/neo-js/src/js/path.js` adapts algorithms from `@neotales/path` in the
+`path.js`, `path-glob.js`, and the path conversions in `path-url.js` adapt algorithms from `@neotales/path` in the
 `js-libraries` repository.
 
 - Upstream: https://github.com/neotales/js-libraries
@@ -30,6 +30,12 @@ argument validation, NUL handling, and several documented edge cases:
   `_common/format.ts`, `_common/strip_trailing_separators.ts`,
   `_common/assert_path.ts`, `_common/common.ts`
 - `types.ts`
+- `{posix,windows}/{to_file_url,from_file_url}.ts` and `_common/to_file_url.ts`.
+- `is_glob.ts`, `_common/glob_to_reg_exp.ts`, `{posix,windows}/glob_to_regexp.ts`,
+  `{posix,windows}/join_globs.ts`, and `{posix,windows}/normalize_glob.ts`.
+  The glob port retains the detector and the compiler's segment and group
+  syntax, with strict parsing, resource limits, and a separate component
+  matcher instead of testing a full path with a backtracking expression.
 
 The adapted files also carry header lines, recorded here without alteration:
 `// Copyright 2018-2025 the Deno authors. MIT license.`,

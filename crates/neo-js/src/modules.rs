@@ -53,8 +53,9 @@ pub enum RuntimeModule {
     /// `neo:os` — target platform, architecture, and optional OS-release
     /// metadata. It needs no permission flag, but discloses host OS metadata.
     Os,
-    /// `neo:path` — lexical path helpers. Reading the runtime working directory
-    /// also requires admitted filesystem or process/stdio authority.
+    /// `neo:path` — lexical path helpers and a global file-only `URL` class.
+    /// Reading the runtime working directory also requires admitted
+    /// filesystem or process/stdio authority.
     Path,
     /// `neo:process` — runtime streams and working directory; also requires
     /// [`crate::Permissions::process`] or [`crate::Permissions::stdio`].

@@ -1,8 +1,8 @@
 //! Integration tests for `neo:path` through the public `NeoJs` API.
 //!
 //! No test enables a permission: the module must be available in the default
-//! runtime, install nothing on the global object, and behave identically for
-//! both path syntaxes regardless of the host platform.
+//! runtime and behave identically for both path syntaxes regardless of the
+//! host platform. Only the file URL class is installed globally.
 
 use neo_js::{NeoJs, Permissions, TestReport};
 
@@ -19,7 +19,7 @@ fn run(source: &str) -> TestReport {
 }
 
 #[test]
-fn imports_without_permissions_and_installs_no_globals() {
+fn imports_without_permissions_and_keeps_path_callbacks_private() {
     run(r#"import test from 'neo:test';
 import { equal } from 'neo:assert';
 import { posix, win32 } from 'neo:path';
