@@ -16,6 +16,7 @@ fn everything() -> Permissions {
         process: true,
         registry: true,
         network: true,
+        sqlite: true,
     }
 }
 

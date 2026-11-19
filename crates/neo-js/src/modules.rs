@@ -84,6 +84,8 @@ pub enum RuntimeModule {
     SchedulerSystemd,
     /// `neo:os/schedulers/windows` — Windows Task Scheduler XML text generation.
     SchedulerWindows,
+    /// `neo:sqlite` — in-memory databases; also requires [`crate::Permissions::sqlite`].
+    Sqlite,
 }
 
 impl RuntimeModule {
@@ -92,7 +94,7 @@ impl RuntimeModule {
     /// The array grows when host modules are added. Iterate with
     /// `RuntimeModule::ALL.into_iter()` rather than naming its length in a
     /// type. To build an allowlist of all modules, use [`ModuleAllowlist::all`].
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Age,
         Self::Ansi,
         Self::Assert,
@@ -116,6 +118,7 @@ impl RuntimeModule {
         Self::Yaml,
         Self::SchedulerSystemd,
         Self::SchedulerWindows,
+        Self::Sqlite,
     ];
 
     /// The canonical `neo:` name of this module.
@@ -144,6 +147,7 @@ impl RuntimeModule {
             Self::Toml => "neo:toml",
             Self::WinRegistry => "neo:winregistry",
             Self::Yaml => "neo:yaml",
+            Self::Sqlite => "neo:sqlite",
         }
     }
 
@@ -176,6 +180,7 @@ impl RuntimeModule {
             "neo:toml" => Self::Toml,
             "neo:winregistry" => Self::WinRegistry,
             "neo:yaml" => Self::Yaml,
+            "neo:sqlite" => Self::Sqlite,
             _ => return None,
         })
     }

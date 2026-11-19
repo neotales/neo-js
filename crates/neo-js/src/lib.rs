@@ -58,6 +58,7 @@ mod os;
 mod path;
 mod process;
 mod semver;
+mod sqlite;
 mod stdio;
 mod sync_callback;
 mod toml;
@@ -84,10 +85,10 @@ use rquickjs::{Context, Function, Module, Object, Persistent, Runtime, function:
 /// module allowlist".
 ///
 /// This type is not `#[non_exhaustive]`. Before 1.0, adding a field such as
-/// `Permissions::process`, `Permissions::stdio`, `Permissions::registry`, or
-/// `Permissions::network` is a source-breaking change for complete struct
-/// literals. Construct values with `..Permissions::default()` or name every
-/// field explicitly.
+/// `Permissions::process`, `Permissions::stdio`, `Permissions::registry`,
+/// `Permissions::network`, or `Permissions::sqlite` is a source-breaking
+/// change for complete struct literals. Construct values with
+/// `..Permissions::default()` or name every field explicitly.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Permissions {
     /// Allow synchronous filesystem access through `neo:fs`, plus file reads
@@ -150,6 +151,12 @@ pub struct Permissions {
     /// [`Self::filesystem`]; without it `neo:fetch.download` reports
     /// `FETCH_PERMISSION` before any file or network activity.
     pub network: bool,
+    /// Allow synchronous, private in-memory databases through `neo:sqlite`.
+    ///
+    /// This opts into the host's native SQLite engine, not a sandbox. Use
+    /// only trusted SQL: there is no cap on SQLite's intermediate heap.
+    /// It grants no file-backed database, filesystem, shell or network API.
+    pub sqlite: bool,
 }
 
 /// An isolated QuickJS runtime and its single context.
@@ -172,6 +179,7 @@ pub struct NeoJs {
     // callbacks parse text only and need no permission.
     toml: Rc<RefCell<toml::TomlState>>,
     yaml: Rc<RefCell<yaml::YamlState>>,
+    sqlite: Rc<RefCell<sqlite::SqliteState>>,
     // `neo:semver` keeps every native callback private to its module. It needs
     // no permission and installs nothing on the global object.
     semver: Rc<RefCell<semver::SemverState>>,
@@ -232,6 +240,9 @@ impl Drop for NeoJs {
         }
         if let Ok(mut state) = self.yaml.try_borrow_mut() {
             state.factory = None;
+        }
+        if let Ok(mut state) = self.sqlite.try_borrow_mut() {
+            state.clear();
         }
         if let Ok(mut state) = self.semver.try_borrow_mut() {
             state.factory = None;
@@ -355,6 +366,7 @@ impl NeoJs {
         let dotenv = Rc::new(RefCell::new(dotenv::DotenvState::default()));
         let toml = Rc::new(RefCell::new(toml::TomlState::default()));
         let yaml = Rc::new(RefCell::new(yaml::YamlState::default()));
+        let sqlite = Rc::new(RefCell::new(sqlite::SqliteState::default()));
         let semver = Rc::new(RefCell::new(semver::SemverState::default()));
         let winregistry = Rc::new(RefCell::new(winregistry::WinRegistryState::default()));
         let fetch = Rc::new(RefCell::new(fetch::FetchState::new(
@@ -590,6 +602,9 @@ impl NeoJs {
                     .map_err(|_| rquickjs::Error::Unknown)?;
                 path.borrow_mut().api = Some(Persistent::save(&ctx, api));
             }
+            if permissions.sqlite && allowed.allows(RuntimeModule::Sqlite) {
+                sqlite::SqliteState::install(&ctx, &sqlite)?;
+            }
             Ok(())
         })?;
         Ok(Self {
@@ -602,6 +617,7 @@ impl NeoJs {
             dotenv,
             toml,
             yaml,
+            sqlite,
             semver,
             winregistry,
             fetch,

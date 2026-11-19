@@ -226,6 +226,7 @@ impl ModuleLoader {
             RuntimeModule::Fs => self.permissions.filesystem,
             RuntimeModule::Process => self.permissions.process || self.permissions.stdio,
             RuntimeModule::WinRegistry => self.permissions.registry,
+            RuntimeModule::Sqlite => self.permissions.sqlite,
         }
     }
 }
@@ -334,6 +335,9 @@ impl Loader for ModuleLoader {
         }
         if name == "neo:yaml" {
             return Module::declare_def::<crate::yaml::YamlModule, _>(ctx.clone(), name);
+        }
+        if name == "neo:sqlite" {
+            return Module::declare_def::<crate::sqlite::SqliteModule, _>(ctx.clone(), name);
         }
         if name == "neo:semver" {
             return Module::declare_def::<crate::semver::SemverModule, _>(ctx.clone(), name);

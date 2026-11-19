@@ -312,6 +312,7 @@ fn module_is_available_with_every_permission_enabled() {
         process: true,
         registry: true,
         network: true,
+        sqlite: true,
     })
     .unwrap();
     js.run_module(

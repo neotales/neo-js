@@ -15,6 +15,7 @@ cargo run -p neo-js-cli -- --allow-run script.js
 cargo run -p neo-js-cli -- --allow-stdio script.js
 cargo run -p neo-js-cli -- --allow-registry script.js
 cargo run -p neo-js-cli -- --allow-net --allow-fs script.js
+cargo run -p neo-js-cli -- --allow-sqlite script.js
 cargo run -p neo-js-cli -- --third-party-notices
 ```
 
@@ -58,6 +59,10 @@ port, or scheme, including an HTTPS-to-HTTP downgrade. Downloading a file also
 requires `--allow-fs`, because the module writes the destination; without it
 `download` throws `FETCH_PERMISSION` before any file or network activity. Enable `--allow-net` only for scripts you trust with the
 user's network reachability.
+
+`--allow-sqlite` permits [synchronous in-memory SQLite](#sqlite);
+it is off by default and independent of `--allow-fs`, `--allow-run`, and
+`--allow-net`.
 
 ## Embed neo-js
 
@@ -1481,6 +1486,74 @@ operation. Enforce containment with the operating system after resolving the
 real path and checking the opened object, under the process's existing
 permissions. `neo:fs` and `neo:exec` do not consult this module.
 
+## SQLite
+
+`neo:sqlite` is synchronous. The CLI requires `--allow-sqlite`; a Rust
+embedder must grant `Permissions::sqlite` and include `RuntimeModule::Sqlite`
+if it sets an explicit module allowlist. This opts into the host's in-process
+SQLite engine, **not a sandbox**. Run only SQL you trust. It adds no API for
+files, the network, shells, other processes, or extension loading.
+
+```js
+import { openMemory } from "neo:sqlite";
+
+using db = openMemory();
+db.execute("CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT NOT NULL)");
+db.execute("INSERT INTO notes VALUES (?, ?)", [42n, "hello"]);
+const [[id, body]] = db.query("SELECT id, body FROM notes WHERE id = ?", [42n]);
+console.log(`${id}: ${body}`);
+```
+
+`openMemory()` takes no arguments and opens a new, private database. `close()`
+and `[Symbol.dispose]()` are equivalent and idempotent; they roll back any open
+transaction and discard the database. Use `using` or `try`/`finally` for prompt
+cleanup. Runtime teardown also releases live handles.
+
+`execute(sql, parameters?)` accepts one statement with no result columns and
+returns its SQLite row-change count as a bigint (including foreign-key
+actions). `query(sql, parameters?)` accepts one read-only statement with
+result columns and returns owned, positional rows; use SQL `ORDER BY` when
+order matters. Only whitespace may follow the terminating semicolon. Both
+methods accept anonymous `?` placeholders and require exactly that many
+own data elements in a dense parameter array. Use `null` for NULL; finite
+numbers bind as REAL, signed 64-bit bigints as INTEGER, well-formed strings as
+TEXT, and genuine `Uint8Array` views over attached, fixed-length, non-shared
+buffers as copied BLOBs. Output INTEGERs are always bigint, REALs are numbers,
+TEXT must be valid UTF-8, and each BLOB is a fresh `Uint8Array`. No named
+bindings, reusable statement
+handles, multi-statement batches, or write queries with `RETURNING`.
+
+Configuration is fixed to private in-memory databases and temporary storage.
+The SQLite authorizer permits a subset of main-schema SQL (tables, indexes,
+queries, mutations, transactions, and selected built-in functions). Foreign
+keys are enforced, with at most eight levels of cascading actions. It
+rejects attachments, writable schema, pragmas, user-defined triggers,
+views, virtual tables, extension loading, and savepoints (including
+`ROLLBACK TO`). Expensive string functions and the `LIKE`/`GLOB` operators
+are not supported. `VACUUM` and `VACUUM INTO` are not supported.
+File-backed databases cannot be enabled by another permission. Embedders
+that install a process-global SQLite log callback themselves must keep that
+log private: SQLite's own engine diagnostics can include SQL.
+
+Limits are eight live databases per runtime, 8 MiB of database pages per
+database, 64 KiB of UTF-8 SQL, 64 parameters, 64 columns, up to 1 MiB per
+text/BLOB or SQLite row, 4 MiB of total bound text/BLOB data, and up to 1,024
+result rows or 4 MiB of result payload (whichever limit is reached first).
+SQLite's progress handler cooperatively interrupts at a checkpoint after
+approximately 200,000 VM operations or 250 ms of elapsed time. Neither is
+a hard deadline: native work can continue between checkpoints. The limits
+do not cap the intermediate SQLite heap. In-memory sorts, grouping, and
+subqueries can allocate substantial workspace before returning a row;
+arbitrary SQL can exhaust host memory. SQLite does not wait for locks.
+
+Errors exposed to scripts use a stable `SQLITE_*` `code` and omit the SQL,
+paths and bound values. The database is no longer borrowed when an error is
+thrown. QuickJS may still invoke JavaScript stack-trace hooks while propagating
+the exception. On query failure no partial result is returned; mutation
+failures retain SQLite's normal conflict and rollback semantics.
+Asynchronous variants are pending filesystem/event-loop support. This
+increment was verified on Linux, not on native Windows or macOS.
+
 ## Filesystem
 
 `neo:fs` is a synchronous, bounded subset of the usual filesystem API. It is
@@ -2276,10 +2349,11 @@ dependency-license inventory.
 neo-js is pre-1.0. Adding the `process` field to `Permissions` was a
 source-breaking change for code that constructed the struct with a complete
 literal. Adding `registry` is the same kind of change, and so is adding
-`network`; adding `stdio` is the same kind of change. Migrate by setting the
+`network`, `stdio`, or `sqlite`. Migrate by setting the
 fields you need and adding `..Permissions::default()`, or by naming every field
-explicitly, including `process`, `stdio`, `registry`, and `network`. CLI users
-opt in with `--allow-net` and `--allow-stdio`. Adding `neo:exec.spawn` is
+explicitly, including `process`, `stdio`, `registry`, `network`, and `sqlite`.
+CLI users opt in with `--allow-net`, `--allow-stdio`, and `--allow-sqlite`.
+Adding `neo:exec.spawn` is
 additive: the module exports one more function, existing `exec` calls and
 permissions are unchanged, and the host installs two additional host
 callbacks only when `process` is granted. `neo:semver` is additive for its

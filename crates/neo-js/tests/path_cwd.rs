@@ -66,6 +66,7 @@ if (globalThis.expectCwd) {
         environment: true,
         network: true,
         registry: true,
+        sqlite: true,
     };
     let path = RuntimeModule::Path;
     let path_fs = [path, RuntimeModule::Fs];
