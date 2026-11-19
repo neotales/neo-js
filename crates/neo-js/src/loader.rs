@@ -22,9 +22,40 @@ const TEST_MODULE: &str = include_str!("js/test.js");
 const ANSI_MODULE: &str = include_str!("js/ansi.js");
 const CHARS_MODULE: &str = include_str!("js/chars.js");
 const PATH_MODULE: &str = include_str!("js/path.js");
-const SCHEDULER_MODULE: &str = include_str!("js/scheduler.js");
 const STRING_BUILDER_MODULE: &str = include_str!("js/string_builder.js");
 const EXEC_MODULE: &str = include_str!("js/exec.js");
+
+// Give each scheduler specifier its own export surface, without importing
+// another public specifier or introducing an importable internal module.
+// The legacy surface intentionally exports both sets of helpers.
+macro_rules! scheduler_module {
+    ($($export:ident),+ $(,)?) => {
+        concat!(
+            include_str!("js/scheduler.js"),
+            "\nexport { SchedulerError, ",
+            $(stringify!($export), ", ",)+
+            "};\n",
+        )
+    };
+}
+
+const SCHEDULER_SYSTEMD_MODULE: &str = scheduler_module!(
+    systemdService,
+    systemdTimer,
+    systemdUnits,
+    MAX_SYSTEMD_LINE_BYTES
+);
+const SCHEDULER_WINDOWS_MODULE: &str =
+    scheduler_module!(windowsTask, WINDOWS_XML_ENCODING, MAX_WINDOWS_COMMAND_LINE);
+const LEGACY_SCHEDULER_MODULE: &str = scheduler_module!(
+    systemdService,
+    systemdTimer,
+    systemdUnits,
+    MAX_SYSTEMD_LINE_BYTES,
+    windowsTask,
+    WINDOWS_XML_ENCODING,
+    MAX_WINDOWS_COMMAND_LINE,
+);
 
 /// Resolves only the modules provided by this host and relative JavaScript or
 /// TypeScript files. A TypeScript file is stripped in [`Loader::load`].
@@ -142,7 +173,9 @@ impl ModuleLoader {
             "neo:ansi" => Some(ANSI_MODULE),
             "neo:chars" => Some(CHARS_MODULE),
             "neo:path" => Some(PATH_MODULE),
-            "neo:scheduler" => Some(SCHEDULER_MODULE),
+            "neo:scheduler" => Some(LEGACY_SCHEDULER_MODULE),
+            "neo:os/schedulers/systemd" => Some(SCHEDULER_SYSTEMD_MODULE),
+            "neo:os/schedulers/windows" => Some(SCHEDULER_WINDOWS_MODULE),
             "neo:string-builder" => Some(STRING_BUILDER_MODULE),
             "neo:hash" if self.permissions.filesystem => Some(
                 "export function digest(algorithm, bytes) { \
@@ -182,6 +215,8 @@ impl ModuleLoader {
             | RuntimeModule::Os
             | RuntimeModule::Path
             | RuntimeModule::Scheduler
+            | RuntimeModule::SchedulerSystemd
+            | RuntimeModule::SchedulerWindows
             | RuntimeModule::Semver
             | RuntimeModule::StringBuilder
             | RuntimeModule::Test

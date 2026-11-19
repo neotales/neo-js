@@ -12,6 +12,6 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true
   },
-  "files": ["../../types/neo-js.d.ts"],
+  "files": ["../../types/neo-js.d.ts", "../../types/schedulers.test.ts"],
   "include": ["**/*.ts", "**/*.mts"]
 }

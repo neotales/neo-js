@@ -1288,8 +1288,8 @@ declare module "neo:yaml" {
 }
 
 /**
- * Pure, synchronous generation of systemd unit text and Windows Task
- * Scheduler XML. Requires no permission flag and grants no host capability.
+ * Pure, synchronous generation of systemd unit text. Requires no permission
+ * flag and grants no host capability.
  *
  * No function reads or writes a file or directory, changes permissions,
  * creates a process, runs a shell, calls a service manager, registers a task,
@@ -1304,17 +1304,13 @@ declare module "neo:yaml" {
  * `MM` is 00 through 59; seconds are not accepted. Weekdays are the lowercase
  * three-letter names `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, and `sun`.
  * They are emitted in Monday-through-Sunday order. Daily becomes
- * `OnCalendar=*-*-* HH:MM:00` plus `ScheduleByDay`/`DaysInterval=1`; weekly
- * becomes `OnCalendar=Mon,Wed *-*-* HH:MM:00` plus
- * `ScheduleByWeek`/`WeeksInterval=1`. Other kinds and contradictory fields
+ * `OnCalendar=*-*-* HH:MM:00`; weekly becomes
+ * `OnCalendar=Mon,Wed *-*-* HH:MM:00`. Other kinds and contradictory fields
  * are rejected.
  *
  * Time zones are not converted. An OnCalendar expression without a time-zone
- * suffix uses the timer's local time. A Task Scheduler StartBoundary is
- * emitted without a time-zone suffix and Task Scheduler applies its own
- * local-time interpretation. The two targets may therefore mean different
- * instants around a daylight-saving transition, and neither target's missed
- * run behaviour is modelled here.
+ * suffix uses the timer's local time. Daylight-saving transitions and
+ * missed runs are not modelled here.
  *
  * systemd arguments are emitted as one quoted `ExecStart` item per argument,
  * and systemd's own parser, not a shell, turns the line back into an argv.
@@ -1326,38 +1322,6 @@ declare module "neo:yaml" {
  * control characters, and leading or trailing whitespace are rejected.
  * `WorkingDirectory` must be an absolute POSIX path. `User` must be a simple
  * name or a decimal numeric ID; it is not looked up.
- *
- * Windows `<Command>` holds the program path and is not wrapped in quotes.
- * `<Arguments>` holds the remaining arguments joined by one space, each
- * quoted with the Microsoft C/C++ runtime `CommandLineToArgvW` convention.
- * That convention is not `cmd.exe` or PowerShell quoting. A program that
- * parses its command line differently needs its own argument representation,
- * which this module does not invent. The returned XML declares
- * `encoding="UTF-16"`; write it as UTF-16LE with a byte-order mark (the usual
- * Task Scheduler export encoding), or replace the declaration with one that
- * matches the bytes you write. The module returns text, not bytes.
- *
- * Windows paths must be absolute drive paths (`C:\...`) or UNC paths
- * (`\\server\share\...`) with backslash separators. Relative paths, forward
- * slashes, `.` and `..` components, empty components, invalid Windows
- * filename characters, percent signs, and device paths such as `\\?\...` and
- * `\\.\...` are rejected. The Task Scheduler schema's 260-character
- * `pathType` limit is enforced for the program and working directory. No path
- * is checked for existence, and other Windows path-length and permissions
- * policy is not enforced.
- *
- * The generated task declares schema version 1.3, the fixed value in the
- * authoritative Task Scheduler XSD. `CalendarTrigger` follows the XSD
- * sequence (`Enabled` before `StartBoundary`), weekly output emits
- * `DaysOfWeek` before `WeeksInterval` (the XSD type is `xs:all`, so this is a
- * documented convention, not a validity requirement), and `Actions/@Context`
- * is emitted only when a principal with `id="Author"` is present because the
- * schema's `ContextKeyRef` requires the reference to resolve.
- *
- * A principal is optional. When present, `LogonType` must be one of
- * `InteractiveToken`, `Password`, `S4U`, or `InteractiveTokenOrPassword`,
- * matching the XSD enumeration. `Group` and `ServiceAccount` are not in that
- * enumeration and are rejected.
  *
  * Every options object must be a plain object (prototype `Object.prototype`)
  * or a null-prototype record whose own properties are enumerable data
@@ -1383,7 +1347,7 @@ declare module "neo:yaml" {
  * rejected value. A getter or Proxy trap on an options object can still throw
  * its own error.
  */
-declare module "neo:scheduler" {
+declare module "neo:os/schedulers/systemd" {
   /** Stable failure codes; match on these, never on the message. */
   export type SchedulerErrorCode =
     | "SCHEDULER_TYPE"
@@ -1392,7 +1356,10 @@ declare module "neo:scheduler" {
     | "SCHEDULER_UNSUPPORTED"
     | "SCHEDULER_LIMIT";
 
-  /** Thrown for invalid options or an unsupported value. */
+  /**
+   * Thrown for invalid options or unsupported values. Match against the
+   * `SchedulerError` exported by the same module as the generator.
+   */
   export class SchedulerError extends Error {
     name: "SchedulerError";
     /** Stable code; match on this, never on the message. */
@@ -1462,6 +1429,84 @@ declare module "neo:scheduler" {
       SystemdTimerOptions {}
 
   /**
+   * Generate a `Type=oneshot` systemd service unit. The result ends with one
+   * newline and has no `[Install]` section: the timer is the enabled unit.
+   *
+   * @throws SchedulerError for an invalid or unsupported value.
+   */
+  export function systemdService(options: SystemdServiceOptions): string;
+
+  /**
+   * Generate a systemd timer unit that activates `<name>.service` and is
+   * wanted by `timers.target`. The result ends with one newline.
+   *
+   * @throws SchedulerError for an invalid or unsupported value.
+   */
+  export function systemdTimer(options: SystemdTimerOptions): string;
+
+  /**
+   * Generate a matched service and timer. The caller must install them as
+   * `<name>.service` and `<name>.timer`; this function writes nothing.
+   *
+   * @throws SchedulerError for an invalid or unsupported value.
+   */
+  export function systemdUnits(options: SystemdUnitsOptions): {
+    service: string;
+    timer: string;
+  };
+
+  /** Maximum UTF-8 byte length of a generated systemd `ExecStart=` line. */
+  export const MAX_SYSTEMD_LINE_BYTES: 1048576;
+}
+
+/**
+ * Pure, synchronous generation of Windows Task Scheduler XML. Requires no
+ * permission flag and grants no host capability. It returns text only; it
+ * never writes, installs, registers, or runs a task.
+ *
+ * Uses the same local wall-clock schedules and options record validation as
+ * the systemd module. Daily schedules use `ScheduleByDay`/`DaysInterval=1`;
+ * weekly schedules use `ScheduleByWeek`/`WeeksInterval=1`. Task Scheduler
+ * interprets `StartBoundary` in local time; no time-zone conversion is done.
+ *
+ * `<Command>` is not quoted. `<Arguments>` uses the Microsoft C/C++ runtime
+ * `CommandLineToArgvW` convention, not `cmd.exe` or PowerShell quoting.
+ * Write the returned XML as UTF-16LE with a byte-order mark, or replace its
+ * `encoding="UTF-16"` declaration to match the bytes you write.
+ *
+ * Paths must be absolute drive or UNC paths with backslash separators.
+ * Relative paths, forward slashes, `.` and `..` components, empty
+ * components, invalid filename characters, percent signs, and device paths
+ * are rejected. The Task Scheduler XSD's 260-character path limit applies.
+ * No path is checked for existence.
+ *
+ * The generated task declares schema version 1.3. `CalendarTrigger` emits
+ * `Enabled` before `StartBoundary`, weekly output emits `DaysOfWeek` before
+ * `WeeksInterval`, and `Actions/@Context` is emitted only with a principal.
+ */
+declare module "neo:os/schedulers/windows" {
+  import type { Schedule, SchedulerErrorCode } from "neo:os/schedulers/systemd";
+  export type {
+    DailySchedule,
+    Schedule,
+    SchedulerErrorCode,
+    Weekday,
+    WeeklySchedule,
+  } from "neo:os/schedulers/systemd";
+
+  /**
+   * Thrown for invalid options or unsupported values. Match against the
+   * `SchedulerError` exported by the same module as the generator.
+   */
+  export class SchedulerError extends Error {
+    name: "SchedulerError";
+    /** Stable code; match on this, never on the message. */
+    code: SchedulerErrorCode;
+    /** The option path that failed, such as `program` or `args[0]`. */
+    field: string;
+  }
+
+  /**
    * Task Scheduler logon type accepted by the authoritative XSD. `Password`
    * sets only the XML value; this module never accepts, handles, or stores a
    * password. `Group` and `ServiceAccount` are not in the XSD enumeration
@@ -1511,33 +1556,6 @@ declare module "neo:scheduler" {
   }
 
   /**
-   * Generate a `Type=oneshot` systemd service unit. The result ends with one
-   * newline and has no `[Install]` section: the timer is the enabled unit.
-   *
-   * @throws SchedulerError for an invalid or unsupported value.
-   */
-  export function systemdService(options: SystemdServiceOptions): string;
-
-  /**
-   * Generate a systemd timer unit that activates `<name>.service` and is
-   * wanted by `timers.target`. The result ends with one newline.
-   *
-   * @throws SchedulerError for an invalid or unsupported value.
-   */
-  export function systemdTimer(options: SystemdTimerOptions): string;
-
-  /**
-   * Generate a matched service and timer. The caller must install them as
-   * `<name>.service` and `<name>.timer`; this function writes nothing.
-   *
-   * @throws SchedulerError for an invalid or unsupported value.
-   */
-  export function systemdUnits(options: SystemdUnitsOptions): {
-    service: string;
-    timer: string;
-  };
-
-  /**
    * Generate Task Scheduler 2.0 XML. The result ends with one newline and
    * declares `encoding="UTF-16"`; see the module notes for writing it.
    *
@@ -1548,11 +1566,55 @@ declare module "neo:scheduler" {
   /** Byte encoding to use when writing `windowsTask` output: UTF-16LE with a BOM. */
   export const WINDOWS_XML_ENCODING: "UTF-16LE";
 
-  /** Maximum UTF-8 byte length of a generated systemd `ExecStart=` line. */
-  export const MAX_SYSTEMD_LINE_BYTES: 1048576;
-
   /** Maximum Windows command-line length, including the terminating NUL. */
   export const MAX_WINDOWS_COMMAND_LINE: 32767;
+}
+
+/**
+ * @deprecated Import from `neo:os/schedulers/systemd` or
+ * `neo:os/schedulers/windows` instead. Allowlisting this legacy name grants
+ * both generators through this name only. All three specifiers are checked
+ * separately. Catch `SchedulerError` from the same module as the generator.
+ */
+declare module "neo:scheduler" {
+  import type { SchedulerErrorCode } from "neo:os/schedulers/systemd";
+
+  /** Thrown by the legacy module for invalid options or unsupported values. */
+  export class SchedulerError extends Error {
+    name: "SchedulerError";
+    /** Stable code; match on this, never on the message. */
+    code: SchedulerErrorCode;
+    /** The option path that failed, such as `program` or `args[0]`. */
+    field: string;
+  }
+
+  export {
+    MAX_SYSTEMD_LINE_BYTES,
+    systemdService,
+    systemdTimer,
+    systemdUnits,
+  } from "neo:os/schedulers/systemd";
+  export type {
+    DailySchedule,
+    Schedule,
+    SchedulerErrorCode,
+    SystemdServiceOptions,
+    SystemdTimerOptions,
+    SystemdUnitsOptions,
+    Weekday,
+    WeeklySchedule,
+  } from "neo:os/schedulers/systemd";
+  export {
+    MAX_WINDOWS_COMMAND_LINE,
+    WINDOWS_XML_ENCODING,
+    windowsTask,
+  } from "neo:os/schedulers/windows";
+  export type {
+    WindowsLogonType,
+    WindowsPrincipal,
+    WindowsRunLevel,
+    WindowsTaskOptions,
+  } from "neo:os/schedulers/windows";
 }
 
 /** Synchronous assertions. There are no asynchronous forms. */

@@ -1,4 +1,4 @@
-//! Integration tests for `neo:scheduler`.
+//! Integration tests for the systemd and Windows scheduler modules.
 //!
 //! The module is pure text generation: these tests run it through the public
 //! `NeoJs` API with no permissions, assert exact generated text, and exercise
@@ -24,6 +24,72 @@ fn run(js: &NeoJs, name: &str, source: &str) {
 }
 
 #[test]
+fn deprecated_scheduler_keeps_its_output_and_error_contract() {
+    run(
+        &runtime(),
+        "legacy-scheduler.js",
+        r#"
+        import * as legacy from 'neo:scheduler';
+        import * as systemd from 'neo:os/schedulers/systemd';
+        import * as windows from 'neo:os/schedulers/windows';
+        if (legacy.SchedulerError === systemd.SchedulerError
+            || legacy.SchedulerError === windows.SchedulerError
+            || systemd.SchedulerError === windows.SchedulerError) {
+          throw Error('scheduler error constructors should be distinct across module specifiers');
+        }
+        const schedule = { kind: 'weekly', at: '11:15', weekdays: ['wed', 'mon'] };
+        const service = { name: 'backup', program: '/bin/true', args: ['a b', '%x'] };
+        const timer = { name: service.name, schedule, persistent: true };
+        const task = { name: 'Backup', program: 'C:\\backup.exe', startDate: '2026-11-18', schedule };
+        const legacyUnits = legacy.systemdUnits({ ...service, ...timer });
+        const units = systemd.systemdUnits({ ...service, ...timer });
+        if (legacyUnits.service !== units.service || legacyUnits.timer !== units.timer
+            || legacy.systemdService(service) !== systemd.systemdService(service)
+            || legacy.systemdTimer(timer) !== systemd.systemdTimer(timer)
+            || legacy.windowsTask(task) !== windows.windowsTask(task)
+            || legacy.MAX_SYSTEMD_LINE_BYTES !== systemd.MAX_SYSTEMD_LINE_BYTES
+            || legacy.MAX_WINDOWS_COMMAND_LINE !== windows.MAX_WINDOWS_COMMAND_LINE
+            || legacy.WINDOWS_XML_ENCODING !== windows.WINDOWS_XML_ENCODING) {
+          throw Error('legacy scheduler output differs');
+        }
+
+        function validateError(module, generate) {
+          let error;
+          try { generate(); } catch (err) { error = err; }
+          if (!(error instanceof module.SchedulerError) || error.name !== 'SchedulerError'
+              || error.code !== 'SCHEDULER_VALUE' || error.field !== 'program') {
+            throw Error('wrong scheduler error: ' + error);
+          }
+        }
+        validateError(legacy, () => legacy.systemdService({ ...service, program: 'relative' }));
+        validateError(legacy, () => legacy.windowsTask({ ...task, program: 'relative' }));
+        validateError(systemd, () => systemd.systemdService({ ...service, program: 'relative' }));
+        validateError(windows, () => windows.windowsTask({ ...task, program: 'relative' }));
+        "#,
+    );
+}
+
+#[test]
+fn static_imports_reject_the_other_targets_exports() {
+    let js = runtime();
+    for (index, (name, export)) in [
+        ("neo:os/schedulers/systemd", "windowsTask"),
+        ("neo:os/schedulers/windows", "systemdUnits"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = js
+            .run_module(
+                &format!("foreign-export-{index}.js"),
+                &format!("import {{ {export} }} from '{name}';"),
+            )
+            .unwrap_err();
+        assert!(error.contains(export), "{error}");
+    }
+}
+
+#[test]
 fn systemd_daily_units_are_exact_and_need_no_permission() {
     let js = runtime();
     assert_eq!(
@@ -35,7 +101,7 @@ fn systemd_daily_units_are_exact_and_need_no_permission() {
         &js,
         "daily.js",
         r#"
-        import { systemdUnits } from 'neo:scheduler';
+        import { systemdUnits } from 'neo:os/schedulers/systemd';
         const units = systemdUnits({
           name: 'backup',
           program: '/bin/true',
@@ -62,7 +128,7 @@ fn systemd_weekly_unit_escapes_arguments_paths_and_whitespace() {
         &js,
         "weekly.js",
         r#"
-        import { systemdUnits } from 'neo:scheduler';
+        import { systemdUnits } from 'neo:os/schedulers/systemd';
         const units = systemdUnits({
           name: 'nightly-backup',
           description: 'Nightly backup (01)',
@@ -109,7 +175,7 @@ fn systemd_preserves_unicode_and_rejects_ambiguous_values() {
         &js,
         "unicode.js",
         r#"
-        import { systemdService } from 'neo:scheduler';
+        import { systemdService } from 'neo:os/schedulers/systemd';
         globalThis.service = systemdService({
           name: 'unicode-task',
           program: '/opt/日本語/アプリ',
@@ -131,7 +197,7 @@ fn systemd_preserves_unicode_and_rejects_ambiguous_values() {
           systemdService,
           systemdTimer,
           systemdUnits,
-        } from 'neo:scheduler';
+        } from 'neo:os/schedulers/systemd';
         function expect(code, field, fn) {
           let caught;
           try { fn(); } catch (error) { caught = error; }
@@ -190,7 +256,7 @@ fn systemd_limits_are_reported_without_echoing_input() {
         &js,
         "limits.js",
         r#"
-        import { SchedulerError, systemdService } from 'neo:scheduler';
+        import { SchedulerError, systemdService } from 'neo:os/schedulers/systemd';
         function expectLimit(field, fn) {
           let caught;
           try { fn(); } catch (error) { caught = error; }
@@ -231,7 +297,7 @@ fn windows_daily_task_is_exact() {
         &js,
         "windows-daily.js",
         r#"
-        import { windowsTask } from 'neo:scheduler';
+        import { windowsTask } from 'neo:os/schedulers/windows';
         globalThis.xml = windowsTask({
           name: 'Backup',
           description: 'Nightly backup',
@@ -291,7 +357,7 @@ fn windows_weekly_task_escapes_xml_and_quotes_arguments() {
         &js,
         "windows-weekly.js",
         r#"
-        import { windowsTask } from 'neo:scheduler';
+        import { windowsTask } from 'neo:os/schedulers/windows';
         globalThis.xml = windowsTask({
           name: 'A & B <C>',
           description: 'A & B < C > D "E" \'F\'',
@@ -341,7 +407,7 @@ fn windows_rejects_ambiguous_paths_dates_and_principals() {
         &js,
         "windows-rejections.js",
         r#"
-        import { SchedulerError, windowsTask } from 'neo:scheduler';
+        import { SchedulerError, windowsTask } from 'neo:os/schedulers/windows';
         function expect(code, field, fn) {
           let caught;
           try { fn(); } catch (error) { caught = error; }
@@ -403,7 +469,7 @@ fn windows_accepts_unc_and_directory_roots_and_escapes_unicode() {
         &js,
         "windows-accept.js",
         r#"
-        import { windowsTask } from 'neo:scheduler';
+        import { windowsTask } from 'neo:os/schedulers/windows';
         globalThis.xml = windowsTask({
           name: '工具 🎉',
           description: '日本語 & <ok>',
@@ -453,7 +519,7 @@ fn systemd_analyze_verifies_generated_units_if_available() {
         &js,
         "verify.js",
         r#"
-        import { systemdUnits } from 'neo:scheduler';
+        import { systemdUnits } from 'neo:os/schedulers/systemd';
         const units = systemdUnits({
           name: 'neo-scheduler-check',
           description: 'Verification probe',
@@ -555,7 +621,7 @@ fn systemd_analyze_accepts_a_program_path_with_spaces() {
         "space-program.js",
         &format!(
             r#"
-            import {{ systemdService }} from 'neo:scheduler';
+            import {{ systemdService }} from 'neo:os/schedulers/systemd';
             globalThis.service = systemdService({{
               name: 'neo-scheduler-space-check',
               program: {program},
@@ -588,18 +654,14 @@ fn option_records_require_own_enumerable_data_properties() {
         &js,
         "record-shape.js",
         r#"
-        import {
-          SchedulerError,
-          systemdService,
-          systemdTimer,
-          windowsTask,
-        } from 'neo:scheduler';
+        import { SchedulerError, systemdService, systemdTimer } from 'neo:os/schedulers/systemd';
+        import { SchedulerError as WindowsSchedulerError, windowsTask } from 'neo:os/schedulers/windows';
 
-        function expect(code, field, fn) {
+        function expect(code, field, fn, ErrorClass = SchedulerError) {
           let caught;
           try { fn(); } catch (error) { caught = error; }
           if (!caught) throw new Error('expected an error for ' + field);
-          if (!(caught instanceof SchedulerError)) throw new Error('wrong error class for ' + field);
+          if (!(caught instanceof ErrorClass)) throw new Error('wrong error class for ' + field);
           if (caught.code !== code) throw new Error('wrong code for ' + field + ': ' + caught.code);
           if (caught.field !== field) throw new Error('wrong field: ' + caught.field);
         }
@@ -696,7 +758,7 @@ fn option_records_require_own_enumerable_data_properties() {
           expect('SCHEDULER_VALUE', 'principal.userId', () => windowsTask({
             ...base,
             principal: { logonType: 'S4U' },
-          }));
+          }), WindowsSchedulerError);
         } finally {
           delete Object.prototype.userId;
         }
@@ -706,7 +768,7 @@ fn option_records_require_own_enumerable_data_properties() {
         expect('SCHEDULER_UNSUPPORTED', 'principal', () => windowsTask({
           ...base,
           principal: symbolPrincipal,
-        }));
+        }), WindowsSchedulerError);
 
         const nullPrincipal = Object.create(null);
         nullPrincipal.userId = 'user';
@@ -723,11 +785,11 @@ fn option_records_require_own_enumerable_data_properties() {
         expect('SCHEDULER_UNSUPPORTED', 'principal.runLevel', () => windowsTask({
           ...base,
           principal: hiddenPrincipal,
-        }));
+        }), WindowsSchedulerError);
         expect('SCHEDULER_TYPE', 'principal', () => windowsTask({
           ...base,
           principal: Object.create({ userId: 'user', logonType: 'S4U' }),
-        }));
+        }), WindowsSchedulerError);
         expect('SCHEDULER_TYPE', 'schedule', () => systemdTimer({
           name: 'task',
           schedule: Object.create({ kind: 'daily', at: '09:30' }),
@@ -761,7 +823,7 @@ fn option_records_require_own_enumerable_data_properties() {
         expect('SCHEDULER_UNSUPPORTED', 'principal.userId', () => windowsTask({
           ...base,
           principal: accessorPrincipal,
-        }));
+        }), WindowsSchedulerError);
 
         const accessorArgs = ['--x'];
         Object.defineProperty(accessorArgs, '0', {
@@ -841,7 +903,7 @@ fn xmllint_validates_every_supported_task_shape_against_the_published_xsd() {
         &js,
         "schema-cases.js",
         r#"
-        import { windowsTask } from 'neo:scheduler';
+        import { windowsTask } from 'neo:os/schedulers/windows';
         const schedules = [
           { kind: 'daily', at: '09:30' },
           { kind: 'weekly', at: '09:30', weekdays: ['mon', 'fri'] },
@@ -949,7 +1011,7 @@ fn xmllint_accepts_generated_utf16_task_and_preserves_text() {
         &js,
         "xml.js",
         r#"
-        import { windowsTask } from 'neo:scheduler';
+        import { windowsTask } from 'neo:os/schedulers/windows';
         globalThis.xml = windowsTask({
           name: 'XML Check',
           description: 'A & B < C > D "E"',
