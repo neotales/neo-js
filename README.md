@@ -25,7 +25,7 @@ OS. It is not a sandbox; grant it only to scripts you trust. `--allow-env`
 permits the script to read any environment variable. Neither capability is
 enabled by default.
 
-`--allow-registry` permits the synchronous `neo:winregistry` module. On
+`--allow-registry` permits the synchronous `neo:win-registry` module. On
 Windows this is full read, write, and delete authority under the current
 process token, not a sandbox; a script can change any key or value the user can,
 including keys that run programs at sign-in. Grant it only to scripts you
@@ -1921,12 +1921,55 @@ server-provided text. The module adds no credentials and starts no shell.
 
 ## Windows registry
 
-`neo:winregistry` provides synchronous Windows Registry access. It requires
-`--allow-registry`; without that permission the module has no exports and an
-import fails. On Windows the permission grants full read, write, and delete
-authority under the current process token. It is not a sandbox: a script can
-change any key or value the user can, including keys that run programs at
-sign-in. Grant it only to scripts you trust.
+`neo:win-registry` provides synchronous Windows Registry access. The old
+`neo:winregistry` spelling is a deprecated alias for the same module and
+allowlist entry; no release is scheduled to remove it. Neither spelling
+accepts nonempty import attributes. Imports require `--allow-registry` (and
+`RuntimeModule::WinRegistry` if the embedder sets an allowlist). On Windows
+the permission grants full read, write, and delete authority under the
+current process token. It is not a sandbox: a script can change any key or
+value the user can, including keys that run programs at sign-in. Grant it
+only to scripts you trust.
+
+### Owned keys
+
+Save this as `registry.js` and run
+`cargo run -p neo-js-cli -- --allow-registry registry.js` on Windows. It
+creates or opens `HKCU\Software\NeoJsRegistryExample` and writes to it:
+
+```js
+import { Registry, Rights } from "neo:win-registry";
+
+const path = "HKCU\\Software\\NeoJsRegistryExample";
+{
+  using key = Registry.createKey(path, Rights.QUERY_VALUE | Rights.SET_VALUE);
+  key.setString("Theme", "dark");
+}
+using reader = Registry.openKey(path, Rights.QUERY_VALUE);
+if (reader.getString("Theme") !== "dark") throw new Error("unexpected theme");
+```
+
+Each `Registry.openKey(path, access?)` or `Registry.createKey(path, access?)`
+returns a `RegistryKey` owning one native handle. Its `path` records the
+supplied full path and `created` indicates whether this call created the
+final key. Bare hives are not accepted. `getString` requires
+`Rights.QUERY_VALUE`; `setString` requires `Rights.SET_VALUE`. The defaults
+are `Rights.READ` for open and `Rights.ALL_ACCESS` for create. The mask must
+be a nonzero combination of bits in `Rights.ALL_ACCESS` and applies only to
+that handle. Windows still checks its permissions and uses the process's
+default registry view; there are no WOW64 view flags.
+
+`using` calls `[Symbol.dispose]()` at scope exit, including when the body
+throws. It is the same idempotent operation as `close()`. The key's metadata
+remains readable, but further I/O throws `WINREGISTRY_CLOSED`. Each runtime
+can keep at most 64 owned keys open across both import spellings; opening
+another throws `WINREGISTRY_LIMIT` until a slot is freed. Runtime teardown
+closes any remaining handles. No raw handle is exposed. **Closing a key
+does not undo writes or remove keys**; the example leaves its key and value
+in the registry. The same `using` syntax works in `.ts` entries; the shipped
+declarations reference `ESNext.Disposable` for type checking.
+
+### Standalone functions
 
 ```js
 import {
@@ -1934,7 +1977,7 @@ import {
   readString,
   writeString,
   writeUint32,
-} from "neo:winregistry";
+} from "neo:win-registry";
 
 createKey("HKCU", "Software\\MyApp");
 writeString("HKCU", "Software\\MyApp", "Theme", "dark");
@@ -1942,11 +1985,10 @@ writeUint32("HKCU", "Software\\MyApp", "LaunchCount", 3);
 console.log(readString("HKCU", "Software\\MyApp", "Theme"));
 ```
 
-The API is a set of free functions, not key objects. Every call opens the key
-it needs and closes that handle before returning, so there is no handle to
-close and no handle finalizer to rely on. `createKey` reports whether it
-created a new key. Writes and value deletes require an existing key; they never
-create one. `deleteKey` removes one key and its values but not its subkeys.
+The standalone functions release any handles before returning.
+`createKey` reports whether it created a new key. Writes and value deletes
+require an existing key; they never create one. `deleteKey` removes one key
+and its values but not its subkeys.
 `keyExists` returns `false` only when opening the key reports that it does not
 exist; a key that exists but cannot be opened raises `WINREGISTRY_ACCESS_DENIED`
 instead of a misleading `false`.
@@ -2015,14 +2057,14 @@ coerce a value. Other failures throw an `Error` with a stable `code`:
 `WINREGISTRY_INVALID_HIVE`, `WINREGISTRY_INVALID_PATH`,
 `WINREGISTRY_INVALID_NAME`, `WINREGISTRY_INVALID_VALUE`,
 `WINREGISTRY_ENCODING`, `WINREGISTRY_TYPE_MISMATCH`,
-`WINREGISTRY_NOT_FOUND`, `WINREGISTRY_ACCESS_DENIED`, `WINREGISTRY_LIMIT`,
-`WINREGISTRY_UNSUPPORTED`, or `WINREGISTRY_IO`. Error messages are fixed text
-and never include a path, value name, or value data.
+`WINREGISTRY_NOT_FOUND`, `WINREGISTRY_ACCESS_DENIED`, `WINREGISTRY_CLOSED`,
+`WINREGISTRY_LIMIT`, `WINREGISTRY_UNSUPPORTED`, or `WINREGISTRY_IO`. Error
+messages are fixed text and never include a path, value name, or value data.
 
 The process's default registry view is used; WOW64 32-bit and 64-bit views
 cannot be selected. There is no ACL or security-descriptor access, no
 transactional update, no recursive delete, no key rename or copy, no change
-notification, no key metadata or last-write time, and no remote registry
+notification, no native key metadata or last-write time, and no remote registry
 support. Windows-specific tests, which run only on Windows hosts, create
 uniquely named temporary keys under `HKCU\Software\neo-js-tests-*` and delete
 them with a drop guard.
@@ -2273,10 +2315,10 @@ asynchronous or streaming child process APIs. Spawned-child handles hold one
 slot each until their terminal call or runtime drop, and their results are
 buffered rather than streamed. Reading stdin blocks with no timeout, and
 `neo:process` stream `close()` is a no-op. The runtime working directory is local to a `NeoJs`
-instance and is not a sandbox. Windows registry support is limited to the
-synchronous `neo:winregistry` functions described above and exists only on a
-Windows host. `neo:path` is lexical only: it has no `resolve` or `relative`,
-reads no working directory, and does not resolve symlinks or enforce
+instance and is not a sandbox. `neo:win-registry` provides synchronous access
+only, and registry operations are supported only on Windows. `neo:path` is
+lexical only: it has no `resolve` or `relative`, reads no working directory,
+and does not resolve symlinks or enforce
 containment. `neo:dotenv` parses text only: it has no file loader, no expansion,
 and no environment mutation. Network support is limited to the synchronous
 `neo:fetch.download` call: there is no asynchronous or streaming API, no

@@ -1,9 +1,8 @@
-//! Windows-only tests for `neo:winregistry`.
+//! Windows-only tests for `neo:win-registry`.
 //!
-//! Every test creates a uniquely named key under
-//! `HKEY_CURRENT_USER\Software\neo-js-tests-*` and removes it with a drop
-//! guard. No existing key is opened for writing, no machine-wide hive is
-//! touched, and no value outside that temporary subtree is modified.
+//! Every test reserves a new key under `HKCU\Software\neo-js-tests-*`.
+//! A collision is closed and retried without arming cleanup. Guards delete
+//! only known names within the reserved key, without recursive deletion.
 
 #![cfg(windows)]
 
@@ -13,87 +12,196 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use neo_js::{NeoJs, Permissions};
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS};
-use windows_sys::Win32::Storage::FileSystem::DELETE;
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, RegCloseKey, RegDeleteKeyExW, RegDeleteTreeW,
-    RegOpenKeyExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, KEY_WRITE, REG_CREATED_NEW_KEY,
+    REG_OPENED_EXISTING_KEY, REG_OPTION_NON_VOLATILE, RegCloseKey, RegCreateKeyExW,
+    RegDeleteKeyExW, RegOpenKeyExW, RegRenameKey, RegSetValueExW,
 };
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
-struct TempKey {
+struct TempParent {
     path: String,
+    // Exact relative paths, deleted in reverse registration order.
+    children: Vec<String>,
 }
 
-impl TempKey {
+impl TempParent {
     fn new() -> Self {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        Self {
-            path: format!(
+        for _ in 0..16 {
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let path = format!(
                 "Software\\neo-js-tests-{}-{}-{}",
                 std::process::id(),
                 nanos,
                 id
-            ),
+            );
+            if let Some(owned) = Self::try_reserve(path) {
+                return owned;
+            }
+        }
+        panic!("could not reserve a new temporary registry parent after 16 attempts");
+    }
+
+    fn try_reserve(path: String) -> Option<Self> {
+        let (disposition, closed) = create_fixture_key(&path);
+        // Arm cleanup only after Windows confirms ownership, but before
+        // checking close status so a failure still cleans up a newly made key.
+        let owned = (disposition == REG_CREATED_NEW_KEY).then(|| Self {
+            path,
+            children: Vec::new(),
+        });
+        assert_eq!(closed, ERROR_SUCCESS, "close registry reservation handle");
+        owned
+    }
+
+    fn create_child(&mut self, name: &str) {
+        let tracked = name.to_owned();
+        self.children.reserve(1);
+        let (disposition, closed) = create_fixture_key(&format!("{}\\{name}", self.path));
+        if disposition == REG_CREATED_NEW_KEY {
+            self.children.push(tracked);
+        }
+        assert_eq!(closed, ERROR_SUCCESS, "close temporary child handle");
+        assert_eq!(
+            disposition, REG_CREATED_NEW_KEY,
+            "temporary child collision"
+        );
+    }
+
+    fn rename_child(&mut self, from: &str, to: &str) {
+        let index = self
+            .children
+            .iter()
+            .position(|child| child == from)
+            .expect("rename source must be owned");
+        let tracked = to.to_owned();
+        let parent_path = wide(&self.path);
+        let from = wide(from);
+        let to = wide(to);
+        let mut parent: HKEY = ptr::null_mut();
+        // SAFETY: all strings are NUL-terminated and live for the calls.
+        // The parent and source are owned by this fixture. RegRenameKey
+        // does not replace an existing destination.
+        let (renamed, closed) = unsafe {
+            let opened = RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                parent_path.as_ptr(),
+                0,
+                KEY_READ | KEY_WRITE,
+                &mut parent,
+            );
+            assert_eq!(opened, ERROR_SUCCESS, "open temporary rename parent");
+            let renamed = RegRenameKey(parent, from.as_ptr(), to.as_ptr());
+            (renamed, RegCloseKey(parent))
+        };
+        if renamed == ERROR_SUCCESS {
+            self.children[index] = tracked;
+        }
+        assert_eq!(closed, ERROR_SUCCESS, "close temporary rename parent");
+        assert_eq!(
+            renamed, ERROR_SUCCESS,
+            "rename temporary key with an open handle"
+        );
+    }
+}
+
+impl Drop for TempParent {
+    fn drop(&mut self) {
+        let mut failures = Vec::new();
+        let mut remove = |path: &str| {
+            let path = wide(path);
+            // SAFETY: `path` is NUL-terminated and names an exact fixture key.
+            // RegDeleteKeyExW does not remove unexpected descendants.
+            let status = unsafe { RegDeleteKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, 0) };
+            if !matches!(
+                status,
+                ERROR_SUCCESS | ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND
+            ) {
+                failures.push(status);
+            }
+        };
+        for child in self.children.iter().rev() {
+            remove(&format!("{}\\{child}", self.path));
+        }
+        remove(&self.path);
+        if !failures.is_empty() {
+            if std::thread::panicking() {
+                eprintln!("temporary registry cleanup failed: RegDeleteKeyExW: {failures:?}");
+            } else {
+                panic!("temporary registry cleanup failed: RegDeleteKeyExW: {failures:?}");
+            }
+        }
+    }
+}
+
+fn wide(path: &str) -> Vec<u16> {
+    path.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn create_fixture_key(path: &str) -> (u32, u32) {
+    let path = wide(path);
+    let mut key = ptr::null_mut();
+    let mut disposition = 0;
+    // SAFETY: `path` is NUL-terminated and both out pointers are valid. On
+    // success the handle is immediately closed without reading or changing
+    // any value, including when Windows opens an already existing key.
+    let (status, closed) = unsafe {
+        let status = RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            path.as_ptr(),
+            0,
+            ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_READ,
+            ptr::null(),
+            &mut key,
+            &mut disposition,
+        );
+        (
+            status,
+            if status == ERROR_SUCCESS {
+                RegCloseKey(key)
+            } else {
+                ERROR_SUCCESS
+            },
+        )
+    };
+    assert_eq!(status, ERROR_SUCCESS, "create temporary registry key");
+    assert!(
+        matches!(disposition, REG_CREATED_NEW_KEY | REG_OPENED_EXISTING_KEY),
+        "unexpected temporary key disposition: {disposition}, close: {closed}"
+    );
+    (disposition, closed)
+}
+
+struct TempKey {
+    _parent: TempParent,
+    path: String,
+}
+
+impl TempKey {
+    /// Legacy tests create and delete `key` themselves. List only the exact
+    /// leaves they can create beneath it, within the freshly reserved parent.
+    fn new(leaves: &[&str]) -> Self {
+        let mut parent = TempParent::new();
+        let path = format!("{}\\key", parent.path);
+        parent.children.push("key".to_owned());
+        for leaf in leaves {
+            parent.children.push(format!("key\\{leaf}"));
+        }
+        Self {
+            _parent: parent,
+            path,
         }
     }
 
     fn js_path(&self) -> String {
         self.path.replace('\\', "\\\\")
-    }
-
-    fn wide_path(&self) -> Vec<u16> {
-        self.path.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-}
-
-impl Drop for TempKey {
-    fn drop(&mut self) {
-        let wide = self.wide_path();
-        let mut key: HKEY = ptr::null_mut();
-        // SAFETY: `wide` is a NUL-terminated path under the unique
-        // HKCU\Software\neo-js-tests-* subtree. The handle is closed once
-        // after the tree is emptied, and only this exact path is removed.
-        let result = unsafe {
-            let open = RegOpenKeyExW(
-                HKEY_CURRENT_USER,
-                wide.as_ptr(),
-                0,
-                KEY_READ | KEY_SET_VALUE | DELETE,
-                &mut key,
-            );
-            if open == ERROR_FILE_NOT_FOUND || open == ERROR_PATH_NOT_FOUND {
-                Ok(())
-            } else if open != ERROR_SUCCESS {
-                Err(("RegOpenKeyExW", open))
-            } else {
-                let tree = RegDeleteTreeW(key, ptr::null());
-                let close = RegCloseKey(key);
-                if tree != ERROR_SUCCESS {
-                    Err(("RegDeleteTreeW", tree))
-                } else if close != ERROR_SUCCESS {
-                    Err(("RegCloseKey", close))
-                } else {
-                    let delete = RegDeleteKeyExW(HKEY_CURRENT_USER, wide.as_ptr(), 0, 0);
-                    if delete == ERROR_SUCCESS || delete == ERROR_FILE_NOT_FOUND {
-                        Ok(())
-                    } else {
-                        Err(("RegDeleteKeyExW", delete))
-                    }
-                }
-            }
-        };
-        if let Err((operation, status)) = result {
-            if std::thread::panicking() {
-                eprintln!("temporary registry cleanup failed: {operation}: {status}");
-            } else {
-                panic!("temporary registry cleanup failed: {operation}: {status}");
-            }
-        }
     }
 }
 
@@ -120,8 +228,9 @@ fn set_raw_value(path: &str, name: &str, kind: u32, data: &[u8]) {
             },
             data.len() as u32,
         );
-        RegCloseKey(key);
-        assert_eq!(status, 0, "set raw temporary value");
+        let closed = RegCloseKey(key);
+        assert_eq!(closed, ERROR_SUCCESS, "close raw temporary value handle");
+        assert_eq!(status, ERROR_SUCCESS, "set raw temporary value");
     }
 }
 
@@ -137,9 +246,130 @@ fn source(template: &str, key: &TempKey) -> String {
     template.replace("__PATH__", &key.js_path())
 }
 
+fn within_parent(template: &str, parent: &TempParent) -> String {
+    template.replace("__PATH__", &parent.path.replace('\\', "\\\\"))
+}
+
+#[test]
+fn reservation_collision_does_not_arm_cleanup() {
+    let mut owner = TempParent::new();
+    owner.create_child("owned");
+    set_raw_value(&owner.path, "Sentinel", 4, &13_u32.to_le_bytes());
+    assert!(TempParent::try_reserve(owner.path.clone()).is_none());
+    runtime()
+        .run_module(
+            "reservation-collision.js",
+            &within_parent(
+                r#"import { keyExists, readUint32 } from 'neo:win-registry';
+                   if (readUint32('HKCU', '__PATH__', 'Sentinel') !== 13 ||
+                       !keyExists('HKCU', '__PATH__\\owned'))
+                       throw Error('collision reservation affected an existing key');"#,
+                &owner,
+            ),
+        )
+        .unwrap();
+}
+
+#[test]
+fn owned_keys_use_native_handles_and_dispose_in_js_and_ts() {
+    for (entry, annotation) in [("owned.js", ""), ("owned.ts", ": RegistryKey")] {
+        let temp = TempParent::new();
+        let js = runtime();
+        let script = format!(
+            r#"import {{Registry, RegistryKey, Rights}} from 'neo:win-registry';
+               const path = 'HKCU\\__PATH__';
+               function expectCode(operation, expected) {{
+                   let code;
+                   try {{ operation(); }} catch (error) {{ code = error.code; }}
+                   if (code !== expected) throw Error('unexpected registry error category');
+               }}
+               using writer{annotation} = Registry.createKey(path, Rights.SET_VALUE);
+               globalThis.writer = writer;
+               if (!(writer instanceof RegistryKey) || writer.created || writer.path !== path)
+                   throw Error('wrong creation metadata');
+               writer.setString('', 'owned 🦀');
+               expectCode(() => writer.getString(''), 'WINREGISTRY_ACCESS_DENIED');
+               {{
+                   using reader{annotation} = Registry.openKey(path, Rights.QUERY_VALUE);
+                   globalThis.reader = reader;
+                   if (reader.created || reader.getString('') !== 'owned 🦀')
+                       throw Error('wrong open metadata or data');
+                   expectCode(() => reader.setString('', ''), 'WINREGISTRY_ACCESS_DENIED');
+               }}
+               expectCode(() => globalThis.reader.getString(''), 'WINREGISTRY_CLOSED');
+               const sentinel = Error('body failure');
+               try {{
+                   using existing{annotation} = Registry.createKey(path, Rights.QUERY_VALUE);
+                   if (existing.created || existing.getString('') !== 'owned 🦀')
+                       throw Error('existing key changed');
+                   globalThis.existing = existing;
+                   throw sentinel;
+               }} catch (error) {{ if (error !== sentinel) throw error; }}
+               expectCode(() => globalThis.existing.getString(''), 'WINREGISTRY_CLOSED');
+               globalThis.remaining = Registry.openKey(path);"#
+        );
+        js.run_module(entry, &within_parent(&script, &temp))
+            .unwrap();
+        js.run_module(
+            "owned-closed.js",
+            "let code;
+             try { globalThis.writer.setString('', ''); } catch (error) { code = error.code; }
+             if (code !== 'WINREGISTRY_CLOSED') throw Error('module scope did not close writer');
+             globalThis.writer.close();
+             globalThis.writer[Symbol.dispose]();",
+        )
+        .unwrap();
+        // The runtime drops `remaining` before the temporary-key cleanup.
+        drop(js);
+        drop(temp);
+    }
+}
+
+#[test]
+fn owned_key_keeps_using_the_original_handle_after_native_rename() {
+    let mut temp = TempParent::new();
+    temp.create_child("before");
+    let js = runtime();
+    js.run_module(
+        "rename-before.js",
+        &within_parent(
+            r#"import { Registry, Rights } from 'neo:win-registry';
+               globalThis.original = Registry.openKey(
+                   'HKCU\\__PATH__\\before', Rights.QUERY_VALUE | Rights.SET_VALUE
+               );
+               globalThis.original.setString('value', 'before rename');"#,
+            &temp,
+        ),
+    )
+    .unwrap();
+
+    temp.rename_child("before", "after");
+
+    js.run_module(
+        "rename-after.js",
+        &within_parent(
+            r#"import { Registry, Rights } from 'neo:win-registry';
+               let code;
+               try { Registry.openKey('HKCU\\__PATH__\\before').close(); }
+               catch (error) { code = error.code; }
+               if (code !== 'WINREGISTRY_NOT_FOUND') throw Error('old path still resolves');
+               using original = globalThis.original;
+               if (original.path !== 'HKCU\\__PATH__\\before' ||
+                   original.getString('value') !== 'before rename')
+                   throw Error('original handle did not survive the rename');
+               original.setString('value', 'after rename');
+               using renamed = Registry.openKey('HKCU\\__PATH__\\after', Rights.QUERY_VALUE);
+               if (renamed.getString('value') !== 'after rename')
+                   throw Error('write did not reach the renamed key');"#,
+            &temp,
+        ),
+    )
+    .unwrap();
+}
+
 #[test]
 fn cleanup_guard_removes_values_and_children() {
-    let key = TempKey::new();
+    let key = TempKey::new(&["child"]);
     let path = key.js_path();
     let js = runtime();
     js.run_module(
@@ -166,7 +396,7 @@ fn cleanup_guard_removes_values_and_children() {
 
 #[test]
 fn overridden_intrinsics_do_not_corrupt_registry_values() {
-    let key = TempKey::new();
+    let key = TempKey::new(&["child"]);
     runtime().run_module("registry-overrides.js", &source(r#"
         import {createKey, writeUint64, readUint64, writeBinary, readBinary, listValues, listSubKeys} from 'neo:winregistry';
         const path = '__PATH__';
@@ -197,7 +427,7 @@ fn overridden_intrinsics_do_not_corrupt_registry_values() {
 
 #[test]
 fn writes_reads_enumerates_and_deletes_a_temporary_key() {
-    let key = TempKey::new();
+    let key = TempKey::new(&["Child", "A", "B", "C"]);
     let js = runtime();
     js.run_module(
         "registry-roundtrip.js",
@@ -329,7 +559,7 @@ fn writes_reads_enumerates_and_deletes_a_temporary_key() {
 
 #[test]
 fn missing_keys_and_values_are_reported_without_creating_anything() {
-    let key = TempKey::new();
+    let key = TempKey::new(&[]);
     let js = runtime();
     js.run_module(
         "registry-missing.js",
@@ -362,7 +592,7 @@ fn missing_keys_and_values_are_reported_without_creating_anything() {
 
 #[test]
 fn bounds_and_invalid_values_do_not_reach_the_registry() {
-    let key = TempKey::new();
+    let key = TempKey::new(&[]);
     let js = runtime();
     js.run_module(
         "registry-bounds.js",
@@ -388,7 +618,7 @@ fn bounds_and_invalid_values_do_not_reach_the_registry() {
              expectCode(() => writeUint64(hive, path, 'Value', 18446744073709551616n),
                         'WINREGISTRY_INVALID_VALUE');
 
-             const longComponent = 'a'.repeat(256);
+             const longComponent = path + '\\' + 'a'.repeat(256);
              const seen = {};
              try { createKey(hive, longComponent); } catch (error) { seen.code = error.code; }
              if (seen.code !== 'WINREGISTRY_INVALID_PATH') throw Error('long component');
@@ -402,7 +632,7 @@ fn bounds_and_invalid_values_do_not_reach_the_registry() {
 
 #[test]
 fn arbitrary_types_long_names_and_large_values_roundtrip() {
-    let key = TempKey::new();
+    let key = TempKey::new(&[]);
     let js = runtime();
     js.run_module(
         "registry-setup.js",

@@ -18,6 +18,14 @@ syntax form, and does not resolve bare imports. Adding browser, Node, or Deno
 types does not make those host APIs available in neo-js. The runtime's `console`
 exists, but it is not declared in the current ES-only setup.
 
+`types/neo-js.d.ts` references `ESNext.Disposable` for `RegistryKey` and
+`Symbol.dispose`; use TypeScript 5.8+ as above. Neo-js runs `using` directly in
+JavaScript and in type-stripped TypeScript, without a polyfill. For example,
+`using key = Registry.openKey(path)` closes the handle at scope exit. Import
+`Registry` from `neo:win-registry`; opening a real key needs Windows and
+`--allow-registry`. If you maintain separate declarations for disposable
+types, include `ESNext.Disposable` in their TypeScript `lib` list.
+
 ## Run and check offline
 
 From the checkout root, with the Rust dependencies already cached:

@@ -42,6 +42,7 @@ fn prototype_setters_before_dynamic_import_cannot_capture_host_or_limits() {
             'listSubKeys', 'listValues', 'readValue', 'readString', 'readUint32',
             'readUint64', 'readBinary', 'writeString', 'writeExpandString',
             'writeUint32', 'writeUint64', 'writeBinary',
+            'acquireOwned', 'created', 'getString', 'setString', 'close', 'open',
             'hive', 'path', 'valueName', 'valueBytes', 'valueUnits', 'enum'
         ];
         for (const name of names) {
@@ -177,6 +178,28 @@ fn every_operation_reports_unsupported_without_faking_success() {
         runtime(true)
             .run_module("unsupported.js", &source.replace("__REGISTRY__", name))
             .unwrap();
+    }
+}
+
+#[cfg(not(windows))]
+#[test]
+fn owned_registry_keys_do_not_fake_success_on_non_windows() {
+    for specifier in ["neo:win-registry", "neo:winregistry"] {
+        let js = runtime(true);
+        js.run_module(
+            "owned-unsupported.js",
+            &format!(
+                r#"import {{Registry, Rights, isAvailable}} from '{specifier}';
+                   if (isAvailable()) throw Error('unexpected Windows support');
+                   for (const operation of [Registry.openKey, Registry.createKey]) {{
+                       let code;
+                       try {{ operation('HKCU\\Software\\Example', Rights.QUERY_VALUE); }}
+                       catch (error) {{ code = error.code; }}
+                       if (code !== 'WINREGISTRY_UNSUPPORTED') throw Error('expected unsupported');
+                   }}"#
+            ),
+        )
+        .unwrap();
     }
 }
 

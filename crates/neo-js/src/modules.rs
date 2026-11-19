@@ -81,8 +81,9 @@ pub enum RuntimeModule {
     /// `neo:winregistry` spelling to `neo:win-registry`. Both names identify
     /// the same module and use this same allowlist entry. No release is
     /// scheduled to remove the alias. Neither spelling accepts nonempty
-    /// import attributes. The registry functions still close their handles
-    /// before returning; there are no disposable registry key objects.
+    /// import attributes. The standalone functions close their handles before
+    /// returning; `Registry.openKey` and `Registry.createKey` instead return
+    /// owned keys usable with `using` or `close()`.
     WinRegistry,
     /// `neo:yaml` — YAML text parsing.
     Yaml,

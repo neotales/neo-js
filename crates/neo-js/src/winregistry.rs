@@ -1,8 +1,7 @@
 //! Synchronous Windows Registry access for `neo:win-registry`.
 //!
-//! The API is a set of free functions. Every call opens the key it needs and
-//! drops the handle before returning, so a caller never owns a registry handle
-//! and there is nothing to close. It is deliberately bounded: key paths and
+//! Free functions release any handles before returning. The `Registry`
+//! namespace acquires owned handles with a per-runtime limit. Key paths and
 //! value names have UTF-16 length limits, values are limited to 8 MiB, and
 //! enumeration requires an entry limit.
 //!
@@ -22,6 +21,8 @@ use rquickjs::{
     Value,
     module::{Declarations, Exports, ModuleDef},
 };
+
+mod owned;
 
 /// Maximum UTF-16 code units in a registry key path, including separators.
 pub(crate) const MAX_PATH_UTF16: usize = 16_384;
@@ -73,6 +74,7 @@ pub(crate) enum ErrorCode {
     TypeMismatch,
     NotFound,
     AccessDenied,
+    Closed,
     Limit,
     #[cfg(not(windows))]
     Unsupported,
@@ -90,6 +92,7 @@ impl ErrorCode {
             Self::TypeMismatch => "WINREGISTRY_TYPE_MISMATCH",
             Self::NotFound => "WINREGISTRY_NOT_FOUND",
             Self::AccessDenied => "WINREGISTRY_ACCESS_DENIED",
+            Self::Closed => "WINREGISTRY_CLOSED",
             Self::Limit => "WINREGISTRY_LIMIT",
             #[cfg(not(windows))]
             Self::Unsupported => "WINREGISTRY_UNSUPPORTED",
@@ -108,6 +111,7 @@ impl ErrorCode {
             Self::TypeMismatch => "the registry value has a different type",
             Self::NotFound => "the registry key or value does not exist",
             Self::AccessDenied => "access to the registry key or value was denied",
+            Self::Closed => "the registry key is closed",
             Self::Limit => "the registry operation exceeded a neo-js limit",
             #[cfg(not(windows))]
             Self::Unsupported => "Windows Registry access is not supported on this host",
@@ -544,15 +548,18 @@ mod platform {
 
     const MAX_ENUM_ATTEMPTS: u32 = 8;
 
-    /// An owned registry handle. Predefined root handles are never wrapped.
+    /// An opened registry handle, or a borrowed predefined root for a
+    /// path-based free function.
     struct Key(HKEY);
 
     impl Drop for Key {
         fn drop(&mut self) {
-            // SAFETY: `Key` is constructed only from a successful
-            // RegOpenKeyExW or RegCreateKeyExW, and owns that handle once.
-            unsafe {
-                RegCloseKey(self.0);
+            if !self.is_predefined() {
+                // SAFETY: the OS returned this live handle on success and
+                // `Key` owns it once. Predefined aliases are borrowed.
+                unsafe {
+                    RegCloseKey(self.0);
+                }
             }
         }
     }
@@ -564,12 +571,58 @@ mod platform {
             // SAFETY: `wide` is NUL-terminated and alive for the call; `handle`
             // is a valid out pointer. On success the handle is owned by Key.
             let status = unsafe { RegOpenKeyExW(root, wide.as_ptr(), 0, access, &mut handle) };
-            if status == ERROR_SUCCESS {
-                Ok(Self(handle))
-            } else {
-                Err(map_status(status))
-            }
+            Self::from_result(status, handle)
         }
+
+        fn from_result(status: WIN32_ERROR, handle: HKEY) -> Result<Self, RegistryError> {
+            if status != ERROR_SUCCESS {
+                return Err(map_status(status));
+            }
+            if handle.is_null() {
+                return Err(io_error());
+            }
+            Ok(Self(handle))
+        }
+
+        fn is_predefined(&self) -> bool {
+            [
+                HKEY_CLASSES_ROOT,
+                HKEY_CURRENT_CONFIG,
+                HKEY_CURRENT_USER,
+                HKEY_LOCAL_MACHINE,
+                HKEY_USERS,
+            ]
+            .contains(&self.0)
+        }
+    }
+
+    impl super::owned::Handle for Key {
+        fn read(&self, name: &str) -> Result<(u32, Vec<u8>), RegistryError> {
+            query_value(self, name)
+        }
+
+        fn write(&self, name: &str, bytes: &[u8]) -> Result<(), RegistryError> {
+            set_value(self, name, super::TYPE_SZ, bytes)
+        }
+    }
+
+    /// Acquire a closeable handle with the requested rights, never a
+    /// predefined root. The handle is not exposed to scripts.
+    pub(super) fn acquire_owned(
+        hive: Hive,
+        path: &str,
+        access: u32,
+        create: bool,
+    ) -> super::owned::Acquired {
+        let (key, created) = if create {
+            create_with_access(hive, path, access)?
+        } else {
+            (Key::open(root(hive), path, access)?, false)
+        };
+        if key.is_predefined() {
+            return Err(io_error());
+        }
+        Ok((Box::new(key), created))
     }
 
     pub(crate) fn is_available() -> bool {
@@ -751,6 +804,14 @@ mod platform {
     }
 
     pub(crate) fn create_key(hive: Hive, path: &str) -> Result<bool, RegistryError> {
+        create_with_access(hive, path, KEY_WRITE).map(|(_key, created)| created)
+    }
+
+    fn create_with_access(
+        hive: Hive,
+        path: &str,
+        access: u32,
+    ) -> Result<(Key, bool), RegistryError> {
         let wide = to_wide(path, MAX_PATH_UTF16)?;
         let mut handle: HKEY = ptr::null_mut();
         let mut disposition: u32 = 0;
@@ -764,17 +825,16 @@ mod platform {
                 0,
                 ptr::null(),
                 REG_OPTION_NON_VOLATILE,
-                KEY_WRITE,
+                access,
                 ptr::null(),
                 &mut handle,
                 &mut disposition,
             )
         };
-        if status != ERROR_SUCCESS {
-            return Err(map_status(status));
-        }
-        let _key = Key(handle);
-        Ok(disposition == REG_CREATED_NEW_KEY)
+        Ok((
+            Key::from_result(status, handle)?,
+            disposition == REG_CREATED_NEW_KEY,
+        ))
     }
 
     pub(crate) fn key_exists(hive: Hive, path: &str) -> Result<bool, RegistryError> {
@@ -831,6 +891,10 @@ mod platform {
         name: &str,
     ) -> Result<(u32, Vec<u8>), RegistryError> {
         let key = Key::open(root(hive), path, KEY_READ)?;
+        query_value(&key, name)
+    }
+
+    fn query_value(key: &Key, name: &str) -> Result<(u32, Vec<u8>), RegistryError> {
         let name_wide = to_wide(name, MAX_VALUE_NAME_UTF16)?;
         let mut kind: u32 = 0;
         let mut size: u32 = 0;
@@ -887,10 +951,14 @@ mod platform {
         kind: u32,
         bytes: Vec<u8>,
     ) -> Result<(), RegistryError> {
+        let key = Key::open(root(hive), path, KEY_SET_VALUE)?;
+        set_value(&key, name, kind, &bytes)
+    }
+
+    fn set_value(key: &Key, name: &str, kind: u32, bytes: &[u8]) -> Result<(), RegistryError> {
         if bytes.len() > MAX_VALUE_BYTES {
             return Err(limit_error());
         }
-        let key = Key::open(root(hive), path, KEY_SET_VALUE)?;
         let name_wide = to_wide(name, MAX_VALUE_NAME_UTF16)?;
         let data = if bytes.is_empty() {
             ptr::null()
@@ -1278,16 +1346,24 @@ fn write_binary_js<'js>(
 
 /// Persistent factory for the private JavaScript wrapper.
 ///
-/// There is no native state: every operation opens and drops its own key. The
-/// factory is created before user code so the wrapper captures the native
-/// `Error`, `TypeError`, `Uint8Array`, and `BigInt` values.
+/// The factory captures pristine intrinsics, and the weak handle index lets
+/// the runtime close still-live owned keys on shutdown.
 #[derive(Default)]
 pub(crate) struct WinRegistryState {
     pub(crate) factory: Option<Persistent<Function<'static>>>,
+    keys: owned::Keys,
 }
 
-// WinRegistryState contains no borrowed JS value; its persistent handle is
-// explicitly released before the context and runtime are dropped.
+impl WinRegistryState {
+    /// Close still-live keys and release the persistent JavaScript factory.
+    pub(crate) fn shutdown(&mut self) {
+        self.keys.close_all();
+        self.factory = None;
+    }
+}
+
+// WinRegistryState contains no borrowed JS values; shutdown releases its
+// persistent handle before the context and runtime are dropped.
 unsafe impl<'js> rquickjs::JsLifetime<'js> for WinRegistryState {
     type Changed<'to> = WinRegistryState;
 }
@@ -1295,7 +1371,7 @@ unsafe impl<'js> rquickjs::JsLifetime<'js> for WinRegistryState {
 /// The native `neo:win-registry` module.
 pub(crate) struct WinRegistryModule;
 
-const EXPORTS: [&str; 19] = [
+const EXPORTS: [&str; 23] = [
     "isAvailable",
     "createKey",
     "keyExists",
@@ -1315,6 +1391,10 @@ const EXPORTS: [&str; 19] = [
     "writeBinary",
     "ValueType",
     "HIVES",
+    "Registry",
+    "RegistryKey",
+    "Rights",
+    "MAX_OPEN_KEYS",
 ];
 
 impl ModuleDef for WinRegistryModule {
@@ -1363,6 +1443,10 @@ impl ModuleDef for WinRegistryModule {
         host.set("writeUint32", Function::new(ctx.clone(), write_uint32_js)?)?;
         host.set("writeUint64", Function::new(ctx.clone(), write_uint64_js)?)?;
         host.set("writeBinary", Function::new(ctx.clone(), write_binary_js)?)?;
+        host.set(
+            "acquireOwned",
+            Function::new(ctx.clone(), owned::acquire_js)?,
+        )?;
         let limits = Object::new_proto(ctx.clone(), None)?;
         limits.set("hive", MAX_HIVE_UTF16)?;
         limits.set("path", MAX_PATH_UTF16)?;
@@ -1370,6 +1454,7 @@ impl ModuleDef for WinRegistryModule {
         limits.set("valueBytes", MAX_VALUE_BYTES)?;
         limits.set("valueUnits", MAX_VALUE_UTF16)?;
         limits.set("enum", MAX_ENUM_ENTRIES)?;
+        limits.set("open", owned::MAX_OPEN_KEYS)?;
         let api: Object = factory.call((host, limits))?;
         for name in EXPORTS {
             exports.export(name, api.get::<_, Value>(name)?)?;
@@ -1393,6 +1478,7 @@ pub(crate) fn factory<'js>(ctx: &Ctx<'js>) -> JsResult<Function<'js>> {
             const isSafeInteger = Number.isSafeInteger;
             const freeze = Object.freeze;
             const defineProperty = Object.defineProperty;
+            const dispose = Symbol.dispose;
             const regexExec = Function.prototype.call.bind(RegExp.prototype.exec);
             const bigintToString = Function.prototype.call.bind(BigInt.prototype.toString);
             const typedArrayLength = Function.prototype.call.bind(
@@ -1406,6 +1492,17 @@ pub(crate) fn factory<'js>(ctx: &Ctx<'js>) -> JsResult<Function<'js>> {
                 /^(?:[\u0000-\uD7FF\uE000-\uFFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/;
 
             const HIVES = freeze(['HKCR', 'HKCU', 'HKLM', 'HKU', 'HKCC']);
+            const Rights = freeze({
+                QUERY_VALUE: 0x00001,
+                SET_VALUE: 0x00002,
+                CREATE_SUB_KEY: 0x00004,
+                ENUMERATE_SUB_KEYS: 0x00008,
+                NOTIFY: 0x00010,
+                CREATE_LINK: 0x00020,
+                READ: 0x20019,
+                WRITE: 0x20006,
+                ALL_ACCESS: 0xf003f
+            });
             const ValueType = freeze({
                 NONE: 0,
                 SZ: 1,
@@ -1495,6 +1592,80 @@ pub(crate) fn factory<'js>(ctx: &Ctx<'js>) -> JsResult<Function<'js>> {
             function unwrapValue(response) {
                 return unwrap(response).value;
             }
+
+            const constructKey = {};
+            class RegistryKey {
+                #path;
+                #created;
+                #handle;
+
+                constructor(token, path, access, create) {
+                    if (token !== constructKey) {
+                        throw new NativeTypeError('obtain a RegistryKey from Registry');
+                    }
+                    // Finish object setup before acquiring a native handle.
+                    freeze(this);
+                    const handle = unwrap(host.acquireOwned(path, access, create));
+                    this.#path = path;
+                    this.#created = handle.created;
+                    this.#handle = handle;
+                }
+
+                get path() { return this.#path; }
+                get created() { return this.#created; }
+
+                close() {
+                    const handle = this.#handle;
+                    if (handle === undefined) return;
+                    this.#handle = undefined;
+                    handle.close();
+                }
+
+                #requireHandle() {
+                    if (this.#handle === undefined) {
+                        inputError('WINREGISTRY_CLOSED', 'the registry key is closed');
+                    }
+                    return this.#handle;
+                }
+
+                getString(name) {
+                    const handle = this.#requireHandle();
+                    requireName(name);
+                    return unwrapValue(handle.getString(name));
+                }
+
+                setString(name, value) {
+                    const handle = this.#requireHandle();
+                    requireName(name);
+                    requireValueText(value);
+                    unwrap(handle.setString(name, value));
+                }
+            }
+            defineProperty(RegistryKey.prototype, dispose, {
+                __proto__: null, value: RegistryKey.prototype.close
+            });
+            freeze(RegistryKey.prototype);
+            freeze(RegistryKey);
+
+            function makeKey(path, access, create) {
+                requireString(
+                    path, 'path', limits.hive + 1 + limits.path, 'WINREGISTRY_INVALID_PATH'
+                );
+                if (typeof access !== 'number' || !isSafeInteger(access) ||
+                    access < 0 || access > 4294967295) {
+                    throw new NativeTypeError('access must be an unsigned 32-bit integer');
+                }
+                return new RegistryKey(constructKey, path, access, create);
+            }
+
+            const Registry = freeze({
+                openKey(path, access = Rights.READ) {
+                    return makeKey(path, access, false);
+                },
+                createKey(path, access = Rights.ALL_ACCESS) {
+                    return makeKey(path, access, true);
+                }
+            });
 
                 return {
                     isAvailable() {
@@ -1614,7 +1785,11 @@ pub(crate) fn factory<'js>(ctx: &Ctx<'js>) -> JsResult<Function<'js>> {
                         unwrap(host.writeBinary(hive, path, name, data));
                     },
                     ValueType,
-                    HIVES
+                    HIVES,
+                    Registry,
+                    RegistryKey,
+                    Rights,
+                    MAX_OPEN_KEYS: limits.open
                 };
             };
         })()"#,

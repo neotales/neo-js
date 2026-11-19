@@ -169,8 +169,7 @@ pub struct NeoJs {
     // `neo:semver` keeps every native callback private to its module. It needs
     // no permission and installs nothing on the global object.
     semver: Rc<RefCell<semver::SemverState>>,
-    // `neo:win-registry` also keeps its wrapper private. It has no live native
-    // state because each call opens and closes its own key handle.
+    // `neo:win-registry` keeps its wrapper and owned handles private.
     winregistry: Rc<RefCell<winregistry::WinRegistryState>>,
     // `neo:fetch` keeps its host callback private. The state records whether
     // filesystem permission was granted so the callback can reject before I/O.
@@ -230,7 +229,7 @@ impl Drop for NeoJs {
             state.factory = None;
         }
         if let Ok(mut state) = self.winregistry.try_borrow_mut() {
-            state.factory = None;
+            state.shutdown();
         }
         if let Ok(mut state) = self.fetch.try_borrow_mut() {
             state.factory = None;

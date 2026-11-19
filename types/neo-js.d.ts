@@ -1,3 +1,5 @@
+/// <reference lib="esnext.disposable" />
+
 /**
  * Host OS information. `platform` and `arch` identify the Rust compilation
  * target, not necessarily a separately detected host. Optional fields follow
@@ -2248,11 +2250,12 @@ declare module "neo:fetch" {
  * user can, including keys that run programs at sign-in. Grant the permission
  * only to trusted scripts.
  *
- * Each call opens the key it needs and closes that handle before returning.
- * There is no key object and no handle for the caller to close. An operation
- * that needs a writable key, such as `writeString`, does not create it; call
- * `createKey` first. `deleteKey` removes one key and its values, but not its
- * subkeys.
+ * The standalone functions release any handles before returning. For
+ * repeated operations on a single owned handle, use `Registry.openKey` or
+ * `Registry.createKey` with a full path and dispose the returned key with
+ * `using` or `close()`. The standalone `writeString` does not create a key;
+ * call `createKey` first. `deleteKey` removes one key and its values, but not
+ * its subkeys.
  *
  * Hive names are explicit (`HKCR`, `HKCU`, `HKLM`, `HKU`, `HKCC`, or their
  * full `HKEY_*` names), case-insensitive, and have no default. Paths are
@@ -2319,7 +2322,7 @@ declare module "neo:fetch" {
  * `WINREGISTRY_INVALID_HIVE`, `WINREGISTRY_INVALID_PATH`,
  * `WINREGISTRY_INVALID_NAME`, `WINREGISTRY_INVALID_VALUE`,
  * `WINREGISTRY_ENCODING`, `WINREGISTRY_TYPE_MISMATCH`,
- * `WINREGISTRY_NOT_FOUND`, `WINREGISTRY_ACCESS_DENIED`,
+ * `WINREGISTRY_NOT_FOUND`, `WINREGISTRY_ACCESS_DENIED`, `WINREGISTRY_CLOSED`,
  * `WINREGISTRY_LIMIT`, `WINREGISTRY_UNSUPPORTED`, or `WINREGISTRY_IO`.
  * Messages never include a path, value name, or value data.
  *
@@ -2327,7 +2330,7 @@ declare module "neo:fetch" {
  * see different or unavailable values; WOW64 views cannot be selected. There
  * is no ACL or security-descriptor access, no
  * transactional update, no recursive delete, no key rename or copy, no change
- * notification, no key metadata or last-write time, and no remote registry
+ * notification, no native key metadata or last-write time, and no remote registry
  * support. A non-Windows host cannot read or write a Windows registry.
  */
 declare module "neo:win-registry" {
@@ -2336,6 +2339,65 @@ declare module "neo:win-registry" {
     | "HKCR" | "HKCU" | "HKLM" | "HKU" | "HKCC"
     | "HKEY_CLASSES_ROOT" | "HKEY_CURRENT_USER" | "HKEY_LOCAL_MACHINE"
     | "HKEY_USERS" | "HKEY_CURRENT_CONFIG";
+
+  /** Windows access masks; combine with `|`. No WOW64 view flags are accepted. */
+  export const Rights: Readonly<{
+    QUERY_VALUE: 0x00001;
+    SET_VALUE: 0x00002;
+    CREATE_SUB_KEY: 0x00004;
+    ENUMERATE_SUB_KEYS: 0x00008;
+    NOTIFY: 0x00010;
+    CREATE_LINK: 0x00020;
+    READ: 0x20019;
+    WRITE: 0x20006;
+    ALL_ACCESS: 0xf003f;
+  }>;
+
+  /** Maximum concurrently open owned keys per runtime, across both import spellings. */
+  export const MAX_OPEN_KEYS: 64;
+
+  /**
+   * An owned Windows registry key. Only `Registry` can construct keys; the
+   * native handle is never exposed. Use `using` or `try`/`finally` to close
+   * reliably. The runtime closes any remaining owned handles on teardown.
+   */
+  export class RegistryKey {
+    #private;
+    private constructor();
+    /** Full path as supplied when the key was acquired; readable after close. */
+    get path(): string;
+    /** True only if this call created the final key; readable after close. */
+    get created(): boolean;
+    /** Release this key's handle. Repeated calls have no effect. */
+    close(): void;
+    /** Same operation as `close()`, also called at `using` scope exit. */
+    [Symbol.dispose](): void;
+    /**
+     * Read `REG_SZ` or unexpanded `REG_EXPAND_SZ` on this handle.
+     * Requires `Rights.QUERY_VALUE`; a closed key throws `WINREGISTRY_CLOSED`.
+     */
+    getString(name: string): string;
+    /**
+     * Write `REG_SZ` on this handle. Requires `Rights.SET_VALUE`; a closed
+     * key throws `WINREGISTRY_CLOSED`. The empty name is the default value.
+     */
+    setString(name: string, value: string): void;
+  }
+
+  /**
+   * Synchronous owned-key API. Paths include a hive and a nonempty subkey,
+   * for example `"HKCU\\Software\\MyApp"`; bare hives are not owned keys.
+   * Access is a nonzero combination of bits in `Rights.ALL_ACCESS`, using
+   * the process-default registry view. Windows still checks permissions.
+   * The mask limits this handle's operations, not the script's overall
+   * `--allow-registry` authority.
+   */
+  export const Registry: Readonly<{
+    /** Open an existing key with the requested access (default `Rights.READ`). */
+    openKey(path: string, access?: number): RegistryKey;
+    /** Create or open a key with the requested access (default `Rights.ALL_ACCESS`). */
+    createKey(path: string, access?: number): RegistryKey;
+  }>;
 
   /** Numeric registry value types, as stored by Windows. */
   export const ValueType: Readonly<{
