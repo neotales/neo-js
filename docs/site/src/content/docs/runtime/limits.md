@@ -21,9 +21,11 @@ buffered rather than streamed. Reading stdin blocks with no timeout, and
 `neo:process` stream `close()` is a no-op. The runtime working directory is local to a `NeoJs`
 instance and is not a sandbox. The [Windows registry module](/guides/modules/winregistry/)
 operates only on Windows. [`neo:path`](/guides/modules/path/) is lexical.
-It does not resolve symlinks, enforce containment, or provide file-URL or glob
-helpers. Its runtime cwd fallback requires a matching permission and
-allowlist entry. `neo:dotenv` parses text only: it has no file loader, no expansion,
+It does not resolve symlinks, enforce containment, or provide file-URL helpers.
+The [glob helpers](/guides/modules/path/#glob-matching) do not inspect files.
+The raw `RegExp` has no evaluation budget. Path resolution's runtime cwd
+fallback requires a matching permission and allowlist entry.
+`neo:dotenv` parses text only: it has no file loader, no expansion,
 and no environment mutation. Network support is limited to the synchronous
 `neo:fetch.download` call: there is no asynchronous or streaming API, no
 authentication, cookie, proxy, decompression, resume, or content-type support,

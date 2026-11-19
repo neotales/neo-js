@@ -204,6 +204,73 @@ process working directory. See [Host permissions and module access](/runtime/per
 The Windows rules are pure string logic and are exercised on Linux by the test
 suite; no Windows host was used to run it.
 
+## Glob matching
+
+Both dialects and the host-selected named exports provide `isGlob`,
+`globToRegExp`, `joinGlobs`, `normalizeGlob`, `match`, and `matchesGlob`.
+These functions never read the working directory or inspect the filesystem.
+They require no permission flag. An embedder's allowlist must still admit
+`neo:path`.
+
+> **WARNING:** Do not use `globToRegExp` when either the pattern or the subject
+> is untrusted. Compilation limits do not bound execution of the returned
+> `RegExp`. Only `match` and its exact alias `matchesGlob` have an evaluation
+> work budget, and they use the default glob options only. Neither is a
+> security boundary.
+
+```js
+import { posix, win32 } from "neo:path";
+
+posix.match("src/tools/path.ts", "src/**/*.ts"); // true
+win32.matchesGlob("src\\path.ts", "src/*.ts"); // true
+posix.match("src\\path.ts", "src/*.ts"); // false
+```
+
+`match(path, pattern)` compares the whole subject without normalizing it.
+`globToRegExp(glob, options?)` returns a fresh, whole-string regular expression.
+The default grammar includes wildcards, whole-component `**`, comma-separated
+brace alternatives, character classes, and a bounded subset of extglobs.
+`?` matches one UTF-16 code unit other than a line terminator or separator.
+`*`, classes, and groups cannot cross separators. An empty pattern never
+matches, and a separator-only `/` pattern requires at least one separator.
+Repeated and trailing separators are tolerated.
+
+Choose `posix` or `win32` when the input dialect does not match the host.
+POSIX compilation uses `\` to escape metacharacters. Windows compilation
+accepts both `/` and `\` as separators and escapes with a backtick. Neither
+escape can quote a separator. `isGlob` is only a heuristic. It uses `\` as
+the escape in both dialects and does not tell you whether compilation will
+succeed.
+
+Compilation enables `extended` and `globstar` by default. Matching is case
+sensitive by default, including on Windows. To use different compiler options,
+see the [`GlobOptions` declarations](/api/modules/path/#globoptions) and the
+warning above. `normalizeGlob` and `joinGlobs` are lexical transformations,
+not pattern validators. Their `globstar` option defaults to `false`. Set it
+to `true` to preserve `..` directly after `**`.
+
+Invalid types and NUL throw `TypeError`. The compiler and matcher report
+malformed patterns as `SyntaxError` with `code: "PATH_GLOB_SYNTAX"`. Size and
+complexity limits, including the matcher's subject length and work budget,
+throw `RangeError` with `code: "PATH_GLOB_LIMIT"`. See the
+[`PathApi` declarations](/api/modules/path/#pathapi) for each function's limits.
+
+### Differences from the pinned upstream glob helpers
+
+- neo-js rejects malformed patterns instead of treating them as literals.
+  Separators inside braces or extglobs are syntax errors. `?` and character
+  classes cannot consume separators.
+- An intermediate `**` consumes only separator-terminated components. In
+  `**/{,x}`, `file/` matches but `file` does not. The pinned upstream
+  implementation matches both.
+- Repeated extglobs `*(...)` and `+(...)` require nonempty, fixed-width
+  alternatives. If there is more than one alternative, they need
+  distinguishable literal prefixes. A pattern such as `*(foo|b*[rt]).txt`
+  exceeds neo-js's supported repetition rules.
+
+The repository records default-option comparison cases for the pinned
+upstream revision in `crates/neo-js/tests/fixtures/path-glob-reference.json`.
+
 ## Round trips and deliberate differences
 
 `format(parse(path))` preserves the path's components and spelling in the
@@ -217,15 +284,16 @@ a fixed point. POSIX `join` is exactly concatenation followed by `normalize`;
 the Windows `join` applies its UNC guard first.
 
 This module is not a drop-in replacement for Node's `path` or
-`@neotales/path`. `toFileUrl`, `fromFileUrl`, and glob helpers are not
-implemented. The module does not accept URL objects or buffers or coerce
+`@neotales/path`. `toFileUrl` and `fromFileUrl` are not implemented.
+The module does not accept URL objects or buffers or coerce
 types. It does not preserve the POSIX `//` root. For a drive root or a
 complete UNC root,
 `basename` and the `parse` component fields are empty rather than a separator,
 and Windows `dirname("C:/")` preserves the root as written instead of stripping
 its separator. There is no asynchronous form.
 
-The path algorithms are adapted from `@neotales/path` under the MIT license.
+The path and glob algorithms are adapted from `@neotales/path` under the MIT
+license, at revision `c7e88644f45a78f65bf639c9d365bb9eff21bcfe`.
 See `crates/neo-js/src/js/path.LICENSE.md` for the exact upstream revision, the
 adapted-file list, and the complete upstream copyright and permission notices.
 The same text is embedded in the library and binary: print it with
