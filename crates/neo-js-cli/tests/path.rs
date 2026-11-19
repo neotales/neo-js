@@ -5,7 +5,9 @@
 
 use std::{
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 fn run_cli(dir: &Path, permissions: &[&str], name: &str, source: &str) -> Output {
@@ -633,4 +635,53 @@ fn nul_is_rejected_and_the_message_does_not_echo_the_path() {
     let text = stderr(&output);
     assert!(text.contains("NUL"), "{text}");
     assert!(!text.contains("sentinel"), "{text}");
+}
+
+#[test]
+fn adversarial_globs_hit_limits_before_the_cli_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let entry = dir.path().join("glob-limits.js");
+    std::fs::write(
+        &entry,
+        r#"
+import { posix, win32 } from 'neo:path';
+function limited(operation) {
+  try { operation(); } catch (error) {
+    if (error instanceof RangeError && error.code === 'PATH_GLOB_LIMIT') return;
+    throw error;
+  }
+  throw Error('expected a glob limit');
+}
+for (const api of [posix, win32]) {
+  // Ambiguous repetition, Cartesian alternatives, and an overlong detector
+  // input are rejected up front, without evaluating a raw RegExp.
+  limited(() => api.globToRegExp('+(a|aa)b'));
+  limited(() => api.globToRegExp('{a,b,c}'.repeat(12)));
+  limited(() => api.isGlob('('.repeat(100_000)));
+  if (api.isGlob('('.repeat(4096))) throw Error('not a glob');
+  // Individually valid subjects and patterns can still exceed the work budget.
+  limited(() => api.match('a'.repeat(10_000), '*a*a*a*a*a*b'));
+  limited(() => api.match('a/'.repeat(5_000), '**/a/**/b'));
+  if (!api.match('a'.repeat(500) + 'b', '+(a|xy)b')) throw Error('valid repetition');
+}
+"#,
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+        .current_dir(dir.path())
+        .arg(&entry)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let report = child.wait_with_output().unwrap();
+            panic!("glob limit check exceeded 5 seconds: {}", stderr(&report));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_ok(&child.wait_with_output().unwrap());
 }

@@ -1454,12 +1454,29 @@ a fixed point. POSIX `join` is exactly concatenation followed by `normalize`;
 the Windows `join` applies its UNC guard first.
 
 This module is not a drop-in replacement for Node's `path` or
-`@neotales/path`. `toFileUrl`, `fromFileUrl`, and glob helpers are not
+`@neotales/path`. `toFileUrl` and `fromFileUrl` are not
 implemented. URL inputs, buffers, and type coercion are not accepted. There
 is no POSIX `//` root preservation. For a drive root or a complete UNC root,
 `basename` and the `parse` component fields are empty rather than a separator,
 and Windows `dirname("C:/")` preserves the root as written instead of stripping
 its separator. There is no asynchronous form.
+
+Named exports and both namespaces include `isGlob`, `globToRegExp`,
+`joinGlobs`, `normalizeGlob`, `match`, and its alias `matchesGlob`. These
+helpers never use cwd or inspect the filesystem. The compiler accepts
+wildcards, globstar, brace alternatives, character classes, and a bounded
+subset of extglobs. Unlike the reference, it rejects malformed patterns
+instead of treating them as literals, and separators inside braces or extglobs
+are syntax errors. `?` and character classes cannot consume separators. A
+root-only `/` pattern does not match the empty string. In `**/{,x}`, the
+intermediate `**` cannot consume a final bare component: `file/` matches,
+but `file` does not (upstream matches both).
+
+Do not use `globToRegExp` when either the pattern or the subject is untrusted.
+Compilation limits do not bound execution of the returned `RegExp`. Only
+`match` (and its alias), which uses the default glob options, has an evaluation
+work budget. Neither is a security boundary. See `types/neo-js.d.ts` for
+options and limits.
 
 The path algorithms are adapted from `@neotales/path` under the MIT license.
 See `crates/neo-js/src/js/path.LICENSE.md` for the exact upstream revision, the
@@ -2317,7 +2334,7 @@ instance and is not a sandbox. Windows registry support is limited to the
 synchronous `neo:winregistry` functions described above and exists only on a
 Windows host. `neo:path` is lexical: runtime cwd fallback requires a
 qualifying grant and module allowlist entry. It does not resolve symlinks
-or enforce containment, and has no file-URL or glob helpers. `neo:dotenv`
+or enforce containment, and has no file-URL helpers. `neo:dotenv`
 parses text only: it has no file loader, no expansion,
 and no environment mutation. Network support is limited to the synchronous
 `neo:fetch.download` call: there is no asynchronous or streaming API, no
