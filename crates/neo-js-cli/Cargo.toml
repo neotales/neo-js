@@ -1,5 +1,5 @@
 [package]
-name = "neo-js-cli"
+name = "neojs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-neo-js = { path = "../neo-js" }
+neojs-core = { path = "../neo-js" }
 
 [dev-dependencies]
 serde_json = "1"

@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions};
 
 fn runtime() -> NeoJs {
     NeoJs::new(Permissions::default()).unwrap()

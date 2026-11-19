@@ -4,7 +4,7 @@
 //! runtime and behave identically for both path syntaxes regardless of the
 //! host platform. Only the file URL class is installed globally.
 
-use neo_js::{NeoJs, Permissions, TestReport};
+use neojs_core::{NeoJs, Permissions, TestReport};
 
 fn run(source: &str) -> TestReport {
     let js = NeoJs::new(Permissions::default()).unwrap();

@@ -4,7 +4,7 @@
 //! contract: exact component precision, precedence, ranges, errors, private
 //! callbacks, and use from a stripped TypeScript entry.
 
-use neo_js::{ModuleAllowlist, NeoJs, Permissions, RuntimeModule, RuntimeOptions};
+use neojs_core::{ModuleAllowlist, NeoJs, Permissions, RuntimeModule, RuntimeOptions};
 
 fn runtime() -> NeoJs {
     NeoJs::new(Permissions::default()).unwrap()

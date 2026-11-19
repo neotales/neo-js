@@ -5,10 +5,14 @@ use std::{
 };
 
 use clap::Parser;
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions};
 
 #[derive(Parser)]
-#[command(version, about = "Run JavaScript with the NeoTales QuickJS host")]
+#[command(
+    name = "neo-js",
+    version,
+    about = "Run JavaScript with the NeoTales QuickJS host"
+)]
 struct Args {
     /// Grant the host user's filesystem authority, including deletion, renaming, and replacement.
     #[arg(long)]
@@ -82,7 +86,7 @@ fn main() -> ExitCode {
 fn print_third_party_notices() -> ExitCode {
     let mut stdout = std::io::stdout().lock();
     match stdout
-        .write_all(neo_js::third_party_notices().as_bytes())
+        .write_all(neojs_core::third_party_notices().as_bytes())
         .and_then(|()| stdout.flush())
     {
         Ok(()) => ExitCode::SUCCESS,

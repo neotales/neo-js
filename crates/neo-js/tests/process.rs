@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions};
 
 fn js_string(value: &str) -> String {
     serde_json::to_string(value).unwrap()

@@ -1,6 +1,6 @@
 //! Public file URL conversions, including Windows syntax on every host.
 
-use neo_js::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
+use neojs_core::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
 
 #[test]
 fn reference_tables_and_file_url_behavior() {

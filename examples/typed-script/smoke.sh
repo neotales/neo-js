@@ -18,13 +18,13 @@ else
   exit 1
 fi
 
-output=$(cargo run --offline --quiet -p neo-js-cli -- --allow-stdio "$example/main.mts")
+output=$(cargo run --offline --quiet -p neojs -- --allow-stdio "$example/main.mts")
 case "$output" in
   'neo-js: '?*/?*) ;;
   *) printf 'Unexpected example output: %s\n' "$output" >&2; exit 1 ;;
 esac
 
-if denied=$(cargo run --offline --quiet -p neo-js-cli -- "$example/main.mts" 2>&1); then
+if denied=$(cargo run --offline --quiet -p neojs -- "$example/main.mts" 2>&1); then
   printf '%s\n' 'Example unexpectedly ran without --allow-stdio.' >&2
   exit 1
 fi

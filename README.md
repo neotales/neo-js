@@ -8,15 +8,15 @@ JavaScript modules and exposes optional host functions for automation.
 Install Rust 1.87 or later, then run:
 
 ```sh
-cargo run -p neo-js-cli -- script.js
-cargo run -p neo-js-cli -- script.ts
-cargo run -p neo-js-cli -- --allow-env --allow-fs script.js
-cargo run -p neo-js-cli -- --allow-run script.js
-cargo run -p neo-js-cli -- --allow-stdio script.js
-cargo run -p neo-js-cli -- --allow-registry script.js
-cargo run -p neo-js-cli -- --allow-net --allow-fs script.js
-cargo run -p neo-js-cli -- --allow-sqlite script.js
-cargo run -p neo-js-cli -- --third-party-notices
+cargo run -p neojs -- script.js
+cargo run -p neojs -- script.ts
+cargo run -p neojs -- --allow-env --allow-fs script.js
+cargo run -p neojs -- --allow-run script.js
+cargo run -p neojs -- --allow-stdio script.js
+cargo run -p neojs -- --allow-registry script.js
+cargo run -p neojs -- --allow-net --allow-fs script.js
+cargo run -p neojs -- --allow-sqlite script.js
+cargo run -p neojs -- --third-party-notices
 ```
 
 The CLI reads the entry script regardless of `--allow-fs`. That flag grants
@@ -85,7 +85,7 @@ neo-js is not a sandbox. For untrusted scripts, isolate the process with
 operating-system controls.
 
 ```rust
-use neo_js::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
+use neojs_core::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = RuntimeOptions::new().modules([
@@ -108,8 +108,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 The example omits `neo:fs` but grants filesystem permission for the listed
 operations. `RuntimeOptions::default()` leaves the module set unrestricted,
 preserving `NeoJs::new` behavior. See the
-[RuntimeOptions reference](https://docs.rs/neo-js/latest/neo_js/struct.RuntimeOptions.html)
-and [Permissions reference](https://docs.rs/neo-js/latest/neo_js/struct.Permissions.html)
+[RuntimeOptions reference](https://docs.rs/neojs-core/latest/neojs_core/struct.RuntimeOptions.html)
+and [Permissions reference](https://docs.rs/neojs-core/latest/neojs_core/struct.Permissions.html)
 for the Rust API.
 
 `--third-party-notices` prints the third-party copyright and permission notices
@@ -117,7 +117,7 @@ embedded in neo-js and exits. It reads no script and needs no permission flag.
 It is a standalone mode; combining it with a script is an error. The text
 currently covers source adapted for `neo:path`; it is not a complete
 dependency-license inventory. Embedders can retrieve the same text without
-constructing a runtime by calling `neo_js::third_party_notices()`. The notice
+constructing a runtime by calling `neojs_core::third_party_notices()`. The notice
 file is part of the crate source and is included in the Cargo package.
 
 The `os` global and `neo:os` need no permission flag, but they disclose basic
@@ -1548,7 +1548,7 @@ The path algorithms are adapted from `@neotales/path` under the MIT license.
 See `crates/neo-js/src/js/path.LICENSE.md` for the exact upstream revision, the
 adapted-file list, and the complete upstream copyright and permission notices.
 The same text is embedded in the library and binary: print it with
-`neo-js --third-party-notices` or call `neo_js::third_party_notices()`. It is
+`neo-js --third-party-notices` or call `neojs_core::third_party_notices()`. It is
 not a complete inventory of every dependency's license.
 
 ### Security: not a safe jail
@@ -2435,7 +2435,7 @@ choose a process exit status.
 ## Embed the runtime
 
 ```rust
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions};
 
 let runtime = NeoJs::new(Permissions::default())?;
 runtime.run("console.log('hello')")?;
@@ -2469,7 +2469,7 @@ host modules. An identity already declared as an entry or dependency cannot
 be supplied as a new entry, even if its evaluation failed; this avoids
 conflicting module definitions.
 
-`neo_js::third_party_notices()` returns the third-party notice text embedded in
+`neojs_core::third_party_notices()` returns the third-party notice text embedded in
 the library; it performs no I/O and needs no permission. The CLI prints the
 same text for `--third-party-notices`. It covers adapted source code (currently
 the `neo:path` algorithms), not every dependency, and is not a complete
@@ -2477,7 +2477,12 @@ dependency-license inventory.
 
 ## Compatibility
 
-neo-js is pre-1.0. Adding the `process` field to `Permissions` was a
+neo-js is pre-1.0. The Rust packages were renamed from `neo-js` and
+`neo-js-cli` to `neojs-core` and `neojs`. That is source-breaking for Rust
+dependents even though the JavaScript API and the `neo-js` executable name are
+unchanged; see [Rust package rename](#rust-package-rename).
+
+Adding the `process` field to `Permissions` was a
 source-breaking change for code that constructed the struct with a complete
 literal. Adding `registry` is the same kind of change, and so is adding
 `network`, `stdio`, or `sqlite`. Migrate by setting the
@@ -2497,6 +2502,44 @@ return `false` and `compare` throw `SEMVER_LIMIT`, where the previous
 implementation had no bound.
 Pre-1.0 releases may make further
 source-breaking changes; no compatibility guarantee is implied.
+
+### Rust package rename
+
+The Rust packages were renamed before 1.0. This breaks Rust dependents; the
+JavaScript API and the `neo-js` executable name do not change.
+
+| Before | After |
+| --- | --- |
+| package `neo-js`, import root `neo_js` | package `neojs-core`, import root `neojs_core` |
+| package `neo-js-cli` | package `neojs` |
+
+Replace `-p neo-js-cli` with `-p neojs` and `-p neo-js` with `-p neojs-core`
+in workspace commands. Rename the dependency key and every Rust path. For a
+checkout next to your crate:
+
+```toml
+[dependencies]
+neojs-core = { path = "../neo-js/crates/neo-js" }
+```
+
+```rust
+use neojs_core::{NeoJs, Permissions};
+```
+
+Workspace package selection uses the new names. The CLI package still defines
+one executable, `neo-js`, through its explicit `[[bin]]`. Its clap command name
+is pinned to `neo-js`, so `--help` and `--version` identify the executable
+instead of the package name; the binary path, arguments, and runtime behavior
+are unchanged:
+
+```sh
+cargo run -p neojs -- script.js
+cargo test -p neojs-core
+```
+
+There is no `neo-js` package alias and no `neo_js` re-export. Existing
+dependents must update their manifest and imports; no compatibility facade is
+provided.
 
 ## Limits
 

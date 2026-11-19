@@ -1,6 +1,6 @@
 //! Public API and authority checks for the synchronous SQLite module.
 
-use neo_js::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
+use neojs_core::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
 
 const SETUP: &str = r#"
 import { openMemory } from 'neo:sqlite';

@@ -2,7 +2,7 @@
 //!
 //! The module needs no permission flag and grants no host capability.
 
-use neo_js::{NeoJs, Permissions, TestReport};
+use neojs_core::{NeoJs, Permissions, TestReport};
 
 fn run(source: &str) -> TestReport {
     let js = NeoJs::new(Permissions::default()).unwrap();

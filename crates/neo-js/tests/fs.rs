@@ -8,7 +8,7 @@
 
 use std::fs;
 
-use neo_js::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
+use neojs_core::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
 
 fn literal(path: &std::path::Path) -> String {
     serde_json::to_string(path.to_str().unwrap()).unwrap()

@@ -5,7 +5,7 @@
 //! a module, call `run_pending_tests`, and inspect the report. No host
 //! permission is enabled; the test modules must work without one.
 
-use neo_js::{NeoJs, Permissions, TestReport};
+use neojs_core::{NeoJs, Permissions, TestReport};
 
 fn runtime() -> NeoJs {
     NeoJs::new(Permissions::default()).unwrap()

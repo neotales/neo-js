@@ -23,7 +23,7 @@ exists, but it is not declared in the current ES-only setup.
 From the checkout root, with the Rust dependencies already cached:
 
 ```sh
-cargo run --offline -p neo-js-cli -- --allow-stdio examples/typed-script/main.mts
+cargo run --offline -p neojs -- --allow-stdio examples/typed-script/main.mts
 ```
 
 The script prints the target platform and architecture from `neo:os` and, when

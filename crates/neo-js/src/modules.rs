@@ -396,7 +396,7 @@ impl RuntimeOptions {
     /// Builder form of [`Self::with_allowlist`].
     ///
     /// ```
-    /// use neo_js::{RuntimeModule, RuntimeOptions};
+    /// use neojs_core::{RuntimeModule, RuntimeOptions};
     ///
     /// let options = RuntimeOptions::new().modules([RuntimeModule::Path, RuntimeModule::Hash]);
     /// assert!(options.is_module_allowed(RuntimeModule::Hash));

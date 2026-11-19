@@ -1029,7 +1029,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            js.eval("fs.readText('Cargo.toml').includes('neo-js') ? 'yes' : 'no'")
+            js.eval("fs.readText('Cargo.toml').includes('neojs-core') ? 'yes' : 'no'")
                 .unwrap(),
             "yes"
         );

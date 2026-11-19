@@ -1,4 +1,4 @@
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions};
 
 #[test]
 fn typescript_module_names_are_stripped() {

@@ -1,6 +1,6 @@
 //! Embedding tests for `neo:path` capability and runtime cwd boundaries.
 
-use neo_js::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
+use neojs_core::{NeoJs, Permissions, RuntimeModule, RuntimeOptions};
 
 #[test]
 fn cwd_requires_both_a_grant_and_its_corresponding_allowlist_entry() {
