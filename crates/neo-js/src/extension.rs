@@ -70,13 +70,13 @@
 //!
 //! A built-in name is reserved for the runtime. Registration reports
 //! [`ExtensionRegistrationError::CoreModuleCollision`] for a name such as
-//! `neo:fs` that this build still provides. `neo:sqlite` and `neo:os` are no
-//! longer built in: the separate `neojs-sqlite` and `neojs-os` packages
-//! register those exact names through this API with
-//! [`ExtensionPermission::Sqlite`] and [`ExtensionPermission::None`], and own
-//! their native dependencies. Core still owns the permission gate, the
-//! allowlist, resolution, the module cache, and teardown; an extension cannot
-//! define new authority.
+//! `neo:fs` that this build still provides. `neo:sqlite`, `neo:os`, and the
+//! scheduler specifiers are no longer built in: the separate `neojs-sqlite`,
+//! `neojs-os`, and `neojs-schedulers` packages register those exact names
+//! through this API with [`ExtensionPermission::Sqlite`] and
+//! [`ExtensionPermission::None`], and own their native dependencies. Core
+//! still owns the permission gate, the allowlist, resolution, the module
+//! cache, and teardown; an extension cannot define new authority.
 //!
 //! # Thread ownership
 //!

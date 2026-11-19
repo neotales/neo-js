@@ -8,9 +8,9 @@ Version** while `main.mts` is open. Try completion on `os.` or hover over
 `stdout.write`. The config lists `../../types/neo-js.d.ts` as an input so the
 editor sees both the ambient globals and the `neo:` modules. That file is the
 generated CLI composition: core declarations plus the optional modules the CLI
-links, currently `neo:os` and `neo:sqlite`. A host built without `neojs-os` or
-`neojs-sqlite` should use `../../types/neo-js.core.d.ts` instead, where the
-import is a type error. See
+links, currently `neo:os`, the scheduler generators, and `neo:sqlite`. A host
+built without `neojs-os`, `neojs-schedulers`, or `neojs-sqlite` should use
+`../../types/neo-js.core.d.ts` instead, where the import is a type error. See
 `../../types/README.md` for the fragments and regeneration command. Keep the
 checkout layout, or copy the declaration into your own project and update
 `files` to match.

@@ -32,7 +32,8 @@ fn import_error(js: &NeoJs, entry: &str, module: &str) -> String {
 
 #[test]
 fn default_runtime_keeps_the_historical_behavior() {
-    // No allowlist: every module is importable once its permission is granted.
+    // No allowlist: every built-in module is importable once its permission is
+    // granted. Optional extensions are owned and tested by their own crates.
     let js = NeoJs::new(everything()).unwrap();
     js.run_module(
         "default-all.js",
@@ -47,11 +48,8 @@ fn default_runtime_keeps_the_historical_behavior() {
          import 'neo:fetch';
          import 'neo:fs';
          import 'neo:hash';
-         import 'neo:os/schedulers/systemd';
-         import 'neo:os/schedulers/windows';
          import 'neo:path';
          import 'neo:process';
-         import 'neo:scheduler';
          import 'neo:semver';
          import 'neo:string-builder';
          import 'neo:test';
@@ -108,88 +106,6 @@ fn empty_allowlist_denies_every_module_statically_and_dynamically() {
             .unwrap();
     }
     assert_eq!(js.run_pending_tests().unwrap(), None);
-}
-
-#[test]
-fn scheduler_specifiers_are_allowlisted_independently_without_permissions() {
-    let surfaces = [
-        (
-            RuntimeModule::SchedulerSystemd,
-            "neo:os/schedulers/systemd",
-            "MAX_SYSTEMD_LINE_BYTES,SchedulerError,systemdService,systemdTimer,systemdUnits",
-        ),
-        (
-            RuntimeModule::SchedulerWindows,
-            "neo:os/schedulers/windows",
-            "MAX_WINDOWS_COMMAND_LINE,SchedulerError,WINDOWS_XML_ENCODING,windowsTask",
-        ),
-        (
-            RuntimeModule::Scheduler,
-            "neo:scheduler",
-            "MAX_SYSTEMD_LINE_BYTES,MAX_WINDOWS_COMMAND_LINE,SchedulerError,\
-             WINDOWS_XML_ENCODING,systemdService,systemdTimer,systemdUnits,windowsTask",
-        ),
-    ];
-    for (allowed, name, exports) in surfaces {
-        let options = RuntimeOptions::new().module_names([name]).unwrap();
-        assert!(options.is_module_allowed(allowed));
-        let js = NeoJs::new_with_options(Permissions::default(), options.clone()).unwrap();
-        js.run_module(
-            "scheduler-allowed.js",
-            &format!(
-                "import * as staticModule from '{name}';
-                 const dynamicModule = await import('{name}');
-                 if (staticModule !== dynamicModule || Object.keys(dynamicModule).sort().join(',') !== '{exports}')
-                   throw Error('wrong scheduler exports');"
-            ),
-        )
-        .unwrap();
-        for (index, (denied, denied_name, _)) in surfaces.into_iter().enumerate() {
-            if allowed == denied {
-                continue;
-            }
-            assert!(!options.is_module_allowed(denied));
-            let error = import_error(&js, &format!("scheduler-denied-{index}.js"), denied_name);
-            assert!(error.contains("allowlist"), "{error}");
-            js.run_module(
-                &format!("scheduler-dynamic-denied-{index}.js"),
-                &format!(
-                    "let error;
-                     try {{ await import('{denied_name}'); }} catch (err) {{ error = err; }}
-                     if (!String(error).includes('allowlist')) throw Error('wrong import result');"
-                ),
-            )
-            .unwrap();
-        }
-    }
-}
-
-#[test]
-fn scheduler_names_do_not_resolve_parent_paths_or_variations() {
-    let invalid = [
-        "neo:os/schedulers",
-        "neo:os/schedulers/Windows",
-        "neo:os/schedulers/systemd.js",
-        "neo:os/schedulers/windows/",
-        "neo:os/schedulers/../schedulers/systemd",
-        "neo:scheduler/windows",
-    ];
-    let error = ModuleAllowlist::from_names(invalid).unwrap_err();
-    assert_eq!(error.names(), invalid);
-    let js = NeoJs::new(everything()).unwrap();
-    for (index, name) in invalid.into_iter().enumerate() {
-        let error = import_error(&js, &format!("bad-scheduler-{index}.js"), name);
-        assert!(error.contains(name), "{error}");
-    }
-    js.run_module(
-        "bad-scheduler-dynamic.js",
-        "for (const name of ['neo:os/schedulers', 'neo:os/schedulers/Windows']) {
-           let error;
-           try { await import(name); } catch (err) { error = err; }
-           if (!String(error).includes(name)) throw Error('wrong import result');
-         }",
-    )
-    .unwrap();
 }
 
 #[test]

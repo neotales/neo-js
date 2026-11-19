@@ -59,13 +59,6 @@ pub enum RuntimeModule {
     /// `neo:process` — runtime streams and working directory; also requires
     /// [`crate::Permissions::process`] or [`crate::Permissions::stdio`].
     Process,
-    /// `neo:scheduler` — deprecated combined scheduler compatibility module.
-    ///
-    /// Selecting this entry allows both generators through the legacy name
-    /// only. It does not allow imports of the two target-specific modules.
-    /// For new allowlists, select [`Self::SchedulerSystemd`] and/or
-    /// [`Self::SchedulerWindows`] instead.
-    Scheduler,
     /// `neo:semver` — semantic-version parsing, formatting, ranges, and
     /// comparison.
     Semver,
@@ -80,10 +73,6 @@ pub enum RuntimeModule {
     WinRegistry,
     /// `neo:yaml` — YAML text parsing.
     Yaml,
-    /// `neo:os/schedulers/systemd` — systemd unit configuration text generation.
-    SchedulerSystemd,
-    /// `neo:os/schedulers/windows` — Windows Task Scheduler XML text generation.
-    SchedulerWindows,
 }
 
 impl RuntimeModule {
@@ -92,7 +81,7 @@ impl RuntimeModule {
     /// The array grows when host modules are added. Iterate with
     /// `RuntimeModule::ALL.into_iter()` rather than naming its length in a
     /// type. To build an allowlist of all modules, use [`ModuleAllowlist::all`].
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 19] = [
         Self::Age,
         Self::Ansi,
         Self::Assert,
@@ -106,15 +95,12 @@ impl RuntimeModule {
         Self::Hash,
         Self::Path,
         Self::Process,
-        Self::Scheduler,
         Self::Semver,
         Self::StringBuilder,
         Self::Test,
         Self::Toml,
         Self::WinRegistry,
         Self::Yaml,
-        Self::SchedulerSystemd,
-        Self::SchedulerWindows,
     ];
 
     /// The canonical `neo:` name of this module.
@@ -133,9 +119,6 @@ impl RuntimeModule {
             Self::Hash => "neo:hash",
             Self::Path => "neo:path",
             Self::Process => "neo:process",
-            Self::Scheduler => "neo:scheduler",
-            Self::SchedulerSystemd => "neo:os/schedulers/systemd",
-            Self::SchedulerWindows => "neo:os/schedulers/windows",
             Self::Semver => "neo:semver",
             Self::StringBuilder => "neo:string-builder",
             Self::Test => "neo:test",
@@ -164,9 +147,6 @@ impl RuntimeModule {
             "neo:hash" => Self::Hash,
             "neo:path" => Self::Path,
             "neo:process" => Self::Process,
-            "neo:scheduler" => Self::Scheduler,
-            "neo:os/schedulers/systemd" => Self::SchedulerSystemd,
-            "neo:os/schedulers/windows" => Self::SchedulerWindows,
             "neo:semver" => Self::Semver,
             "neo:string-builder" => Self::StringBuilder,
             "neo:test" => Self::Test,

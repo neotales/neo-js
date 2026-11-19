@@ -255,9 +255,12 @@ named exports use the runtime snapshot, independent of global object mutation.
 exact decimal components and uses Cargo range semantics. `neo:env` exports the
 corresponding global functions when `--allow-env` is granted. `neo:fs` exports
 the same API as the global `fs` object when `--allow-fs` and the runtime
-allowlist admit it. `neo:semver`, `neo:dotenv`, `neo:toml`,
-`neo:yaml`, and `neo:scheduler` need no permission flag. Relative `.js`,
-`.mjs`, `.ts`, and `.mts` imports also require `--allow-fs`.
+allowlist admit it. `neo:semver`, `neo:dotenv`, `neo:toml`, and
+`neo:yaml` need no permission flag. The scheduler specifiers
+`neo:os/schedulers/systemd`, `neo:os/schedulers/windows`, and the deprecated
+`neo:scheduler` also need none; they are supplied by the optional
+`neojs-schedulers` package, which the CLI registers. Relative `.js`, `.mjs`,
+`.ts`, and `.mts` imports also require `--allow-fs`.
 Bare imports are not supported.
 
 The CLI canonicalizes the entry path and reads that file even without
@@ -1148,15 +1151,32 @@ span.
 
 ## Scheduler configuration
 
-`neo:scheduler` generates configuration text for a recurring job on systemd or
-Windows Task Scheduler. It is a pure, synchronous JavaScript module: it needs
-no permission flag and grants no host capability. It does not read or write a
-file, create a directory, change a permission, start a process, run a shell,
-call `systemctl`, register a task, or enable anything. The returned strings are
-inert until a caller with separate authority writes and installs them.
+`neo:os/schedulers/systemd` and `neo:os/schedulers/windows` generate
+configuration text for a recurring job on systemd or Windows Task Scheduler.
+The deprecated `neo:scheduler` alias exposes both generators through that one
+name and remains available; there is no scheduled removal. The generators are
+pure, synchronous JavaScript, supplied by the optional `neojs-schedulers`
+package rather than built into `neojs-core`. The CLI registers that package, so
+its module set is unchanged. A core-only embedder has none of these imports
+until it registers the extension itself.
+
+None of the specifiers needs a permission flag, and none grants a host
+capability. They do not read or write a file, create a directory, change a
+permission, start a process, run a shell, call `systemctl`, register a task, or
+enable anything. They install no global. The returned strings are inert until a
+caller with separate authority writes and installs them.
+
+An explicit module allowlist names one exact specifier at a time:
+`neo:os/schedulers/systemd`, `neo:os/schedulers/windows`, or
+`neo:scheduler`. Admitting the canonical systemd name does not admit the
+Windows name or the alias, and admitting the alias grants both generators
+through `neo:scheduler` only. `ModuleAllowlist::all()` contains built-in
+modules only, so it does not include any of them; use
+`ModuleAllowlist::all_with_extensions` or register the crate and add the exact
+names. The Rust API is described under [Compatibility](#compatibility).
 
 ```js
-import { systemdUnits } from "neo:scheduler";
+import { systemdUnits } from "neo:os/schedulers/systemd";
 
 const { service, timer } = systemdUnits({
   name: "backup",
@@ -1183,7 +1203,7 @@ user unit normally belongs in `~/.config/systemd/user`. Installing or
 reloading either is outside this module.
 
 ```js
-import { windowsTask } from "neo:scheduler";
+import { windowsTask } from "neo:os/schedulers/windows";
 
 const xml = windowsTask({
   name: "Backup",
@@ -1209,6 +1229,16 @@ declaration with one that matches the bytes you actually write.
 performs no encoding. It does not register the task; registration and the
 `Password` credential are the caller's responsibility, and this module never
 accepts or stores a password.
+
+For compatibility, the deprecated alias imports both generators from one name:
+
+```js
+import { systemdUnits, windowsTask } from "neo:scheduler";
+```
+
+New code should use the canonical names. The alias keeps its existing output
+and error contract, has no scheduled removal, and is allowlisted only by its
+own exact name.
 
 The supported schedule is deliberately small:
 
@@ -1339,10 +1369,11 @@ resolve.
 The repository tests run generated units through `systemd-analyze verify` and
 validate generated UTF-16LE XML against the pinned Task Scheduler 1.3 XSD with
 `xmllint --schema` on temporary files, when those tools are installed. The
-schema fixture is reproduced from Microsoft Learn with provenance and license
-in `crates/neo-js/tests/fixtures/`. Schema validation covers document validity,
-not installation, service execution, or Windows runtime behaviour. No Windows
-runtime is claimed.
+schema fixture and its provenance and license notice are reproduced from
+Microsoft Learn in `crates/neojs-schedulers/tests/fixtures/`
+(`task-scheduler-1.3.xsd` and `NOTICE.md`). Schema validation covers document
+validity, not installation, service execution, or Windows runtime behaviour.
+No Windows runtime is claimed.
 
 ## Path utilities
 
@@ -1713,8 +1744,8 @@ returns the descriptor for hosts that assemble extension registries themselves.
 
 Registration takes one private metadata snapshot and installs the writable `os`
 global before user code runs. The named exports never reread the global. The
-`neo:os/schedulers/systemd` and `neo:os/schedulers/windows` modules remain built
-into core and are unaffected.
+scheduler generators are supplied separately by the optional
+`neojs-schedulers` package and are unaffected by `neojs-os`.
 
 ## SQLite
 
@@ -2491,14 +2522,17 @@ TypeScript language server. Its `tsconfig.json` loads the checked-in
 
 `types/neo-js.d.ts` is the deterministic, checked-in CLI composition of the
 core declarations in `types/neo-js.core.d.ts` and the declarations owned by
-each optional crate the CLI links. The CLI links `neojs-os` and
-`neojs-sqlite`, so the composed entry declares `neo:os`, the `os` global, and
-`neo:sqlite`. A host built without those crates should use
-`types/neo-js.core.d.ts`, where the imports are type errors and `os` is
-undeclared. Declarations record compiled availability, not permissions or
-allowlists: a type-checked `neo:sqlite` import still needs `Permissions::sqlite`
-and allowlist admission at run time, and `neo:os` still needs the runtime
-allowlist to admit it. See
+each optional crate the CLI links. The CLI links `neojs-os`,
+`neojs-schedulers`, and `neojs-sqlite`, so the composed entry declares
+`neo:os`, the `os` global, all three scheduler specifiers, and `neo:sqlite`.
+The scheduler fragment is owned by `neojs-schedulers` and selected with
+`--with schedulers`; the composer never selects it from Cargo metadata. A host
+built without those crates should use `types/neo-js.core.d.ts`, where the
+imports are type errors and `os` is undeclared. Declarations record compiled
+availability, not permissions or allowlists: a type-checked `neo:sqlite`
+import still needs `Permissions::sqlite` and allowlist admission at run time,
+`neo:os` still needs the runtime allowlist to admit it, and each scheduler
+specifier still needs its own exact allowlist name. See
 [`types/README.md`](types/README.md) for selection, the offline regeneration
 command, declaration checks, and the composer's file-identity and
 manifest-check rules.
@@ -2740,6 +2774,62 @@ explicitly. No permission flag is involved, and the CLI behavior, exports,
 platform-specific rules, and writable-global/private-snapshot split are
 unchanged because the CLI registers the crate.
 
+Removing `RuntimeModule::Scheduler`, `RuntimeModule::SchedulerSystemd`, and
+`RuntimeModule::SchedulerWindows` is source-breaking in the same way. The
+scheduler generators are now supplied by the optional `neojs-schedulers`
+package; `neojs-core` no longer contains their loader, module source, or
+dependency. Replace those variants with the exact registered names after
+registering `neojs_schedulers::schedulers_extension()` (or
+`neojs_schedulers::with_schedulers`). `ModuleAllowlist::all()` contains built-in
+modules only, so it no longer admits any scheduler specifier; use
+`ModuleAllowlist::all_with_extensions` or add `SYSTEMD_MODULE_NAME`,
+`WINDOWS_MODULE_NAME`, and/or `LEGACY_MODULE_NAME` explicitly. The three names
+are independent: `LEGACY_MODULE_NAME` alone admits only `neo:scheduler`, and
+either canonical constant admits only its own specifier. `neo:scheduler`
+remains the deprecated combined alias with no scheduled removal, no permission
+flag is involved, and the CLI behavior,
+exports, error contract, and absence of global installation are unchanged
+because the CLI registers the crate. Add the optional dependency:
+
+```toml
+[dependencies]
+neojs-core = { path = "../neo-js/crates/neo-js" }
+neojs-schedulers = { path = "../neo-js/crates/neojs-schedulers" }
+```
+
+A complete embedder example:
+
+```rust
+use neojs_core::{NeoJs, Permissions, RuntimeOptions};
+use neojs_schedulers::{
+    LEGACY_MODULE_NAME, SYSTEMD_MODULE_NAME, WINDOWS_MODULE_NAME, with_schedulers,
+};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let options = with_schedulers(RuntimeOptions::new())?.module_names([
+        SYSTEMD_MODULE_NAME,
+        WINDOWS_MODULE_NAME,
+        LEGACY_MODULE_NAME,
+    ])?;
+    let runtime = NeoJs::new_with_options(Permissions::default(), options)?;
+    runtime.run_module(
+        "main.js",
+        "import {systemdUnits} from 'neo:os/schedulers/systemd';
+         import {windowsTask} from 'neo:os/schedulers/windows';
+         import {systemdUnits as legacyUnits} from 'neo:scheduler';
+         const schedule = {kind: 'daily', at: '09:30'};
+         if (systemdUnits({name: 'backup', program: '/bin/true', schedule}).service.length === 0)
+           throw Error('systemd');
+         if (legacyUnits({name: 'backup', program: '/bin/true', schedule}).service.length === 0)
+           throw Error('legacy');
+         if (!windowsTask({name: 'Backup', startDate: '2026-11-18',
+                           program: 'C:\\\\backup.exe', schedule}).includes('<Task'))
+           throw Error('windows');",
+    )?;
+    Ok(())
+}
+```
+
 Adding `neo:exec.spawn` is
 additive: the module exports one more function, existing `exec` calls and
 permissions are unchanged, and the host installs two additional host
@@ -2764,10 +2854,12 @@ JavaScript API and the `neo-js` executable name do not change.
 | package `neo-js`, import root `neo_js` | package `neojs-core`, import root `neojs_core` |
 | package `neo-js-cli` | package `neojs` |
 
-`neojs-sqlite` and `neojs-os` are new optional packages, not renames. Their
-import roots are `neojs_sqlite` and `neojs_os`. Add `neojs-sqlite` only when the
-program registers `neo:sqlite`; add `neojs-os` only when it registers `neo:os`
-and the `os` global. The core package does not compile or link either module.
+`neojs-sqlite`, `neojs-os`, and `neojs-schedulers` are new optional packages,
+not renames. Their import roots are `neojs_sqlite`, `neojs_os`, and
+`neojs_schedulers`. Add `neojs-sqlite` only when the program registers
+`neo:sqlite`; add `neojs-os` only when it registers `neo:os` and the `os`
+global; add `neojs-schedulers` only when it registers the scheduler
+specifiers. The core package does not compile or link any of them.
 
 Replace `-p neo-js-cli` with `-p neojs` and `-p neo-js` with `-p neojs-core`
 in workspace commands. Rename the dependency key and every Rust path. For a
@@ -2796,6 +2888,14 @@ For operating-system metadata, keep the core dependency and add:
 [dependencies]
 neojs-core = { path = "../neo-js/crates/neo-js" }
 neojs-os = { path = "../neo-js/crates/neojs-os" }
+```
+
+For the scheduler generators, keep the core dependency and add:
+
+```toml
+[dependencies]
+neojs-core = { path = "../neo-js/crates/neo-js" }
+neojs-schedulers = { path = "../neo-js/crates/neojs-schedulers" }
 ```
 
 Workspace package selection uses the new names. The CLI package still defines
@@ -2842,10 +2942,12 @@ parses text only: it has no file loader, no expansion,
 and no environment mutation. Network support is limited to the synchronous
 `neo:fetch.download` call: there is no asynchronous or streaming API, no
 authentication, cookie, proxy, decompression, resume, or content-type support,
-and no SSRF filtering. `neo:scheduler` generates text only: it does not write,
-install, enable, or run a generated unit or task, does not provide a scheduler
-daemon, and supports only the daily and weekly forms described above. Most
-other requested `neo:` modules are not implemented yet.
+and no SSRF filtering. `neo:os/schedulers/systemd`,
+`neo:os/schedulers/windows`, and the deprecated `neo:scheduler` alias generate
+text only: they need no permission flag, install no global, and do not write,
+install, enable, or run a generated unit or task, provide a scheduler daemon,
+or support forms beyond the daily and weekly forms described above. Most other
+requested `neo:` modules are not implemented yet.
 `neo:semver` follows the Rust `semver` crate: a core component is limited to
 `u64::MAX`, and ranges are Cargo-style intersections without `||`, hyphen
 ranges, or npm x-range defaults. Numeric prerelease identifiers remain

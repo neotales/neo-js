@@ -75,8 +75,8 @@
 //! [`neojs_core::ModuleAllowlist::all_with_extensions`] or add
 //! [`MODULE_NAME`] explicitly. A dependency on the `neojs` CLI is unchanged:
 //! it registers this extension itself, so `--allow-*` flags and the `os`
-//! global behave as before. The `neo:os/schedulers/*` modules remain built
-//! into core and are unaffected.
+//! global behave as before. The scheduler generators are supplied separately
+//! by `neojs-schedulers` and are unaffected by this crate.
 
 use std::any::Any;
 

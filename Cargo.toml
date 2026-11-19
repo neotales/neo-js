@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/neo-js", "crates/neo-js-cli", "crates/neojs-os", "crates/neojs-sqlite"]
+members = ["crates/neo-js", "crates/neo-js-cli", "crates/neojs-os", "crates/neojs-schedulers", "crates/neojs-sqlite"]
 resolver = "2"
 
 [workspace.package]
