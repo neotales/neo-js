@@ -159,6 +159,10 @@
 //! symlink, junction, verbatim-path, `FILE_ATTRIBUTE_*`, and
 //! `DirectoryNotEmpty` details are operating-system dependent.
 
+// Exercise the private worker foundation without installing any runtime hooks.
+#[cfg(test)]
+mod worker;
+
 use std::{
     cell::RefCell,
     fs::{self, File, Metadata, OpenOptions},
