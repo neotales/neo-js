@@ -1483,6 +1483,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "neojs-io"
+version = "0.1.0"
+dependencies = [
+ "neojs-core",
+]
+
+[[package]]
 name = "neojs-os"
 version = "0.1.0"
 dependencies = [

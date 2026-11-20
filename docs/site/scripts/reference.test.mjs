@@ -26,6 +26,7 @@ const cliBinary = process.platform === "win32" ? "neojs.exe" : "neojs";
 const crates = [
 	"neojs-core",
 	"neojs",
+	"neojs-io",
 	"neojs-os",
 	"neojs-os-user",
 	"neojs-schedulers",
