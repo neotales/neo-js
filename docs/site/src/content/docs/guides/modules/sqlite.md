@@ -98,8 +98,8 @@ modules if their permissions are granted.
 
 ```toml
 [dependencies]
-neojs-core = { path = "../neo-js/crates/neojs-core" }
-neojs-sqlite = { path = "../neo-js/crates/neojs-sqlite" }
+neojs-core = { path = "../neo-js/neojs-core" }
+neojs-sqlite = { path = "../neo-js/neojs-sqlite" }
 ```
 
 ```rust

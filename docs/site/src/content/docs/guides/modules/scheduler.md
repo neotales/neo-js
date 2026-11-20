@@ -212,7 +212,7 @@ The repository tests run generated units through `systemd-analyze verify` and
 validate generated UTF-16LE XML against the pinned Task Scheduler 1.3 XSD with
 `xmllint --schema` on temporary files, when those tools are installed. The
 schema fixture is reproduced from Microsoft Learn with provenance and license
-in `crates/neojs-schedulers/tests/fixtures/` (`task-scheduler-1.3.xsd` and
+in `neojs-schedulers/tests/fixtures/` (`task-scheduler-1.3.xsd` and
 `NOTICE.md`). These checks validate the generated files.
 They do not test installation or verify that Windows registers or runs a task.
 
@@ -239,8 +239,8 @@ For a checkout next to your crate, add both dependencies:
 
 ```toml
 [dependencies]
-neojs-core = { path = "../neo-js/crates/neojs-core" }
-neojs-schedulers = { path = "../neo-js/crates/neojs-schedulers" }
+neojs-core = { path = "../neo-js/neojs-core" }
+neojs-schedulers = { path = "../neo-js/neojs-schedulers" }
 ```
 
 ```rust

@@ -143,17 +143,17 @@ source-breaking changes; no compatibility guarantee is implied.
 
 Change workspace package selectors, dependency keys, and Rust imports. There
 is no old package alias or `neo_js` re-export. The package rename did not
-change the JavaScript API. Checkout paths moved with the packages:
-`crates/neo-js` is now `crates/neojs-core`, and `crates/neo-js-cli` is now
-`crates/neojs`. Update relative path dependencies to match. The executable has
-its own breaking rename; see
+change the JavaScript API. Checkout paths moved with the packages and then to
+the repository root: `crates/neo-js` is now `neojs-core`, and
+`crates/neo-js-cli` is now `neojs`. Update relative path dependencies to
+match. The executable has its own breaking rename; see
 [CLI executable migration](#cli-executable-migration).
 
 For a checkout next to your crate:
 
 ```toml
 [dependencies]
-neojs-core = { path = "../neo-js/crates/neojs-core" }
+neojs-core = { path = "../neo-js/neojs-core" }
 ```
 
 Use `use neojs_core::{NeoJs, Permissions};` in Rust. The extension packages

@@ -327,7 +327,7 @@ throw `RangeError` with `code: "PATH_GLOB_LIMIT"`. See the
   exceeds neo-js's supported repetition rules.
 
 The repository records default-option comparison cases for the pinned
-upstream revision in `crates/neojs-core/tests/fixtures/path-glob-reference.json`.
+upstream revision in `neojs-core/tests/fixtures/path-glob-reference.json`.
 
 ## Round trips and deliberate differences
 
@@ -352,7 +352,7 @@ its separator. There is no asynchronous form.
 
 The path and glob algorithms are adapted from `@neotales/path` under the MIT
 license, at revision `c7e88644f45a78f65bf639c9d365bb9eff21bcfe`.
-See `crates/neojs-core/src/js/path.LICENSE.md` for the exact upstream revision, the
+See `neojs-core/src/js/path.LICENSE.md` for the exact upstream revision, the
 adapted-file list, and the complete upstream copyright and permission notices.
 The same text is embedded in the library and binary: print it with
 `neojs --third-party-notices` or call `neojs_core::third_party_notices()`. It is

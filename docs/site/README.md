@@ -38,10 +38,10 @@ once a deployment URL exists.
 
 Edit [`types/neo-js.core.d.ts`](../../types/neo-js.core.d.ts) for built-ins
 or the fragment owned by the optional crate:
-[`neojs-os`](../../crates/neojs-os/types/neo-os.d.ts) or
-[`neojs-os-user`](../../crates/neojs-os-user/types/neo-os-user.d.ts) or
-[`neojs-schedulers`](../../crates/neojs-schedulers/types/neo-schedulers.d.ts) or
-[`neojs-sqlite`](../../crates/neojs-sqlite/types/neo-sqlite.d.ts).
+[`neojs-os`](../../neojs-os/types/neo-os.d.ts) or
+[`neojs-os-user`](../../neojs-os-user/types/neo-os-user.d.ts) or
+[`neojs-schedulers`](../../neojs-schedulers/types/neo-schedulers.d.ts) or
+[`neojs-sqlite`](../../neojs-sqlite/types/neo-sqlite.d.ts).
 Do not hand-edit the composed CLI entry. See the
 [composition instructions](../../types/README.md). From the checkout root:
 

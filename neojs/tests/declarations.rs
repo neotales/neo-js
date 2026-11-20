@@ -283,9 +283,9 @@ fn rejects_hard_link_aliases_of_inputs() {
     let dir = workdir();
     let inputs = [
         declarations::CORE_PATH,
-        "crates/neojs-os/types/neo-os.d.ts",
-        "crates/neojs-schedulers/types/neo-schedulers.d.ts",
-        "crates/neojs-sqlite/types/neo-sqlite.d.ts",
+        "neojs-os/types/neo-os.d.ts",
+        "neojs-schedulers/types/neo-schedulers.d.ts",
+        "neojs-sqlite/types/neo-sqlite.d.ts",
         declarations::CLI_MANIFEST_PATH,
     ];
     for input in inputs {
@@ -311,8 +311,7 @@ fn output_replacement_preserves_inputs_and_old_output_on_failure() {
     fs::write(&output, "old\n").unwrap();
 
     let core_before = fs::read(root().join(declarations::CORE_PATH)).unwrap();
-    let fragment_before =
-        fs::read(root().join("crates/neojs-sqlite/types/neo-sqlite.d.ts")).unwrap();
+    let fragment_before = fs::read(root().join("neojs-sqlite/types/neo-sqlite.d.ts")).unwrap();
     let manifest_before = fs::read(root().join(declarations::CLI_MANIFEST_PATH)).unwrap();
     let expected = declarations::compose(&root(), &["sqlite"]).unwrap();
 
@@ -332,7 +331,7 @@ fn output_replacement_preserves_inputs_and_old_output_on_failure() {
         core_before
     );
     assert_eq!(
-        fs::read(root().join("crates/neojs-sqlite/types/neo-sqlite.d.ts")).unwrap(),
+        fs::read(root().join("neojs-sqlite/types/neo-sqlite.d.ts")).unwrap(),
         fragment_before
     );
     assert_eq!(
@@ -456,30 +455,30 @@ fn rejects_conflicting_and_incomplete_arguments() {
 fn manifest_fixture() -> tempfile::TempDir {
     let dir = workdir();
     fs::create_dir_all(dir.path().join("types")).unwrap();
-    fs::create_dir_all(dir.path().join("crates/neojs-os/types")).unwrap();
-    fs::create_dir_all(dir.path().join("crates/neojs-schedulers/types")).unwrap();
-    fs::create_dir_all(dir.path().join("crates/neojs-sqlite/types")).unwrap();
-    fs::create_dir_all(dir.path().join("crates/neojs")).unwrap();
+    fs::create_dir_all(dir.path().join("neojs-os/types")).unwrap();
+    fs::create_dir_all(dir.path().join("neojs-schedulers/types")).unwrap();
+    fs::create_dir_all(dir.path().join("neojs-sqlite/types")).unwrap();
+    fs::create_dir_all(dir.path().join("neojs")).unwrap();
     fs::write(
         dir.path().join(declarations::CORE_PATH),
         "declare module \"neo:core\" {}\n",
     )
     .unwrap();
     fs::write(
-        dir.path().join("crates/neojs-os/types/neo-os.d.ts"),
+        dir.path().join("neojs-os/types/neo-os.d.ts"),
         "declare module \"neo:os\" {}\ndeclare const os: { platform: string };\n",
     )
     .unwrap();
     fs::write(
         dir.path()
-            .join("crates/neojs-schedulers/types/neo-schedulers.d.ts"),
+            .join("neojs-schedulers/types/neo-schedulers.d.ts"),
         "declare module \"neo:os/schedulers/systemd\" {}\n\
          declare module \"neo:os/schedulers/windows\" {}\n\
          declare module \"neo:scheduler\" {}\n",
     )
     .unwrap();
     fs::write(
-        dir.path().join("crates/neojs-sqlite/types/neo-sqlite.d.ts"),
+        dir.path().join("neojs-sqlite/types/neo-sqlite.d.ts"),
         "declare module \"neo:sqlite\" {}\n",
     )
     .unwrap();

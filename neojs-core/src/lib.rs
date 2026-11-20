@@ -53,7 +53,7 @@
 
 /// Third-party copyright and permission notices embedded in this crate.
 ///
-/// This is the complete text of `crates/neojs-core/src/js/path.LICENSE.md` at build
+/// This is the complete text of `neojs-core/src/js/path.LICENSE.md` at build
 /// time: provenance for the path algorithms adapted from `@neotales/path`, the
 /// adapted-file list, and the upstream MIT copyright and permission notices. It
 /// covers adapted source code, not every dependency of neo-js, and is not a

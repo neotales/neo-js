@@ -1,5 +1,5 @@
 // Generated declarations for the selected compiled modules. Do not edit.
-// Inputs: types/neo-js.core.d.ts, crates/neojs-os/types/neo-os.d.ts, crates/neojs-os-user/types/neo-os-user.d.ts, crates/neojs-schedulers/types/neo-schedulers.d.ts, crates/neojs-sqlite/types/neo-sqlite.d.ts
+// Inputs: types/neo-js.core.d.ts, neojs-os/types/neo-os.d.ts, neojs-os-user/types/neo-os-user.d.ts, neojs-schedulers/types/neo-schedulers.d.ts, neojs-sqlite/types/neo-sqlite.d.ts
 // Selection: core, os, os-user, schedulers, sqlite
 // See types/README.md for the compose-types command.
 

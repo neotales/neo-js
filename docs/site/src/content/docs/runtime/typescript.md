@@ -10,14 +10,14 @@ TypeScript language server. Its `tsconfig.json` loads the checked-in
 
 ## Select declarations
 
-| Declaration input                                   | Use                                                                                      |
-| --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `types/neo-js.core.d.ts`                            | A core-only embedder. It omits `os` and every optional module.                           |
-| `types/neo-js.d.ts`                                 | The CLI build. This generated file combines core and all four extension fragments.       |
-| `crates/neojs-os/types/neo-os.d.ts`                 | The `neo:os` and `os` fragment owned by `neojs-os`.                                      |
-| `crates/neojs-os-user/types/neo-os-user.d.ts`       | The independently selectable account and process identity fragment.                      |
-| `crates/neojs-schedulers/types/neo-schedulers.d.ts` | The two canonical scheduler names and the deprecated `neo:scheduler` alias.              |
-| `crates/neojs-sqlite/types/neo-sqlite.d.ts`         | The SQLite fragment owned by the optional crate, not a standalone core declaration file. |
+| Declaration input                            | Use                                                                                      |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `types/neo-js.core.d.ts`                     | A core-only embedder. It omits `os` and every optional module.                           |
+| `types/neo-js.d.ts`                          | The CLI build. This generated file combines core and all four extension fragments.       |
+| `neojs-os/types/neo-os.d.ts`                 | The `neo:os` and `os` fragment owned by `neojs-os`.                                      |
+| `neojs-os-user/types/neo-os-user.d.ts`       | The independently selectable account and process identity fragment.                      |
+| `neojs-schedulers/types/neo-schedulers.d.ts` | The two canonical scheduler names and the deprecated `neo:scheduler` alias.              |
+| `neojs-sqlite/types/neo-sqlite.d.ts`         | The SQLite fragment owned by the optional crate, not a standalone core declaration file. |
 
 Choose declarations for the extensions the host links and registers, not for
 the permissions a script receives:

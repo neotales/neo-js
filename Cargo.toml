@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/neojs-core", "crates/neojs", "crates/neojs-os", "crates/neojs-os-user", "crates/neojs-schedulers", "crates/neojs-sqlite"]
+members = ["neojs-core", "neojs", "neojs-os", "neojs-os-user", "neojs-schedulers", "neojs-sqlite"]
 resolver = "2"
 
 [workspace.package]

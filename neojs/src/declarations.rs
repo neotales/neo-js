@@ -5,7 +5,7 @@
 //!
 //! Selection is explicit. `--check-cli-manifest` verifies that the explicit
 //! selection agrees with the normal dependencies and default optional features
-//! in `crates/neojs/Cargo.toml`; it never selects a fragment from the
+//! in `neojs/Cargo.toml`; it never selects a fragment from the
 //! manifest on its own, and it is not a full Cargo resolver.
 
 use std::{
@@ -15,7 +15,7 @@ use std::{
 };
 
 pub const CORE_PATH: &str = "types/neo-js.core.d.ts";
-pub const CLI_MANIFEST_PATH: &str = "crates/neojs/Cargo.toml";
+pub const CLI_MANIFEST_PATH: &str = "neojs/Cargo.toml";
 
 pub const USAGE: &str = "\
 Usage: compose-types [OPTIONS]
@@ -29,7 +29,7 @@ Options:
                          Available: os, os-user, schedulers, sqlite.
   --output <PATH>        Write the composition to PATH. Use - for stdout.
   --check <PATH>         Fail if PATH differs from the composition.
-  --check-cli-manifest   Verify the selection against crates/neojs/Cargo.toml.
+  --check-cli-manifest   Verify the selection against neojs/Cargo.toml.
   --root <PATH>          Repository root (default: this checkout).
   -h, --help             Print this help.
 
@@ -56,22 +56,22 @@ const CORE: Fragment = Fragment {
 const OPTIONAL: &[Fragment] = &[
     Fragment {
         name: "os",
-        path: "crates/neojs-os/types/neo-os.d.ts",
+        path: "neojs-os/types/neo-os.d.ts",
         dependency: "neojs-os",
     },
     Fragment {
         name: "os-user",
-        path: "crates/neojs-os-user/types/neo-os-user.d.ts",
+        path: "neojs-os-user/types/neo-os-user.d.ts",
         dependency: "neojs-os-user",
     },
     Fragment {
         name: "schedulers",
-        path: "crates/neojs-schedulers/types/neo-schedulers.d.ts",
+        path: "neojs-schedulers/types/neo-schedulers.d.ts",
         dependency: "neojs-schedulers",
     },
     Fragment {
         name: "sqlite",
-        path: "crates/neojs-sqlite/types/neo-sqlite.d.ts",
+        path: "neojs-sqlite/types/neo-sqlite.d.ts",
         dependency: "neojs-sqlite",
     },
 ];
@@ -89,9 +89,9 @@ struct Options {
     verify_manifest: bool,
 }
 
-/// The checkout containing `types/` and `crates/`.
+/// The checkout containing `types/` and the crate directories.
 pub fn default_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
 /// Compose the core declarations plus the named optional fragments.

@@ -4,14 +4,14 @@ The declaration files are split by the crate that supplies each module. A host
 that compiles only `neojs-core` uses the core file; a host that also links an
 optional crate uses a composition of the core file and that crate's fragment.
 
-| File | Role |
-| --- | --- |
-| `neo-js.core.d.ts` | Hand-written declarations for `neojs-core`. It omits every optional module and the `os` global. |
-| `neo-js.d.ts` | Generated entry for the CLI build. It is core plus the four extensions the CLI links. Do not edit it by hand. |
-| `crates/neojs-os/types/neo-os.d.ts` | Hand-written `neo:os` fragment, including the `os` global, owned by the `neojs-os` crate. |
-| `crates/neojs-os-user/types/neo-os-user.d.ts` | Hand-written `neo:os/user` fragment owned by `neojs-os-user`. It does not include `neo:os` or its global. |
-| `crates/neojs-schedulers/types/neo-schedulers.d.ts` | Hand-written systemd, Windows Task Scheduler, and deprecated `neo:scheduler` fragments owned by the `neojs-schedulers` crate. |
-| `crates/neojs-sqlite/types/neo-sqlite.d.ts` | Hand-written `neo:sqlite` fragment owned by the `neojs-sqlite` crate. |
+| File                                         | Role                                                                                                                          |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `neo-js.core.d.ts`                           | Hand-written declarations for `neojs-core`. It omits every optional module and the `os` global.                               |
+| `neo-js.d.ts`                                | Generated entry for the CLI build. It is core plus the four extensions the CLI links. Do not edit it by hand.                 |
+| `neojs-os/types/neo-os.d.ts`                 | Hand-written `neo:os` fragment, including the `os` global, owned by the `neojs-os` crate.                                     |
+| `neojs-os-user/types/neo-os-user.d.ts`       | Hand-written `neo:os/user` fragment owned by `neojs-os-user`. It does not include `neo:os` or its global.                     |
+| `neojs-schedulers/types/neo-schedulers.d.ts` | Hand-written systemd, Windows Task Scheduler, and deprecated `neo:scheduler` fragments owned by the `neojs-schedulers` crate. |
+| `neojs-sqlite/types/neo-sqlite.d.ts`         | Hand-written `neo:sqlite` fragment owned by the `neojs-sqlite` crate.                                                         |
 
 The declarations describe **compiled availability**, not permission. Declaring
 the built-in `neo:win-registry` (or its deprecated `neo:winregistry` alias)
@@ -76,7 +76,7 @@ never writes. Only the requested output path is written: the tool refuses to
 write over the core fragment, an optional fragment, or the CLI manifest.
 `--root PATH` selects a different checkout; the default is this one.
 
-`--check-cli-manifest` parses `crates/neojs/Cargo.toml` as TOML and checks
+`--check-cli-manifest` parses `neojs/Cargo.toml` as TOML and checks
 both directions for every registered optional fragment: a linked normal
 dependency must be selected, and a selected fragment must be a linked normal
 dependency. It only verifies the explicit selection; it never chooses fragments
@@ -164,8 +164,8 @@ directives.
 ## Add another optional module
 
 Put the fragment next to the crate that supplies the module, for example
-`crates/neojs-<name>/types/neo-<name>.d.ts`. Add it to `OPTIONAL` in
-`crates/neojs/src/declarations.rs`; the composer then accepts
-`--with <name>`. Select it for the CLI entry only when `crates/neojs`
+`neojs-<name>/types/neo-<name>.d.ts`. Add it to `OPTIONAL` in
+`neojs/src/declarations.rs`; the composer then accepts
+`--with <name>`. Select it for the CLI entry only when `neojs`
 depends on that crate, and add a fixture under `types/`. Do not copy the
 declarations into the core file.

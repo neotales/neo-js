@@ -45,8 +45,8 @@ For a checkout next to your crate, add both dependencies:
 
 ```toml
 [dependencies]
-neojs-core = { path = "../neo-js/crates/neojs-core" }
-neojs-os = { path = "../neo-js/crates/neojs-os" }
+neojs-core = { path = "../neo-js/neojs-core" }
+neojs-os = { path = "../neo-js/neojs-os" }
 ```
 
 ```rust
@@ -84,6 +84,6 @@ their exact allowlist entries are separate from `neo:os`.
 Use [the matching declaration composition](/runtime/typescript/#select-declarations)
 for your host. For a host that registers only `neojs-os`, compose with
 `--with os`. Core-only declarations omit `neo:os` and `os`. The CLI
-composition includes both from `crates/neojs-os/types/neo-os.d.ts`.
+composition includes both from `neojs-os/types/neo-os.d.ts`.
 
 Declarations: [`neo:os`](/api/modules/os/).
