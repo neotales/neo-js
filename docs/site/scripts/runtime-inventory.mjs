@@ -42,7 +42,7 @@ function buildCli() {
 		"--package",
 		"neojs",
 		"--bin",
-		"neo-js",
+		"neojs",
 		"--target-dir",
 		target,
 		"--message-format=json",
@@ -55,7 +55,7 @@ function buildCli() {
 	});
 	if (child.error || child.status !== 0) {
 		throw new Error(
-			`Could not build the current neo-js checkout offline (${child.error?.code ?? child.signal ?? `exit ${child.status}`}). Run cargo build --locked --offline -p neojs --bin neo-js from the checkout root for details.`,
+			`Could not build the current neo-js checkout offline (${child.error?.code ?? child.signal ?? `exit ${child.status}`}). Run cargo build --locked --offline -p neojs --bin neojs from the checkout root for details.`,
 		);
 	}
 	const executables = child.stdout
@@ -65,12 +65,12 @@ function buildCli() {
 		.filter(
 			(artifact) =>
 				artifact.reason === "compiler-artifact" &&
-				artifact.target?.name === "neo-js" &&
+				artifact.target?.name === "neojs" &&
 				artifact.target.kind.includes("bin") &&
 				artifact.executable,
 		);
 	if (executables.length !== 1)
-		throw new Error("Cargo did not report exactly one neo-js CLI executable.");
+		throw new Error("Cargo did not report exactly one neojs CLI executable.");
 	return executables[0].executable;
 }
 
@@ -84,9 +84,9 @@ function checkedFlags(binary, directory) {
 		timeout: 15_000,
 	});
 	if (child.error || child.status !== 0)
-		throw new Error("Could not read permission flags from neo-js --help.");
+		throw new Error("Could not read permission flags from neojs --help.");
 	const options = child.stdout.split(/\r?\nOptions:\r?\n/)[1];
-	if (!options) throw new Error("Could not find the Options section in neo-js --help.");
+	if (!options) throw new Error("Could not find the Options section in neojs --help.");
 
 	const actual = new Set();
 	for (const line of options.split(/\r?\n/)) {
@@ -205,14 +205,14 @@ console.log(JSON.stringify(result));`;
 	const profile = flags.join(" ") || "no flags";
 	if (child.error || child.status !== 0) {
 		throw new Error(
-			`Could not run neo-js export probe (${profile}): ${child.error?.code ?? child.signal ?? `exit ${child.status}`}.`,
+			`Could not run neojs export probe (${profile}): ${child.error?.code ?? child.signal ?? `exit ${child.status}`}.`,
 		);
 	}
 	let result;
 	try {
 		result = JSON.parse(child.stdout);
 	} catch {
-		throw new Error(`neo-js did not return an export inventory (${profile}).`);
+		throw new Error(`neojs did not return an export inventory (${profile}).`);
 	}
 	if (
 		!Array.isArray(result) ||
@@ -222,7 +222,7 @@ console.log(JSON.stringify(result));`;
 				entry !== null && (!Array.isArray(entry) || entry.some((key) => typeof key !== "string")),
 		)
 	)
-		throw new Error(`neo-js returned an invalid export inventory (${profile}).`);
+		throw new Error(`neojs returned an invalid export inventory (${profile}).`);
 	return result;
 }
 
@@ -232,7 +232,7 @@ async function checkInventory() {
 	const modules = [...declared.keys()].sort();
 	const binary = buildCli();
 	const problems = [];
-	const directory = await mkdtemp(join(tmpdir(), "neo-js-docs-inventory-"));
+	const directory = await mkdtemp(join(tmpdir(), "neojs-docs-inventory-"));
 	try {
 		const flags = checkedFlags(binary, directory);
 		for (const profile of [flags, [], ...flags.map((flag) => [flag])]) {

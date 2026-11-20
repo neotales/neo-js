@@ -53,14 +53,14 @@
 
 /// Third-party copyright and permission notices embedded in this crate.
 ///
-/// This is the complete text of `crates/neo-js/src/js/path.LICENSE.md` at build
+/// This is the complete text of `crates/neojs-core/src/js/path.LICENSE.md` at build
 /// time: provenance for the path algorithms adapted from `@neotales/path`, the
 /// adapted-file list, and the upstream MIT copyright and permission notices. It
 /// covers adapted source code, not every dependency of neo-js, and is not a
 /// complete dependency-license inventory.
 ///
 /// Reading the text performs no filesystem access and needs no permission. The
-/// CLI prints the same text for `neo-js --third-party-notices`.
+/// CLI prints the same text for `neojs --third-party-notices`.
 pub fn third_party_notices() -> &'static str {
     include_str!("js/path.LICENSE.md")
 }

@@ -6,12 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "neo-js"
+name = "neojs"
 path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-neojs-core = { path = "../neo-js" }
+neojs-core = { path = "../neojs-core" }
 neojs-os = { path = "../neojs-os" }
 neojs-os-user = { path = "../neojs-os-user" }
 neojs-schedulers = { path = "../neojs-schedulers" }

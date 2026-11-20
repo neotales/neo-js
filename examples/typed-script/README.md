@@ -67,7 +67,7 @@ deno check --cached-only --no-config types/neo-js.d.ts types/path.test.ts \
 ```
 
 Deno checks the listed inputs with its own defaults, not the `tsconfig.json`
-project. Use it only for checking; run the example with neo-js. The
+project. Use it only for checking; run the example with neojs. The
 `types.test.mts`, `types/path.test.ts`, and `types/schedulers.test.ts` fixtures
 are checked, not run: they require the checker to reject invalid types. The
 path fixture covers the file-only `FileURL` type without requiring a DOM

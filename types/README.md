@@ -76,7 +76,7 @@ never writes. Only the requested output path is written: the tool refuses to
 write over the core fragment, an optional fragment, or the CLI manifest.
 `--root PATH` selects a different checkout; the default is this one.
 
-`--check-cli-manifest` parses `crates/neo-js-cli/Cargo.toml` as TOML and checks
+`--check-cli-manifest` parses `crates/neojs/Cargo.toml` as TOML and checks
 both directions for every registered optional fragment: a linked normal
 dependency must be selected, and a selected fragment must be a linked normal
 dependency. It only verifies the explicit selection; it never chooses fragments
@@ -165,7 +165,7 @@ directives.
 
 Put the fragment next to the crate that supplies the module, for example
 `crates/neojs-<name>/types/neo-<name>.d.ts`. Add it to `OPTIONAL` in
-`crates/neo-js-cli/src/declarations.rs`; the composer then accepts
-`--with <name>`. Select it for the CLI entry only when `crates/neo-js-cli`
+`crates/neojs/src/declarations.rs`; the composer then accepts
+`--with <name>`. Select it for the CLI entry only when `crates/neojs`
 depends on that crate, and add a fixture under `types/`. Do not copy the
 declarations into the core file.

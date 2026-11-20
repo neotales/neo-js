@@ -29,7 +29,7 @@ fn exec_script(program: &str, args: &[String], input: &[u8], body: &str) -> Stri
 fn run_cli(dir: &Path, permissions: &[&str], source: &str) -> Output {
     let entry = dir.join("main.js");
     std::fs::write(&entry, source).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    Command::new(env!("CARGO_BIN_EXE_neojs"))
         .current_dir(dir)
         .args(permissions)
         .arg(&entry)
@@ -50,7 +50,7 @@ fn assert_cli_ok(output: &Output) {
 /// exercises direct program invocation without depending on a platform shell.
 fn neo_js_child(script: &Path) -> (String, Vec<String>) {
     (
-        env!("CARGO_BIN_EXE_neo-js").to_owned(),
+        env!("CARGO_BIN_EXE_neojs").to_owned(),
         vec![script.to_str().unwrap().to_owned()],
     )
 }
@@ -295,7 +295,7 @@ fn exec_failure_returns_while_descendant_holds_pipe() {
         try { exec('sh', ['-c', '(sleep 4) & head -c 8388609 /dev/zero; wait']); throw Error('missing error'); }\n\
         catch (e) { if (e.code !== 'EXEC_IO' || !e.message.includes('cleanup pending')) throw e; }\n\
         console.log('returned');").unwrap();
-    let mut cli = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .current_dir(dir.path())
         .arg("--allow-run")
         .arg(entry)
@@ -347,7 +347,7 @@ fn self_child(dir: &Path, name: &str, flags: &[&str], source: &str) -> (String, 
     std::fs::write(&path, source).unwrap();
     let mut args: Vec<String> = flags.iter().map(|flag| (*flag).to_owned()).collect();
     args.push(path.to_str().unwrap().to_owned());
-    (env!("CARGO_BIN_EXE_neo-js").to_owned(), args)
+    (env!("CARGO_BIN_EXE_neojs").to_owned(), args)
 }
 
 #[test]
@@ -647,7 +647,7 @@ fn runtime_drop_kills_a_live_spawned_child() {
     let entry = dir.path().join("main.js");
     std::fs::write(&entry, source).unwrap();
     let start = Instant::now();
-    let output = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let output = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .current_dir(dir.path())
         .args(["--allow-run", "--allow-fs"])
         .arg(&entry)
@@ -755,7 +755,7 @@ fn spawn_kill_returns_while_a_descendant_holds_the_output_pipe() {
          console.log('ok');",
     )
     .unwrap();
-    let mut cli = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .current_dir(dir.path())
         .args(["--allow-run", "--allow-fs"])
         .arg(entry)

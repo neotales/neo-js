@@ -10,7 +10,7 @@ fn cli_user_import_requires_opt_in_without_reading_identity() {
          if (typeof currentUserSync !== 'function') throw Error('missing identity API');",
     )
     .unwrap();
-    let denied = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let denied = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg("--allow-env")
         .arg(&main)
         .output()
@@ -18,7 +18,7 @@ fn cli_user_import_requires_opt_in_without_reading_identity() {
     assert!(!denied.status.success());
     assert!(String::from_utf8_lossy(&denied.stderr).contains("neo:os/user"));
 
-    let allowed = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let allowed = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg("--allow-user")
         .arg(&main)
         .output()
@@ -40,7 +40,7 @@ fn cli_sqlite_requires_its_own_explicit_permission() {
     )
     .unwrap();
     for flags in [&[][..], &["--allow-fs", "--allow-net", "--allow-run"][..]] {
-        let output = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+        let output = Command::new(env!("CARGO_BIN_EXE_neojs"))
             .args(flags)
             .arg(&main)
             .output()
@@ -48,7 +48,7 @@ fn cli_sqlite_requires_its_own_explicit_permission() {
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("neo:sqlite"));
     }
-    let output = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let output = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg("--allow-sqlite")
         .arg(&main)
         .output()
@@ -71,7 +71,7 @@ fn cli_exposes_os_metadata_through_the_linked_optional_module() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let output = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg(&main)
         .output()
         .unwrap();
@@ -101,13 +101,13 @@ fn cli_loads_relative_modules_only_with_permission() {
     )
     .unwrap();
 
-    let denied = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let denied = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg(&main)
         .output()
         .unwrap();
     assert!(!denied.status.success());
 
-    let allowed = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let allowed = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg("--allow-fs")
         .arg(&main)
         .output()
@@ -136,7 +136,7 @@ console.log([
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let output = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg(&main)
         .output()
         .unwrap();
@@ -160,7 +160,7 @@ fn cli_registry_module_requires_allow_registry() {
         )
         .unwrap();
 
-        let denied = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+        let denied = Command::new(env!("CARGO_BIN_EXE_neojs"))
             .arg(&main)
             .output()
             .unwrap();
@@ -168,7 +168,7 @@ fn cli_registry_module_requires_allow_registry() {
         assert!(denied.stdout.is_empty());
         assert!(String::from_utf8_lossy(&denied.stderr).contains(name));
 
-        let allowed = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+        let allowed = Command::new(env!("CARGO_BIN_EXE_neojs"))
             .arg("--allow-registry")
             .arg(&main)
             .output()
@@ -197,13 +197,13 @@ fn cli_fetch_module_requires_allow_net_and_allow_fs() {
     )
     .unwrap();
 
-    let denied = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let denied = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg(&main)
         .output()
         .unwrap();
     assert!(!denied.status.success());
 
-    let missing_fs = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let missing_fs = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg("--allow-net")
         .arg(&main)
         .output()
@@ -232,7 +232,7 @@ fn symlink_parent_paths_follow_filesystem_for_entry_and_dependency() {
         "import './main.js'; console.log('dependency');",
     )
     .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let out = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg("--allow-fs")
         .arg(root.join("link/../main.js"))
         .output()
@@ -260,7 +260,7 @@ fn dependency_symlink_parent_resolves_to_target_parent() {
     .unwrap();
     std::fs::write(root.join("dep.js"), "throw Error('wrong file');").unwrap();
     std::fs::write(root.join("other/dep.js"), "console.log('correct');").unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let out = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg("--allow-fs")
         .arg(root.join("main.js"))
         .output()
@@ -276,14 +276,14 @@ fn dependency_symlink_parent_resolves_to_target_parent() {
 #[test]
 fn missing_entries_and_dependencies_are_errors() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let output = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg(dir.path().join("missing.js"))
         .output()
         .unwrap();
     assert!(!output.status.success());
     let main = dir.path().join("main.js");
     std::fs::write(&main, "import './missing.js';").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let output = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg("--allow-fs")
         .arg(main)
         .output()
@@ -304,7 +304,7 @@ fn symlink_entry_uses_requested_format() {
     .unwrap();
     symlink("target.js", dir.path().join("entry.ts")).unwrap();
     for args in [&[][..], &["--allow-fs"][..]] {
-        let out = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+        let out = Command::new(env!("CARGO_BIN_EXE_neojs"))
             .args(args)
             .arg(dir.path().join("entry.ts"))
             .output()
@@ -335,7 +335,7 @@ fn symlink_formats_and_rejected_extensions_for_entries_and_imports() {
         symlink("typed.js", root.join(format!("bad.{ext}"))).unwrap();
     }
     let run = |entry: &std::path::Path, allowed: bool| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_neo-js"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_neojs"));
         if allowed {
             command.arg("--allow-fs");
         }
@@ -392,7 +392,7 @@ fn cross_format_aliases_fail_even_after_module_cached() {
         "import './dep.ts'; import './dep.js';",
     ] {
         std::fs::write(&main, source).unwrap();
-        let out = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+        let out = Command::new(env!("CARGO_BIN_EXE_neojs"))
             .arg("--allow-fs")
             .arg(&main)
             .output()
@@ -409,7 +409,7 @@ fn cross_format_aliases_fail_even_after_module_cached() {
         "await import('./dep.js'); await import('./dep.tsx');",
     )
     .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let out = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg("--allow-fs")
         .arg(&main)
         .output()
@@ -434,7 +434,7 @@ fn symlink_identity_is_stable_and_entry_format_conflicts_are_detected() {
     let main = root.join("main.js");
     std::fs::write(&main, "import './target.js'; import './alias.js';").unwrap();
     let run = |p: &std::path::Path| {
-        Command::new(env!("CARGO_BIN_EXE_neo-js"))
+        Command::new(env!("CARGO_BIN_EXE_neojs"))
             .arg("--allow-fs")
             .arg(p)
             .output()
@@ -462,7 +462,7 @@ fn failed_parse_does_not_reserve_format() {
     std::fs::write(root.join("dep.js"), "export const n: number = 7;").unwrap();
     symlink("dep.js", root.join("dep.ts")).unwrap();
     std::fs::write(root.join("main.js"), "try { await import('./dep.js'); throw Error('unexpected success'); } catch (e) { if (String(e).includes('unexpected success')) throw e; } const m = await import('./dep.ts'); if (m.n !== 7) throw Error('wrong');").unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let out = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg("--allow-fs")
         .arg(root.join("main.js"))
         .output()
@@ -490,7 +490,7 @@ fn evaluation_failure_keeps_cached_format_but_load_failure_does_not() {
         try { await import('./directory.js'); } catch (_) {}
         try { await import('./directory.ts'); throw Error('expected load error'); } catch (e) { if (String(e).includes('module format conflict') || String(e).includes('expected load error')) throw e; }
     "#).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let out = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg("--allow-fs")
         .arg(root.join("main.js"))
         .output()
@@ -509,7 +509,7 @@ fn failed_cyclic_resolution_blocks_subsequent_imports_without_crashing() {
     std::fs::write(root.join("a.js"), "import './b.js'; import './missing.js';").unwrap();
     std::fs::write(root.join("b.js"), "import './a.js'; export const x = 1;").unwrap();
     std::fs::write(root.join("main.js"), "try { await import('./a.js'); throw Error('unexpected success'); } catch (e) { if (String(e).includes('unexpected success')) throw e; } try { await import('./b.js'); throw Error('expected disabled'); } catch (e) { if (!String(e).includes('module loading disabled')) throw e; }").unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let out = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg("--allow-fs")
         .arg(root.join("main.js"))
         .output()
@@ -536,7 +536,7 @@ fn failed_parent_resolution_keeps_successfully_declared_dependency() {
     )
     .unwrap();
     std::fs::write(root.join("main.js"), "try { await import('./parent.js'); } catch (_) {} try { await import('./dep.ts'); throw Error('expected conflict'); } catch (e) { if (!String(e).includes('module format conflict')) throw e; } const m = await import('./dep.js'); if (m.x !== 1) throw Error('wrong');").unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let out = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg("--allow-fs")
         .arg(root.join("main.js"))
         .output()

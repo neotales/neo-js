@@ -12,7 +12,7 @@ use std::{
 fn run_cli(dir: &Path, permissions: &[&str], name: &str, source: &str) -> Output {
     let entry = dir.join(name);
     std::fs::write(&entry, source).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    Command::new(env!("CARGO_BIN_EXE_neojs"))
         .current_dir(dir)
         .args(permissions)
         .arg(&entry)

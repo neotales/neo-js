@@ -1,6 +1,6 @@
 ---
 title: neo-js
-description: Use the neo-js command-line tool or embed QuickJS in a Rust application.
+description: Use the neojs command-line tool or embed QuickJS in a Rust application.
 ---
 
 neo-js is a Rust library and command-line host for QuickJS. It runs JavaScript

@@ -13,7 +13,7 @@ use std::{
 fn run_cli(dir: &Path, permissions: &[&str], source: &str) -> Output {
     let entry = dir.join("main.js");
     std::fs::write(&entry, source).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    Command::new(env!("CARGO_BIN_EXE_neojs"))
         .current_dir(dir)
         .stdin(Stdio::null())
         .args(permissions)
@@ -25,7 +25,7 @@ fn run_cli(dir: &Path, permissions: &[&str], source: &str) -> Output {
 fn run_cli_with_input(dir: &Path, permissions: &[&str], source: &str, input: &[u8]) -> Output {
     let entry = dir.join("main.js");
     std::fs::write(&entry, source).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .current_dir(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

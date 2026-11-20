@@ -6,7 +6,7 @@
 use std::{fs, process::Command};
 
 fn binary() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    Command::new(env!("CARGO_BIN_EXE_neojs"))
 }
 
 fn stderr(output: &std::process::Output) -> String {

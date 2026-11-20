@@ -4,7 +4,7 @@ use std::{
 };
 
 fn run(script: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    Command::new(env!("CARGO_BIN_EXE_neojs"))
         .args(args)
         .arg(script)
         .output()

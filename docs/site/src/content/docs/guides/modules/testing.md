@@ -39,7 +39,7 @@ not ok 2 - parses nested data
   expected: 2
 ok 3 - rejects invalid JSON
 # 3 tests: 2 passed, 1 failed
-neo-js: 1 of 3 test(s) failed
+neojs: 1 of 3 test(s) failed
 ```
 
 Failure semantics:

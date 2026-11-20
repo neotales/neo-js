@@ -20,7 +20,7 @@ import { promisify } from "node:util";
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
 const execFileAsync = promisify(execFile);
-const cliBinary = process.platform === "win32" ? "neo-js.exe" : "neo-js";
+const cliBinary = process.platform === "win32" ? "neojs.exe" : "neojs";
 
 /** Allocate and remove only a fresh directory owned by this test. */
 async function ownedDirectory(t) {
@@ -40,13 +40,13 @@ async function fixture(t, runtime = false, inheritedEnv = process.env) {
 		env: { ...inheritedEnv, CARGO_TARGET_DIR: target },
 	};
 	const argsFor = (script, args) => [join(directory, "docs/site/scripts", script), ...args];
-	for (const folder of ["types", "crates/neo-js/src", "docs/site/scripts"]) {
+	for (const folder of ["types", "crates/neojs-core/src", "docs/site/scripts"]) {
 		await mkdir(join(directory, folder), { recursive: true });
 	}
 	for (const file of [
 		"types/neo-js.d.ts",
 		"types/neo-js.core.d.ts",
-		"crates/neo-js/src/modules.rs",
+		"crates/neojs-core/src/modules.rs",
 		"docs/site/scripts/reference.mjs",
 		"docs/site/scripts/runtime-inventory.mjs",
 	]) {
@@ -184,7 +184,7 @@ test("runtime inventory refreshes its checkout's CLI and checks for export and f
 		"concurrent builds get distinct binaries and ignore the inherited target",
 		async (t) => {
 			const sibling = await fixture(t, true, inheritedEnv);
-			const module = join(sibling.checkout, "crates/neo-js/src/js/string_builder.js");
+			const module = join(sibling.checkout, "crates/neojs-core/src/js/string_builder.js");
 			const original = await readFile(module, "utf8");
 			await writeFile(module, `${original}\nexport const isolationMarker = 1;\n`);
 			const [normal, mutated] = await Promise.allSettled([
@@ -219,7 +219,7 @@ test("runtime inventory refreshes its checkout's CLI and checks for export and f
 		},
 	);
 
-	const module = join(checkout, "crates/neo-js/src/js/string_builder.js");
+	const module = join(checkout, "crates/neojs-core/src/js/string_builder.js");
 	const original = await readFile(module, "utf8");
 	await t.test("rebuilds a stale CLI and detects an extra runtime export", async () => {
 		await writeFile(module, `${original}\nexport const reviewerExtra = 1;\n`);
@@ -237,7 +237,7 @@ test("runtime inventory refreshes its checkout's CLI and checks for export and f
 		await writeFile(module, original);
 	});
 
-	const cli = join(checkout, "crates/neo-js-cli/src/main.rs");
+	const cli = join(checkout, "crates/neojs/src/main.rs");
 	const cliSource = await readFile(cli, "utf8");
 	await t.test(
 		"rejects a new permission flag and a removed flag from current CLI help",

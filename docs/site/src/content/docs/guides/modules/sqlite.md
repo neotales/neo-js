@@ -98,7 +98,7 @@ modules if their permissions are granted.
 
 ```toml
 [dependencies]
-neojs-core = { path = "../neo-js/crates/neo-js" }
+neojs-core = { path = "../neo-js/crates/neojs-core" }
 neojs-sqlite = { path = "../neo-js/crates/neojs-sqlite" }
 ```
 

@@ -45,7 +45,7 @@ For a checkout next to your crate, add both dependencies:
 
 ```toml
 [dependencies]
-neojs-core = { path = "../neo-js/crates/neo-js" }
+neojs-core = { path = "../neo-js/crates/neojs-core" }
 neojs-os = { path = "../neo-js/crates/neojs-os" }
 ```
 

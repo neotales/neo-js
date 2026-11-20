@@ -9,7 +9,7 @@ use std::process::{Command, Output};
 fn run(dir: &std::path::Path, name: &str, source: &str) -> Output {
     let path = dir.join(name);
     std::fs::write(&path, source).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg(&path)
         .output()
         .unwrap()

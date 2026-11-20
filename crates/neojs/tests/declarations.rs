@@ -459,7 +459,7 @@ fn manifest_fixture() -> tempfile::TempDir {
     fs::create_dir_all(dir.path().join("crates/neojs-os/types")).unwrap();
     fs::create_dir_all(dir.path().join("crates/neojs-schedulers/types")).unwrap();
     fs::create_dir_all(dir.path().join("crates/neojs-sqlite/types")).unwrap();
-    fs::create_dir_all(dir.path().join("crates/neo-js-cli")).unwrap();
+    fs::create_dir_all(dir.path().join("crates/neojs")).unwrap();
     fs::write(
         dir.path().join(declarations::CORE_PATH),
         "declare module \"neo:core\" {}\n",
@@ -496,7 +496,7 @@ fn run_with_root(root: &Path, extra: &[&str]) -> Result<Option<String>, String> 
     declarations::run(values)
 }
 
-const CORE_DEPENDENCY: &str = "[dependencies]\nneojs-core = { path = \"../neo-js\" }\n";
+const CORE_DEPENDENCY: &str = "[dependencies]\nneojs-core = { path = \"../neojs-core\" }\n";
 const OS_DEPENDENCY: &str = "neojs-os = { path = \"../neojs-os\" }\n";
 const SCHEDULERS_DEPENDENCY: &str = "neojs-schedulers = { path = \"../neojs-schedulers\" }\n";
 const SQLITE_DEPENDENCY: &str = "neojs-sqlite = { path = \"../neojs-sqlite\" }\n";

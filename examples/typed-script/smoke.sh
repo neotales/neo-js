@@ -115,7 +115,7 @@ fi
 
 output=$(cargo run --locked --offline --quiet -p neojs -- --allow-stdio "$example/main.mts")
 case "$output" in
-  'neo-js: '?*/?*) ;;
+  'neojs: '?*/?*) ;;
   *) printf 'Unexpected example output: %s\n' "$output" >&2; exit 1 ;;
 esac
 
@@ -127,4 +127,4 @@ case "$denied" in
   *"Error resolving module 'neo:process'"*) ;;
   *) printf '%s\n' 'Expected a module resolution error for neo:process.' >&2; exit 1 ;;
 esac
-printf '%s\n' 'neo-js: example ran with --allow-stdio and was denied without it'
+printf '%s\n' 'neojs: example ran with --allow-stdio and was denied without it'

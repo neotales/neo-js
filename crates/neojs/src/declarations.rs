@@ -1,11 +1,11 @@
 //! Deterministic, offline composition of the TypeScript declarations.
 //!
 //! This module is compiled by the `compose-types` example and by the
-//! `declarations` integration test. It is not part of the `neo-js` binary.
+//! `declarations` integration test. It is not part of the `neojs` binary.
 //!
 //! Selection is explicit. `--check-cli-manifest` verifies that the explicit
 //! selection agrees with the normal dependencies and default optional features
-//! in `crates/neo-js-cli/Cargo.toml`; it never selects a fragment from the
+//! in `crates/neojs/Cargo.toml`; it never selects a fragment from the
 //! manifest on its own, and it is not a full Cargo resolver.
 
 use std::{
@@ -15,7 +15,7 @@ use std::{
 };
 
 pub const CORE_PATH: &str = "types/neo-js.core.d.ts";
-pub const CLI_MANIFEST_PATH: &str = "crates/neo-js-cli/Cargo.toml";
+pub const CLI_MANIFEST_PATH: &str = "crates/neojs/Cargo.toml";
 
 pub const USAGE: &str = "\
 Usage: compose-types [OPTIONS]
@@ -29,7 +29,7 @@ Options:
                          Available: os, os-user, schedulers, sqlite.
   --output <PATH>        Write the composition to PATH. Use - for stdout.
   --check <PATH>         Fail if PATH differs from the composition.
-  --check-cli-manifest   Verify the selection against crates/neo-js-cli/Cargo.toml.
+  --check-cli-manifest   Verify the selection against crates/neojs/Cargo.toml.
   --root <PATH>          Repository root (default: this checkout).
   -h, --help             Print this help.
 

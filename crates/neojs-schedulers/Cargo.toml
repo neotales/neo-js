@@ -7,7 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-neojs-core = { path = "../neo-js" }
+neojs-core = { path = "../neojs-core" }
 
 [dev-dependencies]
 serde_json = "1"

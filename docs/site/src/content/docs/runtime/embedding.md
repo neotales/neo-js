@@ -142,15 +142,18 @@ source-breaking changes; no compatibility guarantee is implied.
 | `neo-js-cli`                   | `neojs`                                |
 
 Change workspace package selectors, dependency keys, and Rust imports. There
-is no old package alias or `neo_js` re-export. The rename alone did not
-change the JavaScript API or the executable name. The CLI's `--help` and
-`--version` still identify `neo-js`.
+is no old package alias or `neo_js` re-export. The package rename did not
+change the JavaScript API. Checkout paths moved with the packages:
+`crates/neo-js` is now `crates/neojs-core`, and `crates/neo-js-cli` is now
+`crates/neojs`. Update relative path dependencies to match. The executable has
+its own breaking rename; see
+[CLI executable migration](#cli-executable-migration).
 
 For a checkout next to your crate:
 
 ```toml
 [dependencies]
-neojs-core = { path = "../neo-js/crates/neo-js" }
+neojs-core = { path = "../neo-js/crates/neojs-core" }
 ```
 
 Use `use neojs_core::{NeoJs, Permissions};` in Rust. The extension packages
@@ -163,4 +166,20 @@ Core does not link these extensions.
 ```sh
 cargo run -p neojs -- script.js
 cargo test -p neojs-core
+```
+
+## CLI executable migration
+
+The CLI binary and its clap command name are `neojs`; they were `neo-js` in
+earlier 0.1 checkouts. Update scripts, wrappers, and service units that invoke
+the old name. No `neo-js` alias or shim is installed, and `neojs --help` and
+`neojs --version` identify `neojs`. The JavaScript API and the `neo:` module
+specifiers are unchanged.
+
+```sh
+# Before
+neo-js script.js
+
+# After
+neojs script.js
 ```

@@ -7,7 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-neojs-core = { path = "../neo-js" }
+neojs-core = { path = "../neojs-core" }
 # Bundled SQLite with authorizer, progress and runtime limits. Do not enable
 # rusqlite's extension loading or virtual-table interfaces.
 rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled", "hooks", "limits"] }

@@ -16,7 +16,7 @@ ASTRO_TELEMETRY_DISABLED=1 pnpm --dir docs/site check
 ```
 
 The reference check verifies declaration composition and runs
-`cargo build --locked --offline -p neojs --bin neo-js` from this checkout.
+`cargo build --locked --offline -p neojs --bin neojs` from this checkout.
 It uses the CLI executable Cargo reports. Cargo reuses unchanged outputs in
 the checkout's `target/docs-reference/` directory unless `CARGO_TARGET_DIR`
 overrides it. Use an **absolute path** for that override: the declaration

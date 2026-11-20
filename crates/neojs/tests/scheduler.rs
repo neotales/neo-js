@@ -25,7 +25,7 @@ fn cli_imports_scheduler_without_permissions() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let output = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg(&main)
         .output()
         .unwrap();
@@ -61,7 +61,7 @@ fn cli_reports_scheduler_error_codes() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+    let output = Command::new(env!("CARGO_BIN_EXE_neojs"))
         .arg(&main)
         .output()
         .unwrap();

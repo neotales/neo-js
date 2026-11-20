@@ -1,6 +1,6 @@
 ---
 title: Run a script
-description: Run a JavaScript or TypeScript entry file with the neo-js CLI.
+description: Run a JavaScript or TypeScript entry file with the neojs CLI.
 ---
 
 1. Install Rust 1.87 or later.
@@ -20,7 +20,9 @@ description: Run a JavaScript or TypeScript entry file with the neo-js CLI.
 
    The script prints `1`.
 
-The Cargo package is `neojs`; the executable is `neo-js`. The CLI registers
+The Cargo package is `neojs`; the executable is `neojs`. Earlier 0.1 checkouts
+named the executable `neo-js`; that name is no longer installed, so update
+scripts and wrappers to run `neojs`. The CLI registers
 [`neojs-os`](/guides/modules/os/), so `neo:os` and the `os` global are available
 without a flag. The CLI also registers [`neojs-schedulers`](/guides/modules/scheduler/).
 Its three scheduler imports need no flag. Importing

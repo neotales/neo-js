@@ -9,7 +9,7 @@ use neojs_core::{NeoJs, Permissions, RuntimeOptions};
 
 #[derive(Parser)]
 #[command(
-    name = "neo-js",
+    name = "neojs",
     version,
     about = "Run JavaScript with the NeoTales QuickJS host"
 )]
@@ -68,7 +68,7 @@ fn main() -> ExitCode {
         // Clap enforces this unless `--third-party-notices` is present, which
         // returned above. Keep a usage failure instead of panicking if that
         // invariant ever changes.
-        eprintln!("neo-js: a script is required unless --third-party-notices is used");
+        eprintln!("neojs: a script is required unless --third-party-notices is used");
         return ExitCode::from(2);
     };
 
@@ -76,7 +76,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(errors) => {
             for error in errors {
-                eprintln!("neo-js: {error}");
+                eprintln!("neojs: {error}");
             }
             ExitCode::FAILURE
         }
@@ -94,7 +94,7 @@ fn print_third_party_notices() -> ExitCode {
     {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("neo-js: {error}");
+            eprintln!("neojs: {error}");
             ExitCode::FAILURE
         }
     }

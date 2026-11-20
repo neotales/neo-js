@@ -10,7 +10,9 @@ With Rust 1.87 or later, run a script from the checkout root:
 cargo run -p neojs -- script.js
 ```
 
-The executable is `neo-js`. Rust embedders use `neojs-core`.
+The executable is `neojs`. Earlier 0.1 checkouts named it `neo-js`; that name is
+no longer installed, so update scripts and wrappers to run `neojs`. Rust
+embedders use `neojs-core`.
 
 The [documentation site](docs/site/) contains the usage guides, embedding
 instructions, and generated API reference. Review
