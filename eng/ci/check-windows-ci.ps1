@@ -234,6 +234,67 @@ if ($failures.Count -eq 0) {
     if ($workflow -notmatch 'test-windows-ci-check\.ps1') {
         Add-Failure 'workflow must run the checked-in mutation self-test'
     }
+    $dtolnayUsesPattern = '^\s*uses:\s*dtolnay/rust-toolchain@4b54d2ecfeb0fc349341b7929a580d09d9e2479b(?:\s|$)'
+    $dtolnayIndices = @()
+    for ($index = 0; $index -lt $workflowLines.Count; $index++) {
+        if ($workflowLines[$index] -match $dtolnayUsesPattern) {
+            $dtolnayIndices += $index
+        }
+    }
+    if ($dtolnayIndices.Count -ne 1) {
+        Add-Failure "expected exactly one pinned dtolnay/rust-toolchain step, found $($dtolnayIndices.Count)"
+    }
+    else {
+        $usesIndex = $dtolnayIndices[0]
+        $stepStart = -1
+        $stepIndent = 0
+        for ($index = $usesIndex - 1; $index -ge 0; $index--) {
+            if ($workflowLines[$index] -match '^(?<indent>\s*)-\s+\S') {
+                $stepStart = $index
+                $stepIndent = $Matches.indent.Length
+                break
+            }
+        }
+        if ($stepStart -lt 0) {
+            Add-Failure 'could not locate the dtolnay/rust-toolchain step block'
+        }
+        else {
+            $withLines = @()
+            for ($index = $stepStart; $index -lt $workflowLines.Count; $index++) {
+                $line = $workflowLines[$index]
+                if ($index -gt $stepStart -and $line -match '^(?<indent>\s*)-\s+\S') {
+                    $nextIndent = $Matches.indent.Length
+                    if ($nextIndent -le $stepIndent) {
+                        break
+                    }
+                }
+                $trimmed = $line.Trim()
+                if ($trimmed -eq '' -or $trimmed.StartsWith('#')) {
+                    continue
+                }
+                $leading = $line.Length - $line.TrimStart().Length
+                if ($leading -gt $stepIndent -and $line -match '^\s*(?:"with"|''with''|with)\s*:') {
+                    $withLines += $line
+                    $withIndent = $leading
+                    for ($nestedIndex = $index + 1; $nestedIndex -lt $workflowLines.Count; $nestedIndex++) {
+                        $nestedLine = $workflowLines[$nestedIndex]
+                        $nestedTrimmed = $nestedLine.Trim()
+                        if ($nestedTrimmed -eq '' -or $nestedTrimmed.StartsWith('#')) {
+                            continue
+                        }
+                        $nestedLeading = $nestedLine.Length - $nestedLine.TrimStart().Length
+                        if ($nestedLeading -le $withIndent) {
+                            break
+                        }
+                        $withLines += $nestedLine
+                    }
+                }
+            }
+            if ($withLines.Count -gt 0) {
+                Add-Failure "dtolnay/rust-toolchain must not define with:; this action ref needs no inputs and selects 1.87.0 by pin: $($withLines -join ' | ')"
+            }
+        }
+    }
 
     $expectedActions = @{
         # Verified 2026-11-20 with git ls-remote and the GitHub API; see README.

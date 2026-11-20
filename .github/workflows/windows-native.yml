@@ -47,9 +47,9 @@ jobs:
           persist-credentials: false
 
       - name: Install pinned Rust 1.87.0 MSVC toolchain
+        # Do not pass with: toolchain. This action ref accepts only targets,
+        # target, and components; the 1.87.0 branch itself selects 1.87.0.
         uses: dtolnay/rust-toolchain@4b54d2ecfeb0fc349341b7929a580d09d9e2479b # 1.87.0
-        with:
-          toolchain: 1.87.0
 
       # Fork pull requests run untrusted code. They still get a read-only
       # checkout and no user secrets, but they do not write a cache that a

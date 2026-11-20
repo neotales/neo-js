@@ -17,10 +17,11 @@
     Covered bypasses: direct cargo, Windows path-qualified cargo, Windows and
     Unix path-qualified shells, an environment-expanded cargo command, a
     path-qualified wrapper command, a missing --target, a cargo alias, a
-    floating action ref, extra `release`/`workflow_call` triggers, column-zero
-    comments hiding a following trigger or permission, quoted or unquoted
-    job-level permissions, quoted permission keys, `id-token: write`, and
-    `contents: write` permissions, and a missing registry test source.
+    floating action ref, policy-rejected `with:` blocks on dtolnay including
+    quoted keys, extra `release`/`workflow_call` triggers, column-zero comments
+    hiding a following trigger or permission, quoted or unquoted job-level
+    permissions, quoted permission keys, `id-token: write`, `contents: write`,
+    and a missing registry test source.
 
     This is a source/AST check, not a sandbox. It does not attest the cargo
     binary on PATH or anything cargo/rustc/build scripts execute at runtime.
@@ -239,6 +240,38 @@ try {
     Assert-Rejected -Name 'floating action ref' -Root $pinRoot -Expected @(
         'action actions/checkout is not pinned to a 40-hex commit SHA',
         'v7'
+    )
+
+    $toolchainInputRoot = New-Fixture -Name 'unsupported-toolchain-input'
+    $toolchainInputWorkflow = Join-Path $toolchainInputRoot '.github/workflows/windows-native.yml'
+    Insert-AfterLine -Path $toolchainInputWorkflow -Line '        uses: dtolnay/rust-toolchain@4b54d2ecfeb0fc349341b7929a580d09d9e2479b # 1.87.0' -Insert "        with:`n          toolchain: 1.87.0"
+    Assert-Rejected -Name 'unsupported toolchain input block' -Root $toolchainInputRoot -Expected @(
+        'dtolnay/rust-toolchain must not define with:',
+        'toolchain: 1.87.0'
+    )
+
+    $quotedToolchainRoot = New-Fixture -Name 'unsupported-quoted-toolchain-input'
+    $quotedToolchainWorkflow = Join-Path $quotedToolchainRoot '.github/workflows/windows-native.yml'
+    Insert-AfterLine -Path $quotedToolchainWorkflow -Line '        uses: dtolnay/rust-toolchain@4b54d2ecfeb0fc349341b7929a580d09d9e2479b # 1.87.0' -Insert ('        with:' + "`n" + '          "toolchain": "1.87.0"')
+    Assert-Rejected -Name 'unsupported quoted toolchain input block' -Root $quotedToolchainRoot -Expected @(
+        'dtolnay/rust-toolchain must not define with:',
+        '"toolchain": "1.87.0"'
+    )
+
+    $inlineToolchainRoot = New-Fixture -Name 'unsupported-inline-toolchain-input'
+    $inlineToolchainWorkflow = Join-Path $inlineToolchainRoot '.github/workflows/windows-native.yml'
+    Insert-AfterLine -Path $inlineToolchainWorkflow -Line '        uses: dtolnay/rust-toolchain@4b54d2ecfeb0fc349341b7929a580d09d9e2479b # 1.87.0' -Insert '        with: { "toolchain": "1.87.0" }'
+    Assert-Rejected -Name 'unsupported inline quoted toolchain input' -Root $inlineToolchainRoot -Expected @(
+        'dtolnay/rust-toolchain must not define with:',
+        'with: { "toolchain": "1.87.0" }'
+    )
+
+    $quotedWithRoot = New-Fixture -Name 'quoted-with-key'
+    $quotedWithWorkflow = Join-Path $quotedWithRoot '.github/workflows/windows-native.yml'
+    Insert-AfterLine -Path $quotedWithWorkflow -Line '        uses: dtolnay/rust-toolchain@4b54d2ecfeb0fc349341b7929a580d09d9e2479b # 1.87.0' -Insert '        "with": { "toolchain": "1.87.0" }'
+    Assert-Rejected -Name 'quoted with key' -Root $quotedWithRoot -Expected @(
+        'dtolnay/rust-toolchain must not define with:',
+        '"with": { "toolchain": "1.87.0" }'
     )
 
     $releaseRoot = New-Fixture -Name 'release-trigger'
