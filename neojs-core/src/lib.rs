@@ -236,7 +236,7 @@ pub struct NeoJs {
     // `neo:fs` keeps its native callbacks private. The state holds the pristine
     // export object built in the fresh realm before user code runs.
     fs: Rc<RefCell<fs::FsState>>,
-    reads: fs::ReadDriver,
+    ops: fs::FsDriver,
     module_turns: module_turn::ModuleTurns,
     // Static descriptors and per-runtime extension state. The registry holds no
     // JS values; the state is created and dropped on this runtime's thread.
@@ -428,7 +428,7 @@ impl NeoJs {
         let extension_runtime = Rc::new(RefCell::new(extension::ExtensionRuntime::new()));
         let runtime = Runtime::new()?;
         let module_turns = module_turn::ModuleTurns::new(&runtime)?;
-        let reads = fs::ReadDriver::default();
+        let ops = fs::FsDriver::default();
         let formats = Rc::new(RefCell::new(loader::ModuleFormats::default()));
         let cwd = Rc::new(RefCell::new(cwd::WorkingDirectory::new()));
         runtime.set_loader(
@@ -567,7 +567,7 @@ impl NeoJs {
                     .map_err(|_| rquickjs::Error::Unknown)?;
                 let fs_factory = fs::factory(&ctx)?;
                 fs.borrow_mut().factory = Some(Persistent::save(&ctx, fs_factory));
-                let fs_api = fs::install(&ctx, &fs, reads.clone())?;
+                let fs_api = fs::install(&ctx, &fs, ops.clone())?;
                 globals.set("fs", fs_api)?;
             }
             // Both admitted modules share a private callback guard created
@@ -705,7 +705,7 @@ impl NeoJs {
             winregistry,
             fetch,
             fs,
-            reads,
+            ops,
             module_turns,
             extension_registry,
             extensions: extension_runtime,
@@ -869,7 +869,7 @@ impl NeoJs {
             .borrow_mut()
             .reserve_entry(identity, name, base)?;
         let turn = self.module_turns.begin();
-        let reads = self.reads.begin();
+        let ops = self.ops.begin();
         let entry = self.context.with(|ctx| {
             let declared = Module::declare(ctx.clone(), identity, source);
             self.formats
@@ -888,9 +888,9 @@ impl NeoJs {
             if let Some(before_drive) = self.before_drive.borrow_mut().take() {
                 before_drive();
             }
-            turn.drive(&self.context, &self._runtime, &reads, root)
+            turn.drive(&self.context, &self._runtime, &ops, root)
         });
-        turn.finish(&self.context, &self._runtime, &reads, result.is_err());
+        turn.finish(&self.context, &self._runtime, &ops, result.is_err());
         result
     }
 

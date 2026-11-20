@@ -5,12 +5,12 @@ description: "What neo-js does not provide or isolate."
 
 This is a first implementation, not an isolation boundary. It does not limit
 CPU or memory use. Do not run untrusted scripts without OS-level isolation.
-The runtime drives QuickJS jobs and asynchronous binary reads during
+The runtime drives QuickJS jobs and asynchronous filesystem work during
 [managed module evaluation](/runtime/loading/#managed-module-evaluation).
 It has no general external event loop. TypeScript support erases types
 without checking them or producing source maps. The loader rejects constructs
-that need a transform. Among the CLI's host modules, only `neo:fs.readFile`
-is asynchronous. The callback guards in
+that need a transform. Among the CLI's host modules, only `neo:fs.readFile` and
+`neo:fs.writeFile` are asynchronous. The callback guards in
 [`neo:test` and `neo:assert`](/guides/modules/testing/) reject Promise returns.
 `neo:toml` and `neo:yaml` parse text only: neither has a file loader, expands
 no alias or variable, and reads no environment.

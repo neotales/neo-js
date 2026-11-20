@@ -65,8 +65,12 @@ fn permission_and_allowlist_gate_the_global_and_the_module() {
          if (typeof fs.readFileSync !== 'function') throw Error('missing global readFileSync');
          if (typeof fs.readText !== 'function') throw Error('missing global readText');
          if (typeof module.writeFile !== 'function') throw Error('missing module writeFile');
+         if (typeof fs.writeFileSync !== 'function') throw Error('missing global writeFileSync');
+         if (typeof module.writeFileSync !== 'function') throw Error('missing module writeFileSync');
          if (module.readFile !== fs.readFile) throw Error('module and global differ');
          if (module.readFileSync !== fs.readFileSync) throw Error('sync module and global differ');
+         if (module.writeFile !== fs.writeFile) throw Error('async writes differ');
+         if (module.writeFileSync !== fs.writeFileSync) throw Error('sync writes differ');
          if (typeof module.rename !== 'function' || module.rename !== fs.rename) {
            throw Error('missing or mismatched rename');
          }
@@ -115,6 +119,60 @@ fn binary_read_rejects_asynchronously_and_sync_read_still_throws() {
     );
     js.run(
         "try { fs.readFile('fixture'); throw Error('dispatched outside managed turn'); }
+         catch (error) { if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn binary_write_is_asynchronous_and_sync_write_still_throws() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = literal(&dir.path().join("missing-parent").join("not-here"));
+    let file = dir.path().join("fixture");
+    fs::write(&file, b"old").unwrap();
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{readFileSync, writeFile, writeFileSync, FsError}} from 'neo:fs';
+            const missing = {missing};
+            const file = {file};
+
+            const pending = writeFile(file, new Uint8Array([1, 2, 3]));
+            if (!(pending instanceof Promise)) throw Error('expected a native Promise');
+            if ((await pending) !== undefined) throw Error('write should resolve undefined');
+            const bytes = readFileSync(file);
+            if (bytes.length !== 3 || bytes[2] !== 3) throw Error('async write did not land');
+
+            try {{ await writeFile(missing, new Uint8Array([1])); throw Error('expected rejection'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
+                if (error.message.includes(missing)) throw Error('path leaked');
+            }}
+            try {{ writeFileSync(missing, new Uint8Array([1])); throw Error('expected throw'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
+            }}
+
+            try {{
+                await writeFile(file, new Uint8Array([4]), {{overwrite: false}});
+                throw Error('expected no-clobber rejection');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_ALREADY_EXISTS') throw error;
+            }}
+            if (readFileSync(file)[0] !== 1) throw Error('no-clobber changed the file');
+
+            try {{ await writeFile(file, 'text'); throw Error('expected type rejection'); }}
+            catch (error) {{ if (!(error instanceof TypeError)) throw error; }}
+
+            await writeFile(file, new Uint8Array(0), {{overwrite: true}});
+            if (readFileSync(file).length !== 0) throw Error('overwrite did not truncate');"#,
+            missing = missing,
+            file = literal(&file),
+        ),
+    );
+    js.run(
+        "try { fs.writeFile('fixture', new Uint8Array([1])); throw Error('dispatched outside managed turn'); }
          catch (error) { if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }",
     )
     .unwrap();
@@ -283,15 +341,20 @@ fn async_path_errors_keep_codes_after_public_error_constructor_tampering() {
     let js = runtime();
     run(
         &js,
-        r#"import {readFile, FsError, MAX_PATH_BYTES} from 'neo:fs';
+        r#"import {readFile, writeFile, FsError, MAX_PATH_BYTES} from 'neo:fs';
            Object.setPrototypeOf(FsError, function () { throw Error('intercepted'); });
            for (const [path, code] of [
                ['', 'FS_PATH'], ['\uD800', 'FS_ENCODING'],
                ['x'.repeat(MAX_PATH_BYTES + 1), 'FS_LIMIT'], ['x\0', 'FS_PATH'],
            ]) {
-               try { await readFile(path); throw Error('expected rejection'); }
-               catch (error) {
-                   if (!(error instanceof FsError) || error.code !== code) throw error;
+               for (const action of [
+                   () => readFile(path),
+                   () => writeFile(path, new Uint8Array([1])),
+               ]) {
+                   try { await action(); throw Error('expected rejection'); }
+                   catch (error) {
+                       if (!(error instanceof FsError) || error.code !== code) throw error;
+                   }
                }
            }"#,
     );
@@ -330,7 +393,7 @@ fn text_and_binary_round_trip_with_unicode_names_and_content() {
 
         const bytes = new Uint8Array(256);
         for (let index = 0; index < 256; index++) bytes[index] = index;
-        writeFile(binaryPath, bytes);
+        await writeFile(binaryPath, bytes);
         const back = readFileSync(binaryPath);
         if (!(back instanceof Uint8Array)) throw Error('not a Uint8Array');
         if (back.length !== 256) throw Error('wrong length');
@@ -339,7 +402,7 @@ fn text_and_binary_round_trip_with_unicode_names_and_content() {
         }
 
         // A subarray writes only its own view, not the whole backing buffer.
-        writeFile(binaryPath, bytes.subarray(10, 13));
+        await writeFile(binaryPath, bytes.subarray(10, 13));
         const view = readFileSync(binaryPath);
         if (view.length !== 3 || view[0] !== 10 || view[1] !== 11 || view[2] !== 12) {
             throw Error('subarray length');
@@ -383,7 +446,7 @@ fn stable_errors_never_include_the_supplied_path() {
     fs::write(dir.path().join("existing.txt"), "still usable").unwrap();
     let js = runtime();
     let source = r#"
-        import {readText, readFileSync, writeText, writeFile, stat, exists, readDir, mkdir, remove, FsError} from 'neo:fs';
+        import {readText, readFileSync, writeText, writeFile, writeFileSync, stat, exists, readDir, mkdir, remove, FsError} from 'neo:fs';
 
         function expectFsError(code, action) {
             try { action(); }
@@ -424,12 +487,12 @@ fn stable_errors_never_include_the_supplied_path() {
 
         expectTypeError(() => readText(123));
         expectTypeError(() => readFileSync(null));
-        expectTypeError(() => writeFile(missing, 'text'));
-        expectTypeError(() => writeFile(missing, new DataView(new ArrayBuffer(2))));
-        expectTypeError(() => writeFile(missing, new Uint16Array([1])));
-        expectTypeError(() => writeFile(missing, new Uint8ClampedArray([1])));
-        expectTypeError(() => writeFile(missing, new Uint8Array(0), null));
-        expectTypeError(() => writeFile(missing, new Uint8Array(0), {overwrite: 'yes'}));
+        expectTypeError(() => writeFileSync(missing, 'text'));
+        expectTypeError(() => writeFileSync(missing, new DataView(new ArrayBuffer(2))));
+        expectTypeError(() => writeFileSync(missing, new Uint16Array([1])));
+        expectTypeError(() => writeFileSync(missing, new Uint8ClampedArray([1])));
+        expectTypeError(() => writeFileSync(missing, new Uint8Array(0), null));
+        expectTypeError(() => writeFileSync(missing, new Uint8Array(0), {overwrite: 'yes'}));
         expectTypeError(() => mkdir(missing, null));
         expectTypeError(() => mkdir(missing, {recursive: 'yes'}));
         expectTypeError(() => remove(missing, {recursive: 1}));
@@ -442,8 +505,19 @@ fn stable_errors_never_include_the_supplied_path() {
             getPrototypeOf() { traps += 1; return Uint8Array.prototype; },
             getOwnPropertyDescriptor() { traps += 1; return undefined; },
         });
-        expectTypeError(() => writeFile(missing, proxy));
+        expectTypeError(() => writeFileSync(missing, proxy));
         if (traps !== 0) throw Error('proxy traps were observed: ' + traps);
+
+        // The asynchronous form rejects with the same stable, path-free
+        // error instead of throwing synchronously inside a managed turn.
+        const missingParent = __MISSING_PARENT__;
+        try {
+            await writeFile(missingParent, new Uint8Array(0));
+            throw Error('expected async rejection');
+        } catch (error) {
+            if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
+            if (error.message.includes(missingParent)) throw Error('async path leaked in message');
+        }
 
         // A caught brand exception must not poison the following
         // host call with a pending QuickJS exception.
@@ -455,6 +529,7 @@ fn stable_errors_never_include_the_supplied_path() {
         if (!constructed.message.includes('filesystem')) throw Error('FsError message');
     "#
     .replace("__MISSING__", &literal(&dir.path().join("no-such-file")))
+    .replace("__MISSING_PARENT__", &literal(&dir.path().join("no-such-dir/file")))
     .replace("__EXISTING__", &literal(&dir.path().join("existing.txt")));
     run(&js, &source);
 }
@@ -479,9 +554,9 @@ fn binary_write_snapshots_live_view_bounds_and_rejects_invalid_views_before_opti
                 if (actual[i] !== expected[i]) throw Error('wrong byte: ' + actual);
             }
         }
-        function reject(data, code) {
+        async function reject(data, code) {
             let failure;
-            try { writeFile(file, data, options); }
+            try { await writeFile(file, data, options); }
             catch (error) { failure = error; }
             if (!(failure instanceof FsError) || failure.code !== code) {
                 throw Error('wanted ' + code + ', got ' + failure?.code);
@@ -494,13 +569,13 @@ fn binary_write_snapshots_live_view_bounds_and_rejects_invalid_views_before_opti
         const fixed = new Uint8Array(buffer, 1, 2);
         const tracking = new Uint8Array(buffer, 1);
         buffer.resize(2);
-        reject(fixed, 'FS_OUT_OF_BOUNDS');
+        await reject(fixed, 'FS_OUT_OF_BOUNDS');
 
         const detachedBuffer = new ArrayBuffer(0);
         const detached = new Uint8Array(detachedBuffer);
         detachedBuffer.transfer();
-        reject(detached, 'FS_DETACHED');
-        reject(new Uint8Array(new SharedArrayBuffer(4)), 'FS_UNSUPPORTED');
+        await reject(detached, 'FS_DETACHED');
+        await reject(new Uint8Array(new SharedArrayBuffer(4)), 'FS_UNSUPPORTED');
 
         buffer.resize(5);
         tracking.set([1, 2, 3, 4]);
@@ -509,7 +584,7 @@ fn binary_write_snapshots_live_view_bounds_and_rejects_invalid_views_before_opti
                 get() { throw Error('input getter ran: ' + key); },
             });
         }
-        writeFile(file, tracking, new Proxy({}, {
+        await writeFile(file, tracking, new Proxy({}, {
             ownKeys() {
                 buffer.resize(1);
                 return [];
@@ -518,9 +593,9 @@ fn binary_write_snapshots_live_view_bounds_and_rejects_invalid_views_before_opti
         assertBytes([1, 2, 3, 4]);
 
         // A length-tracking view at the buffer's end is valid, not OOB.
-        writeFile(file, tracking);
+        await writeFile(file, tracking);
         assertBytes([]);
-        writeFile(file, new Uint8Array(0));
+        await writeFile(file, new Uint8Array(0));
         assertBytes([]);
     "#
     .replace("__FILE__", &literal(&file));
@@ -538,7 +613,7 @@ fn overwrite_no_clobber_mkdir_and_remove_are_explicit() {
 
     let js = runtime();
     let source = r#"
-        import {readText, writeText, writeFile, mkdir, remove, exists, FsError} from 'neo:fs';
+        import {readText, writeText, writeFileSync, mkdir, remove, exists, FsError} from 'neo:fs';
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
@@ -557,19 +632,19 @@ fn overwrite_no_clobber_mkdir_and_remove_are_explicit() {
         const missing = __MISSING__;
 
         writeText(file, 'first');
-        expectFsError('FS_ALREADY_EXISTS', () => writeFile(file, new Uint8Array([50]), {overwrite: false}));
+        expectFsError('FS_ALREADY_EXISTS', () => writeFileSync(file, new Uint8Array([50]), {overwrite: false}));
         if (readText(file) !== 'first') throw Error('no-clobber changed the file');
 
-        writeFile(file, new Uint8Array([0x73]));
+        writeFileSync(file, new Uint8Array([0x73]));
         if (readText(file) !== 's') throw Error('default overwrite failed');
         writeText(file, 'third');
         if (readText(file) !== 'third') throw Error('writeText overwrite failed');
 
-        writeFile(fresh, new Uint8Array([0x78]), {overwrite: false});
+        writeFileSync(fresh, new Uint8Array([0x78]), {overwrite: false});
         if (readText(fresh) !== 'x') throw Error('create-new failed');
 
-        expectFsError('FS_IS_DIRECTORY', () => writeFile(dir, new Uint8Array([1])));
-        expectFsError('FS_NOT_FOUND', () => writeFile(missing, new Uint8Array([1])));
+        expectFsError('FS_IS_DIRECTORY', () => writeFileSync(dir, new Uint8Array([1])));
+        expectFsError('FS_NOT_FOUND', () => writeFileSync(missing, new Uint8Array([1])));
 
         mkdir(empty);
         expectFsError('FS_ALREADY_EXISTS', () => mkdir(empty));
@@ -608,7 +683,7 @@ fn options_are_own_data_properties_and_paths_snapshot_cwd_before_proxy_traps() {
     let js = chunked_runtime();
     let source = r#"
         import {chdir} from 'neo:process';
-        import {readText, writeFile, mkdir, remove, exists} from 'neo:fs';
+        import {readText, writeFileSync, mkdir, remove, exists} from 'neo:fs';
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
@@ -631,7 +706,7 @@ fn options_are_own_data_properties_and_paths_snapshot_cwd_before_proxy_traps() {
         // Inherited options do not select destructive modes.
         expectFsError('FS_NOT_EMPTY', () =>
             remove('target', Object.create({recursive: true})));
-        writeFile('file', new Uint8Array([111]), Object.create({overwrite: false}));
+        writeFileSync('file', new Uint8Array([111]), Object.create({overwrite: false}));
         if (readText('file') !== 'o') throw Error('inherited overwrite changed mode');
 
         let getterCalls = 0;
@@ -1317,7 +1392,7 @@ fn reads_are_bounded_before_allocation_and_sizes_stay_decimal() {
     drop(handle);
 
     let source = r#"
-        import {readText, readFileSync, writeFile, stat, exists, FsError} from 'neo:fs';
+        import {readText, readFileSync, writeFile, writeFileSync, stat, exists, FsError} from 'neo:fs';
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
@@ -1342,8 +1417,15 @@ fn reads_are_bounded_before_allocation_and_sizes_stay_decimal() {
 
         // Check the limit before resolving or opening: the output must not exist.
         const tooLarge = new Uint8Array(fs.MAX_WRITE_BYTES + 1);
-        expectFsError('FS_LIMIT', () => writeFile(output, tooLarge));
+        expectFsError('FS_LIMIT', () => writeFileSync(output, tooLarge));
         if (exists(output)) throw Error('oversize write created a file');
+        try {
+            await writeFile(output, tooLarge);
+            throw Error('oversize async write fulfilled');
+        } catch (error) {
+            if (error.code !== 'FS_LIMIT') throw error;
+        }
+        if (exists(output)) throw Error('oversize async write created a file');
 
         expectFsError('FS_LIMIT', () => readText('x'.repeat(fs.MAX_PATH_BYTES + 1)));
     "#

@@ -52,7 +52,8 @@ declare const env: {
 /**
  * The `neo:fs` API. Available only with `--allow-fs` and when the runtime's
  * module allowlist admits `neo:fs`. Relative paths use the runtime's working
- * directory, not the host process's. Only `readFile` is asynchronous.
+ * directory, not the host process's. `readFile` and `writeFile` are
+ * asynchronous; their `Sync` counterparts and every other operation block.
  *
  * This is not a sandbox: a script with this object has the host user's
  * filesystem authority. Reads and writes are bounded; see the `neo:fs`
@@ -64,13 +65,33 @@ declare const fs: {
   writeText(path: string, data: string): void;
   /**
    * Read bytes during managed module evaluation. Outside it, this throws
-   * `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. At most four reads are
-   * outstanding and two can run on workers. There is no caller cancellation
-   * API; teardown cancels cooperatively and may wait for an OS call.
+   * `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. At most four filesystem
+   * operations are outstanding and two can run on workers. There is no caller
+   * cancellation API; teardown cancels cooperatively and may wait for an OS
+   * call.
    */
   readFile(path: string): Promise<Uint8Array>;
   readFileSync(path: string): Uint8Array;
+  /**
+   * Write bytes during managed module evaluation. Outside it, this throws
+   * `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. Invalid arguments and
+   * I/O errors reject the Promise. A started write can outlive a failed turn
+   * and may truncate or complete the file after cancellation; an I/O failure
+   * can leave partial data. There is no durability or concurrent-ordering
+   * guarantee. The same outstanding-operation and worker limits as `readFile`
+   * apply. See `neo:fs.writeFile`.
+   */
   writeFile(
+    path: string,
+    data: Uint8Array,
+    options?: import("neo:fs").WriteFileOptions,
+  ): Promise<void>;
+  /**
+   * Write bytes synchronously. An I/O failure can leave partial data. There
+   * is no durability or concurrent-ordering guarantee. See
+   * `neo:fs.writeFileSync`.
+   */
+  writeFileSync(
     path: string,
     data: Uint8Array,
     options?: import("neo:fs").WriteFileOptions,

@@ -3,10 +3,10 @@
 //! The module is available only when [`crate::Permissions::filesystem`] is
 //! granted and the runtime's module allowlist admits [`crate::RuntimeModule::Fs`].
 //! Both gates are checked before the `fs` global or any native callback is
-//! constructed. Only `readFile` runs on workers; `readFileSync` and all
-//! other operations block. Nothing here starts a shell, a child process, or
-//! a network request directly. The OS may still perform network I/O for
-//! network paths and filesystems.
+//! constructed. `readFile` and `writeFile` run on workers; `readFileSync`,
+//! `writeFileSync`, and all other operations block. Nothing here starts a
+//! shell, a child process, or a network request directly. The OS may still
+//! perform network I/O for network paths and filesystems.
 //!
 //! # Authority
 //!
@@ -27,7 +27,8 @@
 //!
 //! # Files and sizes
 //!
-//! `readFile`, `readText`, `writeFile`, and `writeText` require a regular file.
+//! `readFile`, `readFileSync`, `readText`, `writeFile`, `writeFileSync`, and
+//! `writeText` require a regular file.
 //! An open may occur before a non-regular object is rejected. If the type is
 //! identified, the error is `FS_IS_DIRECTORY` or `FS_TYPE`; if the open fails
 //! first, the OS error may take precedence. Unix data opens avoid waiting for
@@ -63,9 +64,10 @@
 //!
 //! The behavior is deliberately explicit:
 //!
-//! * `stat`, `readFile`, `readText`, `writeFile`, `writeText`, `exists`, and
-//!   `readDir` follow a symlink at the final path component. `readDir` follows
-//!   a symlink to a directory and reports the entries inside it.
+//! * `stat`, `readFile`, `readFileSync`, `readText`, `writeFile`,
+//!   `writeFileSync`, `writeText`, `exists`, and `readDir` follow a symlink at
+//!   the final path component. `readDir` follows a symlink to a directory and
+//!   reports the entries inside it.
 //! * `lstat` does not follow the final component and reports `isSymlink: true`.
 //! * `readDir` does not follow entries; a symlink entry is reported with
 //!   `isSymlink: true` and `isFile`/`isDirectory` both `false`.
@@ -82,9 +84,10 @@
 //!   components; it does not add its own symlink policy.
 //!
 //! A dangling symlink is reported by `lstat` but `exists` follows the link and
-//! returns `false`, because there is no target. `writeFile` with the default
-//! `overwrite: true` follows a dangling symlink and creates its target;
-//! `overwrite: false` refuses the path if the link itself exists. Windows
+//! returns `false`, because there is no target. `writeFile` and
+//! `writeFileSync` with the default `overwrite: true` follow a dangling symlink
+//! and create its target; `overwrite: false` refuses the path if the link
+//! itself exists. Windows
 //! reparse-point and junction behavior is not verified by this build.
 //!
 //! # Listing
@@ -142,9 +145,13 @@
 //!   opens use nonblocking mode and `O_NOCTTY`. The opened descriptor is
 //!   inspected before truncation, but path-based deletion and OS/network
 //!   filesystem behavior are not race-free.
-//! * `writeFile` and `writeText` truncate before writing and are not atomic.
-//!   A failure can leave a truncated or partially written file. There is no
-//!   temporary file and no rename step.
+//! * `writeFile`, `writeFileSync`, and `writeText` truncate before writing and
+//!   are not atomic. An I/O failure can leave an empty or partially written
+//!   file. There is no temporary file, rename step, rollback, or cleanup. No
+//!   write is durable on return, and concurrent writes have no ordering
+//!   guarantee. A started asynchronous write cannot be interrupted by
+//!   teardown and may still create, truncate, or fully write the file after a
+//!   failed turn; cancellation does not roll back those side effects.
 //! * `readDir` is not an atomic snapshot. Recursive deletion can remove some
 //!   entries before an OS error stops it; there is no rollback.
 //! * `FS_LIMIT` also reports quota, storage-full, and fallible allocation
@@ -160,9 +167,9 @@
 //! symlink, junction, verbatim-path, `FILE_ATTRIBUTE_*`, and
 //! `DirectoryNotEmpty` details are operating-system dependent.
 
-mod read_async;
+mod async_ops;
 mod worker;
-pub(crate) use read_async::{ReadDriver, ReadTurn};
+pub(crate) use async_ops::{FsDriver, FsTurn};
 
 use std::{
     cell::RefCell,
@@ -196,12 +203,13 @@ pub(crate) const MAX_LIST_NAME_BYTES: usize = 1024;
 /// Largest sum of directory-entry names `readDir` returns, in UTF-8 bytes.
 pub(crate) const MAX_LIST_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
-const EXPORTS: [&str; 20] = [
+const EXPORTS: [&str; 21] = [
     "readText",
     "writeText",
     "readFile",
     "readFileSync",
     "writeFile",
+    "writeFileSync",
     "stat",
     "lstat",
     "exists",
@@ -309,7 +317,7 @@ impl Code {
             Self::Io => "filesystem operation failed",
             Self::Unsupported => "this filesystem operation or input is unsupported",
             Self::AsyncOutsideTurn => {
-                "readFile requires managed module evaluation; use readFileSync here"
+                "asynchronous filesystem operations require managed module evaluation; use a Sync form here"
             }
             Self::Cancelled => "filesystem request was cancelled after module evaluation failed",
         }
@@ -1293,7 +1301,7 @@ fn entries_outcome<'js>(
 fn build_native<'js>(
     ctx: &Ctx<'js>,
     cwd: Rc<RefCell<WorkingDirectory>>,
-    driver: ReadDriver,
+    driver: FsDriver,
 ) -> JsResult<Object<'js>> {
     let native = Object::new_proto(ctx.clone(), None)?;
 
@@ -1379,11 +1387,11 @@ fn build_native<'js>(
             },
         )?,
     )?;
-    read_async::install(ctx, &native, driver, Rc::clone(&cwd))?;
+    async_ops::install(ctx, &native, driver, Rc::clone(&cwd))?;
 
     let write_file_cwd = Rc::clone(&cwd);
     native.set(
-        "writeFile",
+        "writeFileSync",
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'js>,
@@ -1557,7 +1565,7 @@ pub(crate) fn factory<'js>(ctx: &Ctx<'js>) -> JsResult<Function<'js>> {
 pub(crate) fn install<'js>(
     ctx: &Ctx<'js>,
     state: &Rc<RefCell<FsState>>,
-    driver: ReadDriver,
+    driver: FsDriver,
 ) -> JsResult<Object<'js>> {
     let (factory, cwd) = {
         let state = state.borrow();

@@ -149,6 +149,15 @@
       return response.value;
     }
 
+    function unwrapWith(response, fail) {
+      // Async paths must not call the public FsError constructor: a script
+      // can replace its prototype before an owner-thread rejection.
+      if (response.ok !== true) {
+        throw fail(response.code);
+      }
+      return response.value;
+    }
+
     function readText(path) {
       requirePath(path);
       const snapshot = unwrap(native.snapshotPath(path));
@@ -178,7 +187,7 @@
 
     function readFile(path) {
       // Outside a managed turn there is no owner to deliver a rejection.
-      if (!native.canReadAsync()) throw makeError('FS_ASYNC_OUTSIDE_TURN');
+      if (!native.canAsync()) throw makeError('FS_ASYNC_OUTSIDE_TURN');
       try {
         return native.readFile(requirePath(path, makeError), makeError);
       } catch (error) {
@@ -186,7 +195,7 @@
       }
     }
 
-    function writeFile(path, data, options) {
+    function writeFileSync(path, data, options) {
       requirePath(path);
       // These captured getters read internal slots, not properties of data.
       // The tag getter rejects proxies and other brands without invoking them.
@@ -203,7 +212,34 @@
           overwrite = requireBoolean(opts.overwrite, 'options.overwrite');
         }
       }
-      unwrap(native.writeFile(snapshot, bytes, overwrite));
+      unwrap(native.writeFileSync(snapshot, bytes, overwrite));
+    }
+
+    function writeFile(path, data, options) {
+      // Outside a managed turn there is no owner to deliver a rejection.
+      if (!native.canAsync()) throw makeError('FS_ASYNC_OUTSIDE_TURN');
+      try {
+        requirePath(path, makeError);
+        // The tag getter rejects proxies and other brands without invoking
+        // them. A detached or out-of-bounds view rejects through copyData.
+        if (typedArrayTag(data) !== 'Uint8Array') {
+          throw new NativeTypeError('data must be a Uint8Array');
+        }
+        // Snapshot the live view and the cwd before option reflection or any
+        // filesystem I/O, matching the synchronous error ordering.
+        const bytes = unwrapWith(native.copyData(data, typedArrayBuffer(data), typedArrayByteLength(data)), makeError);
+        const snapshot = unwrapWith(native.snapshotPath(path), makeError);
+        const opts = requireOptions(options, ['overwrite']);
+        let overwrite = true;
+        if (opts !== null) {
+          if (hasOwn(opts, 'overwrite')) {
+            overwrite = requireBoolean(opts.overwrite, 'options.overwrite');
+          }
+        }
+        return native.writeFile(snapshot, bytes, overwrite, makeError);
+      } catch (error) {
+        return rejectPromise(error);
+      }
     }
 
     function stat(path) {
@@ -278,6 +314,7 @@
     defineValue(api, 'readFile', readFile);
     defineValue(api, 'readFileSync', readFileSync);
     defineValue(api, 'writeFile', writeFile);
+    defineValue(api, 'writeFileSync', writeFileSync);
     defineValue(api, 'stat', stat);
     defineValue(api, 'lstat', lstat);
     defineValue(api, 'exists', exists);
