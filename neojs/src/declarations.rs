@@ -26,7 +26,7 @@ Core declarations are always included; optional fragments are selected with
 
 Options:
   --with <NAME>          Include an optional fragment (repeatable).
-                         Available: os, os-user, schedulers, sqlite.
+                         Available: io, os, os-user, schedulers, sqlite.
   --output <PATH>        Write the composition to PATH. Use - for stdout.
   --check <PATH>         Fail if PATH differs from the composition.
   --check-cli-manifest   Verify the selection against neojs/Cargo.toml.
@@ -54,6 +54,11 @@ const CORE: Fragment = Fragment {
 };
 
 const OPTIONAL: &[Fragment] = &[
+    Fragment {
+        name: "io",
+        path: "neojs-io/types/neo-io.d.ts",
+        dependency: "neojs-io",
+    },
     Fragment {
         name: "os",
         path: "neojs-os/types/neo-os.d.ts",

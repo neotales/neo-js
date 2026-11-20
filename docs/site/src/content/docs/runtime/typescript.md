@@ -14,6 +14,7 @@ TypeScript language server. Its `tsconfig.json` loads the checked-in
 | -------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `types/neo-js.core.d.ts`                     | A core-only embedder. It omits `os` and every optional module.                           |
 | `types/neo-js.d.ts`                          | The CLI build. This generated file combines core and all four extension fragments.       |
+| `neojs-io/types/neo-io.d.ts`                 | The synchronous byte reader and writer fragment owned by `neojs-io`.                     |
 | `neojs-os/types/neo-os.d.ts`                 | The `neo:os` and `os` fragment owned by `neojs-os`.                                      |
 | `neojs-os-user/types/neo-os-user.d.ts`       | The independently selectable account and process identity fragment.                      |
 | `neojs-schedulers/types/neo-schedulers.d.ts` | The two canonical scheduler names and the deprecated `neo:scheduler` alias.              |
@@ -23,9 +24,9 @@ Choose declarations for the extensions the host links and registers, not for
 the permissions a script receives:
 
 - No extensions: use `types/neo-js.core.d.ts`.
-- A custom selection: pass `--with os`, `--with os-user`, `--with schedulers`, or `--with sqlite`
-  for each extension your host registers. For example, SQLite alone uses
-  `--with sqlite`, and OS metadata alone uses `--with os`.
+- A custom selection: pass `--with io`, `--with os`, `--with os-user`, `--with schedulers`,
+  or `--with sqlite` for each extension your host registers. For example,
+  SQLite alone uses `--with sqlite`, and OS metadata alone uses `--with os`.
 - All four, as in the CLI: use `types/neo-js.d.ts` or compose with
   `--with os --with os-user --with schedulers --with sqlite`.
 
@@ -36,7 +37,7 @@ registration and allowlist admission but no permission flag. The scheduler
 fragment declares all three scheduler names, but a runtime allowlist admits
 each exact name independently. Scheduler imports need no permission flag
 either. `neo:sqlite` needs `Permissions::sqlite`, and `neo:os/user` needs
-`Permissions::user`. Core-only declarations omit all six optional module
+`Permissions::user`. Core-only declarations omit all seven optional module
 names and the `os` global.
 
 ## Compose and check declarations offline

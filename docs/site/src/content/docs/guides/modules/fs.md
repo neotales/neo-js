@@ -9,21 +9,22 @@ admits `neo:fs`. Both gates are checked before the `fs` global or any native
 callback is built. The global `fs` object and the module expose the same
 functions and `FsError` class.
 
-| Function                          | Description                                                            |
-| --------------------------------- | ---------------------------------------------------------------------- |
-| `readText(path)`                  | Read a regular file as UTF-8 text.                                     |
-| `writeText(path, data)`           | Write text, creating or truncating the file.                           |
-| `readFile(path)`                  | Read a regular file on a worker. Returns `Promise<Uint8Array>`.        |
-| `readFileSync(path)`              | Read a regular file as a `Uint8Array`, blocking the JavaScript thread. |
-| `writeFile(path, data, options?)` | Write a `Uint8Array`; `{overwrite: false}` is create-new.              |
-| `copyFile(source, destination)`   | Stream a regular file into a new file; never overwrite.                |
-| `stat(path)`                      | Metadata, following a final symlink.                                   |
-| `lstat(path)`                     | Metadata without following a final symlink.                            |
-| `exists(path)`                    | Existence check, following a final symlink.                            |
-| `readDir(path)`                   | Non-recursive, sorted directory listing.                               |
-| `mkdir(path, options?)`           | Create a directory; `{recursive: true}` creates parents.               |
-| `remove(path, options?)`          | Remove a file, link, or directory; `{recursive: true}` removes a tree. |
-| `rename(source, destination)`     | Rename a file, directory, or symlink entry using the host OS.          |
+| Function                              | Description                                                            |
+| ------------------------------------- | ---------------------------------------------------------------------- |
+| `readText(path)`                      | Read a regular file as UTF-8 text.                                     |
+| `writeText(path, data)`               | Write text, creating or truncating the file.                           |
+| `readFile(path)`                      | Read a regular file on a worker. Returns `Promise<Uint8Array>`.        |
+| `readFileSync(path)`                  | Read a regular file as a `Uint8Array`, blocking the JavaScript thread. |
+| `writeFile(path, data, options?)`     | Write a `Uint8Array` on a worker. Returns `Promise<void>`.             |
+| `writeFileSync(path, data, options?)` | Write a `Uint8Array`, blocking the JavaScript thread.                  |
+| `copyFile(source, destination)`       | Stream a regular file into a new file; never overwrite.                |
+| `stat(path)`                          | Metadata, following a final symlink.                                   |
+| `lstat(path)`                         | Metadata without following a final symlink.                            |
+| `exists(path)`                        | Existence check, following a final symlink.                            |
+| `readDir(path)`                       | Non-recursive, sorted directory listing.                               |
+| `mkdir(path, options?)`               | Create a directory; `{recursive: true}` creates parents.               |
+| `remove(path, options?)`              | Remove a file, link, or directory; `{recursive: true}` removes a tree. |
+| `rename(source, destination)`         | Rename a file, directory, or symlink entry using the host OS.          |
 
 ```js
 import { readDir, stat } from "neo:fs";
@@ -40,54 +41,76 @@ if (entries.some((entry) => entry.name === "README.md")) {
 
 Relative paths use the runtime's working directory, not the host process's
 mutable directory. `neo:process.chdir` changes only that runtime. If the
-runtime directory is unavailable, `readFile` rejects with `FS_CWD` during a
-managed turn, and synchronous operations such as `readFileSync` throw
-`FS_CWD`. Neither falls back to the host directory. Absolute paths and `..` components
-still reach everything the host user can reach; the working directory is
-coordination, not confinement.
+runtime directory is unavailable, `readFile` and `writeFile` reject with
+`FS_CWD` during a managed turn, and synchronous operations such as
+`readFileSync` and `writeFileSync` throw `FS_CWD`. None falls back to the host
+directory. Absolute paths and `..` components still reach everything the host
+user can reach; the working directory is coordination, not confinement.
 
-## Migrate binary reads
+## Migrate binary reads and writes
 
-`readFile` now returns a Promise on both `fs` and `neo:fs`. Rename an existing
-blocking call to `readFileSync`, or use `await readFile(path)` in a module.
-All other filesystem methods remain synchronous. During managed module
-evaluation, invalid arguments and filesystem errors reject the Promise.
-`readFileSync` still throws. Outside a managed turn, `readFile` throws
-`FS_ASYNC_OUTSIDE_TURN` before any I/O. This includes calls from `NeoJs::eval`,
-`NeoJs::run`, and the CLI's automatic `neo:test` runner after the module returns.
+`readFile` returns a Promise on both `fs` and `neo:fs`; `writeFile` does too.
+Rename an existing blocking call to its `Sync` counterpart, or await the
+asynchronous form in a module. `readText`, `writeText`, and the remaining
+filesystem methods are still synchronous. During managed module evaluation,
+invalid arguments and filesystem errors reject the Promise. `readFileSync` and
+`writeFileSync` still throw. Outside a managed turn, `readFile` and
+`writeFile` throw `FS_ASYNC_OUTSIDE_TURN` before any I/O. This includes calls
+from `NeoJs::eval`, `NeoJs::run`, and the CLI's automatic `neo:test` runner
+after the module returns.
 
-Each managed turn accepts at most four outstanding reads, including
-undelivered results. At most two run on workers. Each outstanding read
-charges `MAX_READ_BYTES` plus the encoded byte length of its resolved path
-against a combined budget of `4 * (MAX_READ_BYTES + MAX_PATH_BYTES)`.
-Exceeding the count or byte budget rejects the read with `FS_LIMIT`. This
-accounts for outstanding reads, not total memory use. It does not cover
-buffers that JavaScript retains after delivery.
+```js
+import { readFile, writeFile } from "neo:fs";
 
-`readFile` captures the working directory at the call. The Promise resolves
-to a new `Uint8Array`. Concurrent reads have no guaranteed completion order.
-There is no caller cancellation API. On a failed turn with outstanding reads,
-the driver cancels queued reads and stops running reads between chunks where
-possible. Pending reads reject with `FS_CANCELLED`. An OS call already in
-progress can delay teardown. See [Managed module evaluation](/runtime/loading/#managed-module-evaluation)
-for runtime failure and quiescence rules.
+const bytes = await readFile("input.bin");
+await writeFile("output.bin", bytes);
+```
+
+Each managed turn accepts at most four outstanding reads and writes combined,
+including undelivered results. At most two run on workers. Each outstanding
+read charges `MAX_READ_BYTES` plus the encoded byte length of its resolved
+path; each write charges its copied byte length plus that path length. The
+shared budget is `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
+Exceeding the count or byte budget rejects the operation with `FS_LIMIT`.
+This accounts for outstanding worker work, not total memory use. A large
+asynchronous write can briefly hold the caller's input, the JavaScript
+snapshot, and the worker-owned copy. The budget does not cover buffers that
+JavaScript retains after delivery.
+
+Both asynchronous forms capture the working directory at the call. A read
+Promise resolves to a new `Uint8Array`; a write Promise resolves to
+`undefined` after the file operation completes. Concurrent operations have no
+guaranteed completion order. There is no caller cancellation API. On a failed
+turn with outstanding work, the driver cancels queued work and stops running
+reads between chunks where possible. Pending operations reject with
+`FS_CANCELLED`. Teardown cannot interrupt an OS call that has already started:
+a write may still create, truncate, or fully write the file after a failed
+turn or abandoned Promise, and cancellation does not roll back those side
+effects. An OS call can delay teardown. See
+[Managed module evaluation](/runtime/loading/#managed-module-evaluation) for
+runtime failure and quiescence rules.
 
 ## Files and sizes
 
-`readFile`, `readFileSync`, `readText`, `writeFile`, and `writeText` require a regular file.
+`readFile`, `readFileSync`, `readText`, `writeFile`, `writeFileSync`, and `writeText` require a regular file.
 An open may occur before a non-regular object is rejected. An identified
 directory reports `FS_IS_DIRECTORY`; other identified non-regular objects
 report `FS_TYPE`. If opening fails before the type can be identified, the
 underlying open error determines the code. `stat` and `lstat` inspect any
 path the operating system exposes.
 
-`writeFile` and `writeText` do not create parent directories. They verify the
-opened descriptor is a regular file before truncating that same descriptor;
-on Unix, opens use `O_NONBLOCK` to avoid waiting for a FIFO peer and `O_NOCTTY`
-to avoid acquiring a controlling terminal. Opening a device can still have
-other side effects, and there is no latency guarantee. Writes are
-not atomic: a failure can leave a truncated or partially written file. There
-is no temporary file, rename step, or lock.
+`writeFile`, `writeFileSync`, and `writeText` do not create parent
+directories. They verify the opened descriptor is a regular file before
+truncating that same descriptor; by default an existing file is truncated
+before the new bytes are written. On Unix, opens use `O_NONBLOCK` to avoid
+waiting for a FIFO peer and `O_NOCTTY` to avoid acquiring a controlling
+terminal. Opening a device can still have other side effects, and there is no
+latency guarantee. Writes are not atomic: an I/O failure can leave the
+destination empty or partially written. There is no temporary file, rename
+step, rollback, cleanup, or lock. No write is durable on return: success does
+not mean the data reached stable storage. Concurrent writes have no ordering
+guarantee; final contents depend on their interleaving at the OS and
+filesystem level.
 Writing follows a symlink at the final path component. A dangling symlink is
 followed and its target is created by default; `{overwrite: false}` refuses the
 path if the link itself exists.
@@ -103,8 +126,8 @@ reported by `lstat`, `size` is the host's symlink size, not the target size.
 
 The rules are explicit:
 
-- `stat`, `readFile`, `readFileSync`, `readText`, `writeFile`, `writeText`, `exists`, and
-  `readDir` follow a symlink at the final path component.
+- `stat`, `readFile`, `readFileSync`, `readText`, `writeFile`, `writeFileSync`,
+  `writeText`, `exists`, and `readDir` follow a symlink at the final path component.
 - `lstat` does not follow it and reports `isSymlink: true`.
 - `readDir` follows a symlink to a directory but does not follow entries; an
   entry that is a link is reported with `isSymlink: true`.
@@ -227,7 +250,7 @@ that guarantee or make the result of an error uncertain.
 | ---------------------- | ------: | ------------------------------------------------------- |
 | `MAX_PATH_BYTES`       |  32 KiB | Every path argument.                                    |
 | `MAX_READ_BYTES`       |  64 MiB | `readText`, `readFile`, `readFileSync`, and `copyFile`. |
-| `MAX_WRITE_BYTES`      |  64 MiB | `writeText` and `writeFile`.                            |
+| `MAX_WRITE_BYTES`      |  64 MiB | `writeText`, `writeFile`, and `writeFileSync`.          |
 | `MAX_LIST_ENTRIES`     | 100,000 | Entries returned by `readDir`.                          |
 | `MAX_LIST_NAME_BYTES`  |   1 KiB | One directory-entry name.                               |
 | `MAX_LIST_TOTAL_BYTES` |  16 MiB | Sum of all names returned by `readDir`.                 |
@@ -236,7 +259,8 @@ Reads inspect the opened descriptor and its metadata before allocating, then
 read in bounded chunks with fallible reservation. A separate one-byte probe
 detects growth past the limit. A binary write copies the `Uint8Array` view's
 current bytes (including for a resizable `ArrayBuffer`) before reflecting on
-options. `SharedArrayBuffer` views are unsupported. `writeText` checks the
+options. The asynchronous form copies that snapshot into worker-owned memory
+before dispatching it. `SharedArrayBuffer` views are unsupported. `writeText` checks the
 primitive string's code-unit length before exporting it from QuickJS as UTF-16.
 The UTF-16 export itself can allocate up to 128 MiB of string data. If QuickJS
 flattens a narrow string rope, the flattened string can use another 64 MiB
@@ -251,8 +275,9 @@ exported as constants on both the global `fs` object and the module.
 
 Filesystem failures are `FsError` values with a stable `code` and a fixed
 message that never contains the supplied path, an OS error string, or file
-contents. Argument type errors are `TypeError`, and exceptions thrown by
-option proxy traps can propagate.
+contents. Argument type errors are `TypeError` (thrown by synchronous
+operations, used to reject asynchronous ones), and exceptions thrown by
+option proxy traps can propagate or reject likewise.
 
 | Code                    | Meaning                                                                                                                                                                                                              |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -271,8 +296,8 @@ option proxy traps can propagate.
 | `FS_CWD`                | A relative operation needs an unavailable runtime working directory.                                                                                                                                                 |
 | `FS_TYPE`               | The path is not a regular file.                                                                                                                                                                                      |
 | `FS_UNSUPPORTED`        | The operation or input is unsupported, e.g. direct removal of a Windows directory symlink or writing from a `SharedArrayBuffer` view.                                                                                |
-| `FS_ASYNC_OUTSIDE_TURN` | `readFile` was called outside managed module evaluation.                                                                                                                                                             |
-| `FS_CANCELLED`          | An outstanding `readFile` was cancelled after module evaluation failed.                                                                                                                                              |
+| `FS_ASYNC_OUTSIDE_TURN` | `readFile` or `writeFile` was called outside managed module evaluation.                                                                                                                                              |
+| `FS_CANCELLED`          | An outstanding `readFile` or `writeFile` was cancelled after module evaluation failed.                                                                                                                               |
 | `FS_IO`                 | Any other filesystem failure.                                                                                                                                                                                        |
 
 ## Authority and races

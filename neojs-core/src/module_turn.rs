@@ -16,7 +16,7 @@ use rquickjs::{
     qjs,
 };
 
-use crate::fs::ReadTurn;
+use crate::fs::FsTurn;
 
 #[cfg(test)]
 mod tests;
@@ -268,8 +268,8 @@ impl ModuleTurns {
     }
 
     /// A managed module never executes pending work from `run`, `eval`, or
-    /// the out-of-turn test runner. Don't admit reads or declare an entry if
-    /// those calls left work that could start later.
+    /// the out-of-turn test runner. Don't admit filesystem work or declare
+    /// an entry if those calls left work that could start later.
     pub(crate) fn require_idle(&self, context: &Context, runtime: &Runtime) -> Result<(), String> {
         self.ensure_usable()?;
         let (pending, overflow) = self.pending_state(context);
@@ -323,7 +323,7 @@ impl ModuleTurn<'_> {
         &self,
         context: &Context,
         runtime: &Runtime,
-        reads: &ReadTurn<'_>,
+        ops: &FsTurn<'_>,
         root: Persistent<Promise<'static>>,
     ) -> Result<(), String> {
         let mut root = Some(root);
@@ -344,7 +344,7 @@ impl ModuleTurn<'_> {
                     root = None;
                 }
             }
-            let completed = reads.receive(Some(Duration::ZERO));
+            let completed = ops.receive(Some(Duration::ZERO));
             let delivered = completed.is_some();
             if let Some(completed) = completed {
                 context.with(|ctx| completed.deliver(&ctx).map_err(|e| js_error(&ctx, e)))?;
@@ -355,8 +355,8 @@ impl ModuleTurn<'_> {
             if executed || delivered {
                 continue;
             }
-            if reads.has_pending() {
-                if let Some(completed) = reads.receive(None) {
+            if ops.has_pending() {
+                if let Some(completed) = ops.receive(None) {
                     context.with(|ctx| completed.deliver(&ctx).map_err(|e| js_error(&ctx, e)))?;
                 }
                 continue;
@@ -398,20 +398,21 @@ impl ModuleTurn<'_> {
         Err("NEO_MODULE_LIMIT: module turn exceeded its job and completion budget".into())
     }
 
-    /// Pending reads and runnable jobs cannot escape a failed turn. Even a
-    /// job that has not dispatched a read yet could do so if run next time.
+    /// Pending filesystem operations and runnable jobs cannot escape a failed
+    /// turn. Even a job that has not dispatched work yet could do so if run
+    /// next time.
     pub(crate) fn finish(
         mut self,
         context: &Context,
         runtime: &Runtime,
-        reads: &ReadTurn<'_>,
+        ops: &FsTurn<'_>,
         failed: bool,
     ) {
         if failed {
             let (pending, overflow) = self.turns.pending_state(context);
-            if reads.has_pending() || runtime.is_job_pending() || pending || overflow {
+            if ops.has_pending() || runtime.is_job_pending() || pending || overflow {
                 self.turns.abandoned.set(true);
-                let cancelled = reads.cancel();
+                let cancelled = ops.cancel();
                 context.with(|ctx| cancelled.reject(&ctx));
             }
         }
@@ -423,7 +424,7 @@ impl Drop for ModuleTurn<'_> {
     fn drop(&mut self) {
         if !self.finished {
             // Rust unwinding is not a JS exception. Do not call QuickJS,
-            // execute jobs or settle promises; ReadTurn drops and joins.
+            // execute jobs or settle promises; FsTurn drops and joins.
             self.turns.abandoned.set(true);
         }
         self.turns.rejections.borrow_mut().take();

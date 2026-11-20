@@ -14,7 +14,8 @@ declare const env: {
 /**
  * The `neo:fs` API. Available only with `--allow-fs` and when the runtime's
  * module allowlist admits `neo:fs`. Relative paths use the runtime's working
- * directory, not the host process's. Only `readFile` is asynchronous.
+ * directory, not the host process's. `readFile` and `writeFile` are
+ * asynchronous; their `Sync` counterparts and every other operation block.
  *
  * This is not a sandbox: a script with this object has the host user's
  * filesystem authority. Reads and writes are bounded; see the `neo:fs`
@@ -26,13 +27,33 @@ declare const fs: {
   writeText(path: string, data: string): void;
   /**
    * Read bytes during managed module evaluation. Outside it, this throws
-   * `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. At most four reads are
-   * outstanding and two can run on workers. There is no caller cancellation
-   * API; teardown cancels cooperatively and may wait for an OS call.
+   * `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. At most four filesystem
+   * operations are outstanding and two can run on workers. There is no caller
+   * cancellation API; teardown cancels cooperatively and may wait for an OS
+   * call.
    */
   readFile(path: string): Promise<Uint8Array>;
   readFileSync(path: string): Uint8Array;
+  /**
+   * Write bytes during managed module evaluation. Outside it, this throws
+   * `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. Invalid arguments and
+   * I/O errors reject the Promise. A started write can outlive a failed turn
+   * and may truncate or complete the file after cancellation; an I/O failure
+   * can leave partial data. There is no durability or concurrent-ordering
+   * guarantee. The same outstanding-operation and worker limits as `readFile`
+   * apply. See `neo:fs.writeFile`.
+   */
   writeFile(
+    path: string,
+    data: Uint8Array,
+    options?: import("neo:fs").WriteFileOptions,
+  ): Promise<void>;
+  /**
+   * Write bytes synchronously. An I/O failure can leave partial data. There
+   * is no durability or concurrent-ordering guarantee. See
+   * `neo:fs.writeFileSync`.
+   */
+  writeFileSync(
     path: string,
     data: Uint8Array,
     options?: import("neo:fs").WriteFileOptions,
@@ -73,17 +94,19 @@ declare module "neo:env" {
  * Bounded filesystem access. Requires `--allow-fs` and a runtime
  * allowlist that admits `neo:fs`.
  *
- * During managed module evaluation, `readFile` reads on a worker and returns
- * a `Promise<Uint8Array>`. `readFileSync` and the other operations block the
- * JavaScript thread. Relative paths resolve against the runtime's working
- * directory, with no fallback to the host directory. If that directory is
- * unavailable, `readFile` rejects with `FS_CWD` during a managed turn and
- * synchronous operations throw `FS_CWD`. Outside a managed turn, `readFile`
- * instead throws `FS_ASYNC_OUTSIDE_TURN` before I/O. Absolute paths and `..`
- * components still reach everything the host user can reach. This is not a
- * sandbox.
+ * During managed module evaluation, `readFile` reads and `writeFile` writes
+ * on a worker. `readFile` returns a `Promise<Uint8Array>`; `writeFile`
+ * returns a `Promise<void>`. `readFileSync`, `writeFileSync`, and the other
+ * operations block the JavaScript thread. Relative paths resolve against the
+ * runtime's working directory, with no fallback to the host directory. If
+ * that directory is unavailable, the asynchronous forms reject with `FS_CWD`
+ * during a managed turn and synchronous operations throw `FS_CWD`. Outside a
+ * managed turn, both asynchronous forms instead throw
+ * `FS_ASYNC_OUTSIDE_TURN` before I/O. Absolute paths and `..` components still
+ * reach everything the host user can reach. This is not a sandbox.
  *
- * `readFile`, `readFileSync`, `readText`, `writeFile`, and `writeText` require a regular file.
+ * `readFile`, `readFileSync`, `readText`, `writeFile`, `writeFileSync`, and
+ * `writeText` require a regular file.
  * An open may occur before a non-regular object is rejected. If the type is
  * identified, the error is `FS_IS_DIRECTORY` or `FS_TYPE`; an open failure
  * can take precedence. Device-open side effects and latency are not bounded.
@@ -93,8 +116,8 @@ declare module "neo:env" {
  * and fallible allocation failures; this cannot catch every failure inside
  * QuickJS or the process allocator.
  *
- * `stat`, `readFile`, `readFileSync`, `readText`, `writeFile`, `writeText`, `exists`, and
- * `readDir` follow a symlink at the final path component. `lstat` does not.
+ * `stat`, `readFile`, `readFileSync`, `readText`, `writeFile`, `writeFileSync`,
+ * `writeText`, `exists`, and `readDir` follow a symlink at the final path component. `lstat` does not.
  * `readDir` does not follow entries and reports a symlink entry with
  * `isSymlink: true`. `remove` never follows a symlink at the target, and
  * recursive deletion does not follow symlinks inside the tree.
@@ -106,16 +129,20 @@ declare module "neo:env" {
  * Options accept only the documented own, enumerable data properties.
  * Accessors, non-enumerable properties, and unknown keys throw `TypeError`;
  * inherited properties are ignored. A Proxy can run traps during reflective
- * validation. The runtime-local absolute path is snapshotted before those
- * traps run, so a trap that changes `neo:process.chdir()` cannot redirect that
- * call. A trap may still reenter the API or run arbitrary script code.
+ * validation. The runtime-local absolute path and, for binary writes, the
+ * input bytes are snapshotted before those traps run, so a trap that changes
+ * `neo:process.chdir()` or the input buffer cannot redirect that call. A trap
+ * may still reenter the API or run arbitrary script code.
  *
  * `readDir` is not an atomic snapshot, and recursive deletion can be partial
  * if an OS error interrupts traversal. `exists` and `stat` are
  * time-of-check/time-of-use snapshots. Do not use them
- * for access-control or race-free decisions. `writeFile` and `writeText`
- * truncate before writing and are not atomic; a failure can leave a partial
- * file. No file locking is performed. The opened descriptor is verified
+ * for access-control or race-free decisions. `writeFile`, `writeFileSync`,
+ * and `writeText` truncate before writing and are not atomic; a failure can
+ * leave a partial file. No write is durable on return, and concurrent writes
+ * have no ordering guarantee. A started asynchronous write may complete its
+ * side effects after a failed turn; cancellation does not roll back. No file
+ * locking is performed. The opened descriptor is verified
  * before truncation. Unix data opens (including copy) use `O_NONBLOCK` to
  * avoid waiting for a FIFO peer and `O_NOCTTY` to avoid acquiring a controlling
  * terminal. Other device-open side effects remain possible, and device and
@@ -123,8 +150,9 @@ declare module "neo:env" {
  *
  * Filesystem failures are `FsError` values with a stable `code` and fixed
  * messages that never contain the supplied path or an OS error string.
- * An argument of the wrong type throws `TypeError`; exceptions from option
- * proxy traps can propagate.
+ * An argument of the wrong type throws `TypeError` from a synchronous
+ * operation and rejects the asynchronous Promise; exceptions from option
+ * proxy traps can propagate or reject likewise.
  */
 declare module "neo:fs" {
   /**
@@ -192,11 +220,11 @@ declare module "neo:fs" {
     readonly isSymlink: boolean;
   }
 
-  /** Options for `writeFile`. `writeText` has no options and always overwrites. */
+  /** Options for `writeFile` and `writeFileSync`. `writeText` takes no options. */
   export interface WriteFileOptions {
     /**
      * `true` (the default) creates or truncates the file. `false` uses
-     * create-new semantics and throws `FS_ALREADY_EXISTS` if the path already
+     * create-new semantics and reports `FS_ALREADY_EXISTS` if the path already
      * exists, including a dangling symlink at the path. The decision is made
      * by the open call, not a prior `exists` check.
      */
@@ -265,12 +293,12 @@ declare module "neo:fs" {
    * at the call. Only available during managed module evaluation; otherwise
    * throws `FS_ASYNC_OUTSIDE_TURN` before I/O. In a managed turn, invalid
    * arguments and I/O errors reject the Promise. A module turn accepts up
-   * to four outstanding reads (including undelivered results) and runs up
-   * to two on workers. Each outstanding read charges `MAX_READ_BYTES` plus
-   * the encoded byte length of its resolved path against a turn budget of
-   * `4 * (MAX_READ_BYTES + MAX_PATH_BYTES)`. Excess work rejects with
-   * `FS_LIMIT`. This budget does not cover buffers JavaScript retains after
-   * delivery. There is no caller cancellation API. Turn teardown cancels
+   * to four outstanding reads and writes (including undelivered results) and
+   * runs up to two on workers. Each outstanding read charges `MAX_READ_BYTES`
+   * plus the encoded byte length of its resolved path against a shared turn
+   * budget of `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
+   * Excess work rejects with `FS_LIMIT`. This budget does not cover buffers
+   * JavaScript retains after delivery. There is no caller cancellation API. Turn teardown cancels
    * cooperatively and may wait for an OS call to return. Use `readFileSync`
    * to block.
    */
@@ -307,16 +335,65 @@ declare module "neo:fs" {
   export function copyFile(source: string, destination: string): void;
 
   /**
-   * Write bytes to a regular file.
+   * Write bytes to a regular file on a worker, using the runtime directory
+   * captured at the call. Only available during managed module evaluation;
+   * otherwise throws `FS_ASYNC_OUTSIDE_TURN` before I/O.
    *
    * The input must be a `Uint8Array`; a `DataView`, another typed array, or a
    * `Proxy` throws `TypeError`. A detached buffer throws `FS_DETACHED`, an
    * out-of-bounds view throws `FS_OUT_OF_BOUNDS`, and a `SharedArrayBuffer`
-   * view throws `FS_UNSUPPORTED`. The view's live bytes are copied before
-   * reflecting on options. By default the file is created or truncated.
-   * Parent directories are not created, and the write is not atomic.
+   * view throws `FS_UNSUPPORTED`. The view's live bytes and the resolved path
+   * are copied before reflecting on options. In a managed turn, invalid
+   * arguments and I/O errors reject the Promise. By default the file is
+   * created or truncated before writing. Parent directories are not created,
+   * and the write is not atomic.
+   *
+   * If the turn fails, teardown requests cancellation, but an OS call that
+   * has already started cannot be interrupted. A started write may therefore
+   * still create, truncate, or fully write the file after the turn has failed
+   * or its Promise has been abandoned; those side effects are not rolled
+   * back. An I/O failure can leave the destination empty or partially
+   * written; there is no temporary file, rename, rollback, or cleanup. There
+   * is no durability guarantee: a fulfilled Promise does not mean the data
+   * reached stable storage. Concurrent writes have no ordering guarantee;
+   * final contents depend on their interleaving at the OS and filesystem
+   * level.
+   *
+   * A module turn accepts up to four outstanding reads and writes (including
+   * undelivered results) and runs up to two on workers. Each write charges its
+   * copied byte length plus the encoded byte length of its resolved path
+   * against a shared turn budget of
+   * `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`; reads
+   * charge `MAX_READ_BYTES` instead of their actual length. Excess work
+   * rejects with `FS_LIMIT`. The asynchronous form copies the JavaScript
+   * snapshot into worker-owned memory, so a large write can briefly hold the
+   * caller's input, the snapshot, and the worker copy. This budget does not
+   * cover buffers JavaScript retains after delivery. There is
+   * no caller cancellation API. Turn teardown cancels cooperatively and may
+   * wait for an OS call to return. Use `writeFileSync` to block.
    */
   export function writeFile(
+    path: string,
+    data: Uint8Array,
+    options?: WriteFileOptions,
+  ): Promise<void>;
+
+  /**
+   * Write bytes to a regular file, blocking the JavaScript thread.
+   *
+   * The input, view, and option validation and the error precedence match
+   * `writeFile`, except that failures throw instead of rejecting. The view's
+   * live bytes and the resolved path are copied before reflecting on options.
+   * By default the file is created or truncated before writing. Parent
+   * directories are not created, and the write is not atomic.
+   *
+   * An I/O failure can leave the destination empty or partially written;
+   * there is no temporary file, rename, rollback, or cleanup. There is no
+   * durability guarantee: returning does not mean the data reached stable
+   * storage. Concurrent writes have no ordering guarantee; final contents
+   * depend on their interleaving at the OS and filesystem level.
+   */
+  export function writeFileSync(
     path: string,
     data: Uint8Array,
     options?: WriteFileOptions,
