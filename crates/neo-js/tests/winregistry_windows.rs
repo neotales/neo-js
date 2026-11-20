@@ -11,7 +11,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions};
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS};
 use windows_sys::Win32::Storage::FileSystem::DELETE;
 use windows_sys::Win32::System::Registry::{

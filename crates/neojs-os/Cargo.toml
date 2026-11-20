@@ -1,0 +1,23 @@
+[package]
+name = "neojs-os"
+description = "Optional read-only operating-system metadata module for neojs-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+neojs-core = { path = "../neo-js" }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,17 @@
+[package]
+name = "neojs-sqlite"
+description = "Optional in-memory SQLite module for neojs-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+neojs-core = { path = "../neo-js" }
+# Bundled SQLite with authorizer, progress and runtime limits. Do not enable
+# rusqlite's extension loading or virtual-table interfaces.
+rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled", "hooks", "limits"] }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"

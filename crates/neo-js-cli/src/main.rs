@@ -5,10 +5,14 @@ use std::{
 };
 
 use clap::Parser;
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions, RuntimeOptions};
 
 #[derive(Parser)]
-#[command(version, about = "Run JavaScript with the NeoTales QuickJS host")]
+#[command(
+    name = "neo-js",
+    version,
+    about = "Run JavaScript with the NeoTales QuickJS host"
+)]
 struct Args {
     /// Grant the host user's filesystem authority, including deletion, renaming, and replacement.
     #[arg(long)]
@@ -19,9 +23,9 @@ struct Args {
     /// Permit scripts to read the host standard input through neo:process.
     /// This is the narrow alternative to --allow-run; --allow-run also grants
     /// stdin because it already permits arbitrary child programs. Either flag
-    /// also makes neo:process importable for its stdout/stderr writers and its
-    /// runtime-local working directory. Reads are synchronous and can block
-    /// until input or end of file.
+    /// also makes neo:process importable for its stdout/stderr writers,
+    /// runtime-local working directory, and host process elevation status.
+    /// Reads are synchronous and can block until input or end of file.
     #[arg(long)]
     allow_stdio: bool,
     /// Permit synchronous program execution with the current user's privileges.
@@ -35,6 +39,9 @@ struct Args {
     /// downloading a file also requires --allow-fs.
     #[arg(long)]
     allow_net: bool,
+    /// Permit synchronous in-memory databases through neo:sqlite.
+    #[arg(long)]
+    allow_sqlite: bool,
     /// Print embedded third-party source notices and exit. The text covers
     /// adapted source code, not every dependency. No script is read and no
     /// permission is required.
@@ -79,7 +86,7 @@ fn main() -> ExitCode {
 fn print_third_party_notices() -> ExitCode {
     let mut stdout = std::io::stdout().lock();
     match stdout
-        .write_all(neo_js::third_party_notices().as_bytes())
+        .write_all(neojs_core::third_party_notices().as_bytes())
         .and_then(|()| stdout.flush())
     {
         Ok(()) => ExitCode::SUCCESS,
@@ -92,22 +99,34 @@ fn print_third_party_notices() -> ExitCode {
 
 /// Run the entry module, then any tests it registered with `neo:test`.
 ///
-/// Tests run even when module evaluation failed, so a test registered before
-/// an uncaught error is still executed and reported. Every error is collected;
-/// one failure does not hide another.
+/// Tests registered before an ordinary module error still run. An abandoned
+/// runtime refuses to execute them and reports `NEO_MODULE_ABORTED` alongside
+/// the module error, rather than running code with unfinished work.
 fn execute(requested_script: &Path, args: &Args) -> Result<(), Vec<String>> {
     let script =
         std::fs::canonicalize(requested_script).map_err(|error| vec![error.to_string()])?;
     let source = std::fs::read_to_string(&script).map_err(|error| vec![error.to_string()])?;
-    let js = NeoJs::new(Permissions {
+    let permissions = Permissions {
         filesystem: args.allow_fs,
         environment: args.allow_env,
         stdio: args.allow_stdio,
         process: args.allow_run,
         registry: args.allow_registry,
         network: args.allow_net,
-    })
-    .map_err(|error| vec![error.to_string()])?;
+        sqlite: args.allow_sqlite,
+    };
+    // Compose the optional crates explicitly. Core links none of them: this
+    // registration only makes the exact `neo:os`, `neo:sqlite`, and scheduler
+    // names available, and the permission above still gates every SQLite
+    // import. `neo:os` needs no permission flag and installs the `os` global
+    // exactly when the runtime admits the module. The scheduler generators
+    // need no permission flag and install no global.
+    let options = neojs_os::with_os(RuntimeOptions::new())
+        .and_then(neojs_sqlite::with_sqlite)
+        .and_then(neojs_schedulers::with_schedulers)
+        .map_err(|error| vec![error.to_string()])?;
+    let js =
+        NeoJs::new_with_options(permissions, options).map_err(|error| vec![error.to_string()])?;
     let identity = script
         .to_str()
         .ok_or_else(|| vec!["canonical script path is not valid UTF-8".to_owned()])?;

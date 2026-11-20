@@ -31,7 +31,7 @@ fn prints_notices_without_a_script_or_permission() {
     assert!(output.stderr.is_empty(), "{}", stderr(&output));
 
     let text = String::from_utf8(output.stdout).expect("notice output is UTF-8");
-    assert_eq!(text.as_str(), neo_js::third_party_notices());
+    assert_eq!(text.as_str(), neojs_core::third_party_notices());
 
     for expected in [
         "Third-party notices for `neo:path`",

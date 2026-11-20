@@ -13,6 +13,7 @@
 
   const defineProperty = Object.defineProperty;
   const createObject = Object.create;
+  const setPrototypeOf = Object.setPrototypeOf;
   const ownKeys = Reflect.ownKeys;
   const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
   const bindCall = Function.prototype.bind.bind(Function.prototype.call);
@@ -26,6 +27,7 @@
   const charCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
   const NativeError = Error;
   const NativeTypeError = TypeError;
+  const rejectPromise = Promise.reject.bind(Promise);
   const lengthOf = (value) => value.length;
 
   function defineValue(target, key, value) {
@@ -42,6 +44,24 @@
     const limits = config.limits;
     const messages = config.messages;
 
+    function brandError(error, code) {
+      defineProperty(error, 'name', {
+        __proto__: null,
+        value: 'FsError',
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+      defineProperty(error, 'code', {
+        __proto__: null,
+        value: code,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+      return error;
+    }
+
     class FsError extends NativeError {
       constructor(code, message) {
         super(
@@ -49,22 +69,10 @@
             ? message
             : (messages[code] || 'filesystem operation failed'),
         );
-        defineProperty(this, 'name', {
-          __proto__: null,
-          value: 'FsError',
-          writable: true,
-          enumerable: false,
-          configurable: true,
-        });
-        defineProperty(this, 'code', {
-          __proto__: null,
-          value: code,
-          writable: true,
-          enumerable: true,
-          configurable: true,
-        });
+        brandError(this, code);
       }
     }
+    const fsErrorPrototype = FsError.prototype;
 
     function requireString(value, name) {
       if (typeof value !== 'string') {
@@ -73,11 +81,11 @@
       return value;
     }
 
-    function requirePath(value) {
+    function requirePath(value, fail = (code) => new FsError(code)) {
       requireString(value, 'path');
       const maximum = limits.MAX_PATH_BYTES;
-      if (lengthOf(value) > maximum) throw new FsError('FS_LIMIT');
-      if (!isWellFormed(value)) throw new FsError('FS_ENCODING');
+      if (lengthOf(value) > maximum) throw fail('FS_LIMIT');
+      if (!isWellFormed(value)) throw fail('FS_ENCODING');
       let bytes = 0;
       for (let index = 0; index < lengthOf(value); index++) {
         const unit = charCodeAt(value, index);
@@ -93,9 +101,9 @@
         } else {
           bytes += 3;
         }
-        if (bytes > maximum) throw new FsError('FS_LIMIT');
+        if (bytes > maximum) throw fail('FS_LIMIT');
       }
-      if (lengthOf(value) === 0) throw new FsError('FS_PATH');
+      if (lengthOf(value) === 0) throw fail('FS_PATH');
       return value;
     }
 
@@ -154,10 +162,28 @@
       unwrap(native.writeText(path, data));
     }
 
-    function readFile(path) {
+    function readFileSync(path) {
       requirePath(path);
       const snapshot = unwrap(native.snapshotPath(path));
-      return unwrap(native.readFile(snapshot));
+      return unwrap(native.readFileSync(snapshot));
+    }
+
+    function makeError(code) {
+      // The public class's constructor prototype can be changed by script.
+      // Worker settlement must not run a replacement `super` constructor.
+      const error = new NativeError(messages[code]);
+      setPrototypeOf(error, fsErrorPrototype);
+      return brandError(error, code);
+    }
+
+    function readFile(path) {
+      // Outside a managed turn there is no owner to deliver a rejection.
+      if (!native.canReadAsync()) throw makeError('FS_ASYNC_OUTSIDE_TURN');
+      try {
+        return native.readFile(requirePath(path, makeError), makeError);
+      } catch (error) {
+        return rejectPromise(error);
+      }
     }
 
     function writeFile(path, data, options) {
@@ -250,6 +276,7 @@
     defineValue(api, 'readText', readText);
     defineValue(api, 'writeText', writeText);
     defineValue(api, 'readFile', readFile);
+    defineValue(api, 'readFileSync', readFileSync);
     defineValue(api, 'writeFile', writeFile);
     defineValue(api, 'stat', stat);
     defineValue(api, 'lstat', lstat);

@@ -4,7 +4,7 @@
 //! assert privacy, object safety, ordering, and error behaviour through the real
 //! module loader.
 
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions};
 
 #[test]
 fn inherited_descriptor_hooks_cannot_observe_parsed_values() {

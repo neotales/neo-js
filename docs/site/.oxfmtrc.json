@@ -1,0 +1,4 @@
+{
+	"useTabs": true,
+	"ignorePatterns": ["pnpm-lock.yaml", "src/content/docs/api/**"]
+}

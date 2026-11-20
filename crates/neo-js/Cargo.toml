@@ -1,5 +1,5 @@
 [package]
-name = "neo-js"
+name = "neojs-core"
 description = "Configurable QuickJS runtime for NeoTales automation"
 version.workspace = true
 edition.workspace = true
