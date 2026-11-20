@@ -5,7 +5,7 @@
 //! static, dynamic, and repeated imports, and disabled host modules cannot be
 //! reached through the globals or native callbacks that only they use.
 
-use neo_js::{ModuleAllowlist, NeoJs, Permissions, RuntimeModule, RuntimeOptions};
+use neojs_core::{ModuleAllowlist, NeoJs, Permissions, RuntimeModule, RuntimeOptions};
 
 /// Every permission, so a test can separate "allowlisted" from "permitted".
 fn everything() -> Permissions {
@@ -16,6 +16,7 @@ fn everything() -> Permissions {
         process: true,
         registry: true,
         network: true,
+        sqlite: true,
         user: true,
     }
 }
@@ -32,7 +33,8 @@ fn import_error(js: &NeoJs, entry: &str, module: &str) -> String {
 
 #[test]
 fn default_runtime_keeps_the_historical_behavior() {
-    // No allowlist: every module is importable once its permission is granted.
+    // No allowlist: every built-in module is importable once its permission is
+    // granted. Optional extensions are owned and tested by their own crates.
     let js = NeoJs::new(everything()).unwrap();
     js.run_module(
         "default-all.js",
@@ -47,13 +49,8 @@ fn default_runtime_keeps_the_historical_behavior() {
          import 'neo:fetch';
          import 'neo:fs';
          import 'neo:hash';
-         import 'neo:os';
-         import 'neo:os/user';
-         import 'neo:os/schedulers/systemd';
-         import 'neo:os/schedulers/windows';
          import 'neo:path';
          import 'neo:process';
-         import 'neo:scheduler';
          import 'neo:semver';
          import 'neo:string-builder';
          import 'neo:test';
@@ -68,7 +65,7 @@ fn default_runtime_keeps_the_historical_behavior() {
              typeof env + ',' + typeof os + ',' + typeof __neoExec"
         )
         .unwrap(),
-        "function,undefined,object,object,object,function"
+        "function,undefined,object,object,undefined,function"
     );
 }
 
@@ -84,81 +81,6 @@ fn explicit_allowlist_of_every_module_also_admits_every_module() {
         )
         .unwrap();
     }
-}
-
-#[test]
-fn os_user_needs_both_gates_and_never_installs_a_global() {
-    let user_only = Permissions {
-        user: true,
-        ..Permissions::default()
-    };
-    let denied_module = runtime(user_only, &[RuntimeModule::Os]);
-    assert!(import_error(&denied_module, "deny-user-list.js", "neo:os/user").contains("allowlist"));
-    let denied_permission = runtime(
-        Permissions {
-            user: false,
-            ..everything()
-        },
-        &[RuntimeModule::OsUser],
-    );
-    let error = import_error(&denied_permission, "deny-user-permission.js", "neo:os/user");
-    assert!(error.contains("neo:os/user") && !error.contains("allowlist"));
-    for (idx, js) in [&denied_module, &denied_permission].into_iter().enumerate() {
-        js.run_module(
-            &format!("deny-user-dynamic-{idx}.js"),
-            "let available = true;
-             try { await import('neo:os/user'); } catch { available = false; }
-             if (available) throw Error('unexpected identity authority');",
-        )
-        .unwrap();
-    }
-
-    // Inspect only the export surface, never the test runner's identity.
-    let allowed = runtime(user_only, &[RuntimeModule::OsUser]);
-    let before = allowed
-        .eval("JSON.stringify(Object.getOwnPropertyNames(globalThis).sort())")
-        .unwrap();
-    allowed
-        .run_module(
-            "allow-user.js",
-            "import * as api from 'neo:os/user';
-             if (Object.keys(api).sort().join() !==
-                 'accountGroupIdsSync,currentUserSync,homeDirSync,processIdsSync') {
-                 throw Error('unexpected identity exports');
-             }
-             if (Object.values(api).some(fn => typeof fn !== 'function')) {
-                 throw Error('identity exports must be functions');
-             }",
-        )
-        .unwrap();
-    assert_eq!(
-        before,
-        allowed
-            .eval("JSON.stringify(Object.getOwnPropertyNames(globalThis).sort())")
-            .unwrap()
-    );
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-#[test]
-fn os_user_operations_fail_explicitly_on_unsupported_hosts() {
-    let js = NeoJs::new(Permissions {
-        user: true,
-        ..Permissions::default()
-    })
-    .unwrap();
-    js.run_module(
-        "unsupported-user.js",
-        "import * as api from 'neo:os/user';
-         for (const operation of Object.values(api)) {
-             let unsupported = false;
-             try { operation(); } catch (error) {
-                 unsupported = error instanceof Error && error.code === 'USER_UNSUPPORTED';
-             }
-             if (!unsupported) throw Error('operation did not report unsupported');
-         }",
-    )
-    .unwrap();
 }
 
 #[test]
@@ -185,89 +107,6 @@ fn empty_allowlist_denies_every_module_statically_and_dynamically() {
             .unwrap();
     }
     assert_eq!(js.run_pending_tests().unwrap(), None);
-}
-
-#[test]
-fn scheduler_specifiers_are_allowlisted_independently_without_permissions() {
-    let surfaces = [
-        (
-            RuntimeModule::SchedulerSystemd,
-            "neo:os/schedulers/systemd",
-            "MAX_SYSTEMD_LINE_BYTES,SchedulerError,systemdService,systemdTimer,systemdUnits",
-        ),
-        (
-            RuntimeModule::SchedulerWindows,
-            "neo:os/schedulers/windows",
-            "MAX_WINDOWS_COMMAND_LINE,SchedulerError,WINDOWS_XML_ENCODING,windowsTask",
-        ),
-        (
-            RuntimeModule::Scheduler,
-            "neo:scheduler",
-            "MAX_SYSTEMD_LINE_BYTES,MAX_WINDOWS_COMMAND_LINE,SchedulerError,\
-             WINDOWS_XML_ENCODING,systemdService,systemdTimer,systemdUnits,windowsTask",
-        ),
-    ];
-    for (allowed, name, exports) in surfaces {
-        let options = RuntimeOptions::new().module_names([name]).unwrap();
-        assert!(options.is_module_allowed(allowed));
-        assert!(!options.is_module_allowed(RuntimeModule::Os));
-        let js = NeoJs::new_with_options(Permissions::default(), options.clone()).unwrap();
-        js.run_module(
-            "scheduler-allowed.js",
-            &format!(
-                "import * as staticModule from '{name}';
-                 const dynamicModule = await import('{name}');
-                 if (staticModule !== dynamicModule || Object.keys(dynamicModule).sort().join(',') !== '{exports}')
-                   throw Error('wrong scheduler exports');"
-            ),
-        )
-        .unwrap();
-        for (index, (denied, denied_name, _)) in surfaces.into_iter().enumerate() {
-            if allowed == denied {
-                continue;
-            }
-            assert!(!options.is_module_allowed(denied));
-            let error = import_error(&js, &format!("scheduler-denied-{index}.js"), denied_name);
-            assert!(error.contains("allowlist"), "{error}");
-            js.run_module(
-                &format!("scheduler-dynamic-denied-{index}.js"),
-                &format!(
-                    "let error;
-                     try {{ await import('{denied_name}'); }} catch (err) {{ error = err; }}
-                     if (!String(error).includes('allowlist')) throw Error('wrong import result');"
-                ),
-            )
-            .unwrap();
-        }
-    }
-}
-
-#[test]
-fn scheduler_names_do_not_resolve_parent_paths_or_variations() {
-    let invalid = [
-        "neo:os/schedulers",
-        "neo:os/schedulers/Windows",
-        "neo:os/schedulers/systemd.js",
-        "neo:os/schedulers/windows/",
-        "neo:os/schedulers/../schedulers/systemd",
-        "neo:scheduler/windows",
-    ];
-    let error = ModuleAllowlist::from_names(invalid).unwrap_err();
-    assert_eq!(error.names(), invalid);
-    let js = NeoJs::new(everything()).unwrap();
-    for (index, name) in invalid.into_iter().enumerate() {
-        let error = import_error(&js, &format!("bad-scheduler-{index}.js"), name);
-        assert!(error.contains(name), "{error}");
-    }
-    js.run_module(
-        "bad-scheduler-dynamic.js",
-        "for (const name of ['neo:os/schedulers', 'neo:os/schedulers/Windows']) {
-           let error;
-           try { await import(name); } catch (err) { error = err; }
-           if (!String(error).includes(name)) throw Error('wrong import result');
-         }",
-    )
-    .unwrap();
 }
 
 #[test]
@@ -424,7 +263,7 @@ fn hash_file_is_part_of_hash_not_fs() {
         .run_module(
             "fs-only.js",
             "import {readText} from 'neo:fs';
-             if (!readText('Cargo.toml').includes('neo-js')) throw Error('fs');
+             if (!readText('Cargo.toml').includes('neojs-core')) throw Error('fs');
              if (typeof __neoHashFile !== 'undefined') throw Error('hash callback leaked');",
         )
         .unwrap();
@@ -606,25 +445,18 @@ fn fetch_needs_network_and_download_still_needs_filesystem() {
 }
 
 #[test]
-fn os_and_semver_are_withdrawn_with_their_modules() {
+fn semver_is_withdrawn_with_its_module() {
     let denied = runtime(Permissions::default(), &[RuntimeModule::Path]);
-    assert_eq!(denied.eval("typeof os").unwrap(), "undefined");
     assert_eq!(denied.eval("typeof __neoSemverValid").unwrap(), "undefined");
+    // Core does not provide `neo:os` or install its global. The optional
+    // `neojs-os` crate owns both and is tested there.
+    assert_eq!(denied.eval("typeof os").unwrap(), "undefined");
 
-    let allowed = runtime(
-        Permissions::default(),
-        &[RuntimeModule::Os, RuntimeModule::Semver],
-    );
+    let allowed = runtime(Permissions::default(), &[RuntimeModule::Semver]);
     allowed
         .run_module(
-            "os-semver.js",
-            "import {platform} from 'neo:os';
-             import {arch, version, codename, variant} from 'neo:os';
-             import {valid, compare} from 'neo:semver';
-             if (platform !== os.platform) throw Error('os');
-             if (arch !== os.arch || version !== os.version ||
-                 codename !== os.codename || variant !== os.variant) throw Error('os metadata');
-             if (version !== undefined && typeof version !== 'string') throw Error('version type');
+            "semver.js",
+            "import {valid, compare} from 'neo:semver';
              if (!valid('1.2.3') || compare('1.0.0-alpha', '1.0.0') !== -1) throw Error('semver');",
         )
         .unwrap();
@@ -637,68 +469,6 @@ fn os_and_semver_are_withdrawn_with_their_modules() {
     assert_eq!(
         allowed.eval("typeof __neoSemverCompare").unwrap(),
         "undefined"
-    );
-}
-
-#[test]
-fn os_metadata_global_and_module_are_gated_by_the_os_allowlist() {
-    let denied = runtime(Permissions::default(), &[RuntimeModule::Path]);
-    assert_eq!(denied.eval("typeof os").unwrap(), "undefined");
-    assert!(import_error(&denied, "denied-os-info.js", "neo:os").contains("allowlist"));
-
-    let allowed = runtime(Permissions::default(), &[RuntimeModule::Os]);
-    allowed
-        .run_module(
-            "os-info.js",
-            "import {platform, arch, version, codename, variant} from 'neo:os'; \
-             if (platform !== os.platform || arch !== os.arch || \
-                 version !== os.version || codename !== os.codename || variant !== os.variant) \
-                 throw Error('module/global metadata mismatch');",
-        )
-        .unwrap();
-    assert_eq!(
-        allowed
-            .eval(
-                "[os.version, os.codename, os.variant].every(value => \
-                 value === undefined || typeof value === 'string') + ',' + \
-                 typeof os.platform + ',' + typeof os.arch"
-            )
-            .unwrap(),
-        "true,string,string"
-    );
-}
-
-#[test]
-fn neo_os_exports_are_private_snapshot_not_mutable_global_reads() {
-    let allowed = runtime(Permissions::default(), &[RuntimeModule::Os]);
-    allowed
-        .eval(
-            "globalThis.originalOs = {platform: os.platform, arch: os.arch, \
-             version: os.version, codename: os.codename, variant: os.variant}; \
-             os.platform = 'changed-platform'; os.arch = 'changed-arch'; \
-             os.version = 'changed-version'; os.codename = 'changed-codename'; \
-             os.variant = 'changed-variant';",
-        )
-        .unwrap();
-    allowed
-        .run_module(
-            "os-private-snapshot.js",
-            "import {platform, arch, version, codename, variant} from 'neo:os'; \
-             const matchesSnapshot = () => platform === originalOs.platform && \
-                 arch === originalOs.arch && version === originalOs.version && \
-                 codename === originalOs.codename && variant === originalOs.variant; \
-             if (!matchesSnapshot()) throw Error('module read mutable global'); \
-             os.platform = 'changed-again'; os.arch = 'changed-again'; \
-             os.version = 'changed-again'; os.codename = 'changed-again'; \
-             os.variant = 'changed-again'; \
-             if (!matchesSnapshot()) throw Error('module exports changed with global');",
-        )
-        .unwrap();
-    assert_eq!(
-        allowed
-            .eval("String(os.platform === 'changed-again' && originalOs.platform !== 'changed-platform')")
-            .unwrap(),
-        "true"
     );
 }
 

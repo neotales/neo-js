@@ -29,7 +29,37 @@ fn cli_user_import_requires_opt_in_without_reading_identity() {
 }
 
 #[test]
-fn cli_exposes_os_metadata_through_the_builtin_module() {
+fn cli_sqlite_requires_its_own_explicit_permission() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("sqlite.js");
+    std::fs::write(
+        &main,
+        "import {openMemory} from 'neo:sqlite';\n\
+         using db = openMemory();\n\
+         console.log(String(db.query('SELECT 42')[0][0]));",
+    )
+    .unwrap();
+    for flags in [&[][..], &["--allow-fs", "--allow-net", "--allow-run"][..]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+            .args(flags)
+            .arg(&main)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("neo:sqlite"));
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+        .arg("--allow-sqlite")
+        .arg(&main)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(output.stdout, b"42\n");
+    assert_eq!(dir.path().read_dir().unwrap().count(), 1);
+}
+
+#[test]
+fn cli_exposes_os_metadata_through_the_linked_optional_module() {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("os.js");
     std::fs::write(

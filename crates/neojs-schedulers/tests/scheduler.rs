@@ -1,18 +1,21 @@
 //! Integration tests for the systemd and Windows scheduler modules.
 //!
-//! The module is pure text generation: these tests run it through the public
-//! `NeoJs` API with no permissions, assert exact generated text, and exercise
-//! the documented rejection paths. Where the host provides `systemd-analyze`
-//! or `xmllint`, the tests also verify the generated files without touching
-//! any installed unit or task.
+//! The modules are pure text generation: these tests register the optional
+//! `neojs-schedulers` extension, run it through the public `NeoJs` API with no
+//! permissions, assert exact generated text, and exercise the documented
+//! rejection paths. Where the host provides `systemd-analyze` or `xmllint`,
+//! the tests also verify the generated files without touching any installed
+//! unit or task.
 
 use std::path::Path;
 use std::process::Command;
 
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions, RuntimeOptions};
+use neojs_schedulers::with_schedulers;
 
 fn runtime() -> NeoJs {
-    NeoJs::new(Permissions::default()).unwrap()
+    let options = with_schedulers(RuntimeOptions::new()).unwrap();
+    NeoJs::new_with_options(Permissions::default(), options).unwrap()
 }
 
 fn eval(js: &NeoJs, expression: &str) -> String {

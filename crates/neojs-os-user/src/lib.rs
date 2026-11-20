@@ -1,14 +1,88 @@
-//! Synchronous account and process identity, private to `neo:os/user`.
+//! Optional synchronous account and process identity for `neojs-core`.
+//!
+//! Register [`with_os_user`], grant [`neojs_core::Permissions::user`], and
+//! admit [`MODULE_NAME`] in any explicit allowlist. This extension does not
+//! register `neo:os` or install globals. Account information is sensitive;
+//! only grant access to trusted scripts.
+//!
+//! ```
+//! use neojs_core::{NeoJs, Permissions, RuntimeOptions};
+//! use neojs_os_user::{MODULE_NAME, with_os_user};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let options = with_os_user(RuntimeOptions::new())?.module_names([MODULE_NAME])?;
+//! let runtime = NeoJs::new_with_options(
+//!     Permissions { user: true, ..Permissions::default() },
+//!     options,
+//! )?;
+//! runtime.run_module("main.js", "import 'neo:os/user';")?;
+//! # Ok(())
+//! # }
+//! ```
 
-use rquickjs::{
-    Array, Ctx, Error, Function, Object, Result, Value,
-    module::{Declarations, Exports, ModuleDef},
+use std::any::Any;
+
+use neojs_core::rquickjs;
+use neojs_core::rquickjs::{
+    Array, Ctx, Error, Function, Module, Object, Result, Value,
+    module::{Declarations, Declared, Exports, ModuleDef},
     object::Property,
     qjs,
+};
+use neojs_core::{
+    ExtensionDescriptor, ExtensionPermission, ExtensionRegistrationError, RuntimeOptions,
 };
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix;
+
+/// Exact module name for use in extension-aware runtime allowlists.
+pub const MODULE_NAME: &str = "neo:os/user";
+
+/// Describe the identity extension. The canonical module must pass both the
+/// allowlist and user permission before identity state is initialized.
+/// Adding other module names to the descriptor does not create aliases.
+pub fn os_user_extension() -> ExtensionDescriptor {
+    ExtensionDescriptor::new("neojs-os-user", load)
+        .with_module(MODULE_NAME, ExtensionPermission::User)
+        .with_init(init)
+}
+
+/// Register the identity extension without granting permissions or changing
+/// the allowlist. Duplicate registration is an error.
+pub fn with_os_user(
+    options: RuntimeOptions,
+) -> std::result::Result<RuntimeOptions, ExtensionRegistrationError> {
+    options.with_extension(os_user_extension())
+}
+
+struct UserSession;
+
+fn init(ctx: &Ctx<'_>, allowed: &[&str]) -> Result<Box<dyn Any>> {
+    // Core runs init if any registered name is admitted. Only the canonical
+    // name has the identity permission gate, so an appended name is not enough.
+    if !allowed.contains(&MODULE_NAME) {
+        return Ok(Box::new(()));
+    }
+    prepare(ctx)?;
+    Ok(Box::new(UserSession))
+}
+
+fn load<'js>(ctx: &Ctx<'js>, state: &mut dyn Any, name: &str) -> Result<Module<'js, Declared>> {
+    if name != MODULE_NAME {
+        return Err(Error::new_loading_message(
+            name,
+            "identity module does not support aliases",
+        ));
+    }
+    if !state.is::<UserSession>() {
+        return Err(Error::new_loading_message(
+            name,
+            "identity module was not initialized",
+        ));
+    }
+    Module::declare_def::<UserModule, _>(ctx.clone(), name)
+}
 
 struct Account {
     uid: u32,
@@ -85,6 +159,17 @@ mod tests {
     use rquickjs::{Context, Module, Runtime};
 
     use super::*;
+
+    #[test]
+    fn alias_admission_does_not_initialize_identity_state() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            let state = init(&ctx, &["neo:identity-alias"]).unwrap();
+            assert!(!state.is::<UserSession>());
+            assert!(ctx.userdata::<ErrorClass>().is_none());
+        });
+    }
 
     struct Synthetic;
 
@@ -238,7 +323,7 @@ unsafe impl<'js> rquickjs::JsLifetime<'js> for ErrorClass {
 }
 
 /// Remember the native Error class in the fresh realm without looking up host identity.
-pub(crate) fn prepare(ctx: &Ctx<'_>) -> Result<()> {
+fn prepare(ctx: &Ctx<'_>) -> Result<()> {
     let template = rquickjs::Exception::from_message(ctx.clone(), "")?;
     // SAFETY: the native Error is live in this context.
     let class = unsafe { qjs::JS_GetClassID(template.as_object().as_raw()) };
@@ -282,7 +367,7 @@ impl Backend for System {
 }
 
 /// Native module instantiated by the loader only after both capability gates.
-pub(crate) struct UserModule;
+struct UserModule;
 
 impl ModuleDef for UserModule {
     fn declare<'js>(decl: &Declarations<'js>) -> Result<()> {

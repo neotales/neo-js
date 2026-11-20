@@ -5,7 +5,7 @@
 
 #[test]
 fn notices_are_embedded_and_complete() {
-    let text = neo_js::third_party_notices();
+    let text = neojs_core::third_party_notices();
 
     // The accessor is the source file verbatim, not a hand-maintained copy.
     assert_eq!(text, include_str!("../src/js/path.LICENSE.md"));

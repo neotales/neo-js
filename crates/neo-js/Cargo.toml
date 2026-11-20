@@ -1,5 +1,5 @@
 [package]
-name = "neo-js"
+name = "neojs-core"
 description = "Configurable QuickJS runtime for NeoTales automation"
 version.workspace = true
 edition.workspace = true
@@ -105,16 +105,15 @@ icu_provider = "=2.2.0"
 [target.'cfg(not(unix))'.dependencies]
 same-file = "=1.0.6"
 
-# Windows Registry access for `neo:winregistry`. `windows-sys` 0.61 is the
-# maintained Microsoft binding crate, used directly so every query has an
-# explicit, bounded buffer and retry loop. It is target-specific: on a
-# non-Windows host the crate is not built and the module reports unsupported.
+# Native Windows APIs for `neo:winregistry`, file handling, and the current
+# process token query in `neo:process`. The bindings are Windows-only.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Registry",
+    "Win32_System_Threading",
 ] }
 
 [dev-dependencies]

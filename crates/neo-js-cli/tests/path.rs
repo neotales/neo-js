@@ -1,12 +1,13 @@
 //! End-to-end tests for `neo:path` through the CLI.
 //!
-//! The matrix runs on Linux but exercises both path syntaxes: the namespace,
-//! not the host platform, selects the rules. The module must need no
-//! permission flag, so the same script is run with none and with every flag.
+//! Exercise both explicit grammars on any host, then check that CLI named
+//! exports select the native dialect and relative resolution uses CLI grants.
 
 use std::{
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 fn run_cli(dir: &Path, permissions: &[&str], name: &str, source: &str) -> Output {
@@ -431,8 +432,10 @@ fn path_matrix_is_identical_with_every_permission_enabled() {
         &[
             "--allow-fs",
             "--allow-env",
+            "--allow-stdio",
             "--allow-run",
             "--allow-registry",
+            "--allow-net",
         ],
         "main-permitted.js",
         PATH_MATRIX,
@@ -443,17 +446,147 @@ fn path_matrix_is_identical_with_every_permission_enabled() {
 }
 
 #[test]
+fn lexical_operations_use_reference_examples_and_keep_windows_roots_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = run_cli(
+        dir.path(),
+        &[],
+        "resolution.js",
+        r##"
+import { equal, throws } from 'neo:assert';
+import * as path from 'neo:path';
+const { posix, win32 } = path;
+const w = String.raw;
+
+equal(posix.common([]), '');
+equal(posix.common(['only/file']), 'only/file');
+equal(posix.common(['./deno/std/path/mod.ts', './deno/std/fs/mod.ts']), './deno/std/');
+equal(posix.common(['/foo', '/foo/bar']), '/foo');
+equal(posix.common(['/foo', '/bar']), '/');
+equal(posix.common(['foo', 'foobar']), '');
+equal(posix.common(['日本//😀/猫', '日本//😀/犬']), '日本//😀/');
+equal(win32.common([w`C:\foo\bar`, w`C:\foo\baz`]), w`C:\foo` + '\\');
+equal(win32.common([w`C:\FOO\bar`, w`C:\foo\bar`]), 'C:\\');
+equal(win32.common(['C:/foo/bar', 'C:/foo/baz']), '');
+
+equal(posix.resolve('/foo', 'bar', 'baz/asdf', 'quux', '..'), '/foo/bar/baz/asdf');
+equal(posix.resolve('ignored', '/root', '/日本/😀//', '猫', '..', ''), '/日本/😀');
+equal(posix.resolve('//foo', '../../..'), '/');
+equal(posix.resolve('/\ud800', '😀'), '/\ud800/😀');
+equal(posix.relative('/data/orandea/test/aaa', '/data/orandea/impl/bbb'), '../../impl/bbb');
+equal(posix.relative('/prefix/fox', '/prefix/foobar'), '../foobar');
+equal(posix.relative('/prefix/a', '/prefix/a/../a/'), '');
+equal(posix.relative('/', '/日本/😀'), '日本/😀');
+equal(posix.relative('/日本/😀', '/'), '../..');
+equal(posix.toNamespacedPath('a/../b'), 'a/../b');
+
+equal(win32.resolve(w`C:\foo\bar`, w`..\baz`), w`C:\foo\baz`);
+equal(win32.resolve('ignored', 'C:/foo', '/root', 'descendant/'), w`C:\root\descendant`);
+equal(win32.resolve(w`C:\base`, w`c:子\😀`), w`c:\base\子\😀`);
+equal(win32.resolve('C:/base', 'D:/ignored', 'c:file'), w`c:\base\file`);
+equal(win32.resolve('C:', '\\root', 'child'), w`C:\root\child`);
+equal(win32.resolve('//server/share', '/path', '../../../leaf'), w`\\server\share\leaf`);
+equal(win32.resolve('//server/share/../..'), w`\\server\share` + '\\');
+equal(win32.resolve(w`\\?\UNC\SeRVer\Share\..\..\日本`), w`\\?\UNC\SeRVer\Share\日本`);
+equal(win32.relative(w`C:\foobar\test\aaa`, w`C:\foobar\impl\bbb`), w`..\..\impl\bbb`);
+equal(win32.relative(w`C:\İ\one`, 'c:\\i\u0307\\MiXeD'), w`..\MiXeD`);
+equal(win32.relative('C:\\', w`c:\日本\😀`), w`日本\😀`);
+equal(win32.relative(w`C:\Case\file`, w`c:\case\FILE`), '');
+equal(win32.relative(w`C:\base`, w`C:\base\D:leaf`), w`.\D:leaf`);
+equal(win32.relative(w`C:\base`, w`D:\target`), w`D:\target`);
+equal(win32.relative(w`\\host\one\dir`, w`\\host\two\dir`), w`\\host\two\dir`);
+equal(win32.relative(w`\\host\share\dir`, w`\\HOST\SHARE`), '..');
+equal(win32.relative(w`\\?\UNC\host\one\dir`, w`\\?\UNC\host\two\dir`), w`\\?\UNC\host\two\dir`);
+equal(win32.toNamespacedPath(''), '');
+equal(win32.toNamespacedPath('C:/foo/../bar'), w`\\?\C:\bar`);
+equal(win32.toNamespacedPath('//host/share/../日本'), w`\\?\UNC\host\share\日本`);
+equal(win32.toNamespacedPath(w`\\?\C:\foo\..\bar`), w`\\?\C:\foo\..\bar`);
+equal(win32.toNamespacedPath(w`\\.\pipe\name`), w`\\.\pipe\name`);
+try {
+  win32.resolve(w`\\?\UNC\server`);
+  throw Error('incomplete namespace root accepted');
+} catch (error) {
+  equal(error.code, 'PATH_WINDOWS_ROOT');
+}
+
+for (const dialect of [posix, win32]) {
+  throws(() => dialect.common('a'), TypeError);
+  throws(() => dialect.common(['none', 'other', '\0invalid']), TypeError);
+  throws(() => dialect.resolve('\0ignored', '/absolute'), TypeError);
+  throws(() => dialect.relative('needs cwd', '\0invalid'), TypeError);
+  throws(() => dialect.toNamespacedPath('\0invalid'), TypeError);
+  throws(() => dialect.toNamespacedPath({}), TypeError);
+}
+
+const selected = path.SEPARATOR === '\\' ? win32 : posix;
+for (const name of ['join', 'normalize', 'basename', 'dirname', 'extname', 'isAbsolute',
+  'parse', 'format', 'common', 'resolve', 'relative', 'toNamespacedPath']) {
+  equal(path[name], selected[name]);
+}
+equal(path.DELIMITER, selected.delimiter);
+equal(path.SEPARATOR_PATTERN instanceof RegExp, true);
+equal(path.SEPARATOR_PATTERN.global, false);
+equal('a///b'.split(path.SEPARATOR_PATTERN).join(','), 'a,b');
+equal(w`a\\b`.split(path.SEPARATOR_PATTERN).join(','), selected === win32 ? 'a,b' : w`a\\b`);
+equal(path.readCwd, undefined);
+console.log(path.SEPARATOR);
+"##,
+    );
+    assert_ok(&output);
+    assert_eq!(output.stdout, if cfg!(windows) { b"\\\n" } else { b"/\n" });
+}
+
+#[test]
+fn cli_permission_controls_cwd_and_resolution_observes_chdir() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("子")).unwrap();
+    let denied = run_cli(
+        dir.path(),
+        &["--allow-env"],
+        "denied-cwd.js",
+        r#"import {resolve} from 'neo:path';
+resolve('sentinel-relative');"#,
+    );
+    assert!(!denied.status.success());
+    let message = stderr(&denied);
+    assert!(message.contains("provide an absolute base"), "{message}");
+    assert!(!message.contains("sentinel-relative"), "{message}");
+
+    let output = run_cli(
+        dir.path(),
+        &["--allow-stdio"],
+        "cwd.js",
+        r#"import { equal } from 'neo:assert';
+import { cwd, chdir } from 'neo:process';
+import { join, resolve, relative } from 'neo:path';
+equal(resolve(), resolve(cwd()));
+const before = resolve('file');
+chdir('子');
+equal(resolve('file'), join(cwd(), 'file'));
+equal(relative('.', resolve('😀')), '😀');
+equal(resolve('file') === before, false);
+console.log('ok');
+"#,
+    );
+    assert_ok(&output);
+    assert_eq!(output.stdout, b"ok\n");
+}
+
+#[test]
 fn typescript_entry_imports_path_without_permissions() {
     let dir = tempfile::tempdir().unwrap();
     let output = run_cli(
         dir.path(),
         &[],
         "main.ts",
-        r#"import { posix, win32 } from 'neo:path';
+        r#"import { posix, win32, resolve, relative, SEPARATOR } from 'neo:path';
 import type { ParsedPath } from 'neo:path';
 
 const parsed: ParsedPath = posix.parse('/a/b.txt');
 const joined: string = win32.join('C:\\', 'foo');
+const base = SEPARATOR === '\\' ? 'C:\\base' : '/base';
+const fromBase: string = relative(base, resolve(base, 'b'));
+if (fromBase !== 'b') throw new Error('path resolution');
 if (parsed.ext !== '.txt') throw new Error('ext');
 if (joined !== 'C:\\foo') throw new Error('join');
 const names: string[] = [
@@ -502,4 +635,53 @@ fn nul_is_rejected_and_the_message_does_not_echo_the_path() {
     let text = stderr(&output);
     assert!(text.contains("NUL"), "{text}");
     assert!(!text.contains("sentinel"), "{text}");
+}
+
+#[test]
+fn adversarial_globs_hit_limits_before_the_cli_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let entry = dir.path().join("glob-limits.js");
+    std::fs::write(
+        &entry,
+        r#"
+import { posix, win32 } from 'neo:path';
+function limited(operation) {
+  try { operation(); } catch (error) {
+    if (error instanceof RangeError && error.code === 'PATH_GLOB_LIMIT') return;
+    throw error;
+  }
+  throw Error('expected a glob limit');
+}
+for (const api of [posix, win32]) {
+  // Ambiguous repetition, Cartesian alternatives, and an overlong detector
+  // input are rejected up front, without evaluating a raw RegExp.
+  limited(() => api.globToRegExp('+(a|aa)b'));
+  limited(() => api.globToRegExp('{a,b,c}'.repeat(12)));
+  limited(() => api.isGlob('('.repeat(100_000)));
+  if (api.isGlob('('.repeat(4096))) throw Error('not a glob');
+  // Individually valid subjects and patterns can still exceed the work budget.
+  limited(() => api.match('a'.repeat(10_000), '*a*a*a*a*a*b'));
+  limited(() => api.match('a/'.repeat(5_000), '**/a/**/b'));
+  if (!api.match('a'.repeat(500) + 'b', '+(a|xy)b')) throw Error('valid repetition');
+}
+"#,
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_neo-js"))
+        .current_dir(dir.path())
+        .arg(&entry)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let report = child.wait_with_output().unwrap();
+            panic!("glob limit check exceeded 5 seconds: {}", stderr(&report));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_ok(&child.wait_with_output().unwrap());
 }

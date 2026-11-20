@@ -11,7 +11,9 @@
 //! This is not an OS sandbox. It does not limit CPU, memory, or the JavaScript
 //! language itself, and it cannot isolate a script from the rest of the realm.
 
-use std::{collections::BTreeSet, fmt};
+use std::{collections::BTreeSet, fmt, rc::Rc};
+
+use crate::extension::{ExtensionDescriptor, ExtensionRegistrationError, ExtensionRegistry};
 
 /// One host-provided `neo:` module.
 ///
@@ -50,21 +52,14 @@ pub enum RuntimeModule {
     /// `neo:hash` — digests. `digestFile` additionally requires
     /// [`crate::Permissions::filesystem`].
     Hash,
-    /// `neo:os` — target platform, architecture, and optional OS-release
-    /// metadata. It needs no permission flag, but discloses host OS metadata.
-    Os,
-    /// `neo:path` — lexical path helpers.
+    /// `neo:path` — lexical path helpers and a global file-only `URL` class.
+    /// Reading the runtime working directory also requires admitted
+    /// filesystem or process/stdio authority.
     Path,
-    /// `neo:process` — runtime streams and working directory; also requires
-    /// [`crate::Permissions::process`] or [`crate::Permissions::stdio`].
+    /// `neo:process` — streams, runtime working directory, and host process
+    /// elevation status; also requires [`crate::Permissions::process`] or
+    /// [`crate::Permissions::stdio`].
     Process,
-    /// `neo:scheduler` — deprecated combined scheduler compatibility module.
-    ///
-    /// Selecting this entry allows both generators through the legacy name
-    /// only. It does not allow imports of the two target-specific modules.
-    /// For new allowlists, select [`Self::SchedulerSystemd`] and/or
-    /// [`Self::SchedulerWindows`] instead.
-    Scheduler,
     /// `neo:semver` — semantic-version parsing, formatting, ranges, and
     /// comparison.
     Semver,
@@ -79,13 +74,6 @@ pub enum RuntimeModule {
     WinRegistry,
     /// `neo:yaml` — YAML text parsing.
     Yaml,
-    /// `neo:os/schedulers/systemd` — systemd unit configuration text generation.
-    SchedulerSystemd,
-    /// `neo:os/schedulers/windows` — Windows Task Scheduler XML text generation.
-    SchedulerWindows,
-    /// `neo:os/user` — host account and process identity; also requires
-    /// [`crate::Permissions::user`].
-    OsUser,
 }
 
 impl RuntimeModule {
@@ -94,7 +82,7 @@ impl RuntimeModule {
     /// The array grows when host modules are added. Iterate with
     /// `RuntimeModule::ALL.into_iter()` rather than naming its length in a
     /// type. To build an allowlist of all modules, use [`ModuleAllowlist::all`].
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 19] = [
         Self::Age,
         Self::Ansi,
         Self::Assert,
@@ -106,19 +94,14 @@ impl RuntimeModule {
         Self::Fetch,
         Self::Fs,
         Self::Hash,
-        Self::Os,
         Self::Path,
         Self::Process,
-        Self::Scheduler,
         Self::Semver,
         Self::StringBuilder,
         Self::Test,
         Self::Toml,
         Self::WinRegistry,
         Self::Yaml,
-        Self::SchedulerSystemd,
-        Self::SchedulerWindows,
-        Self::OsUser,
     ];
 
     /// The canonical `neo:` name of this module.
@@ -135,13 +118,8 @@ impl RuntimeModule {
             Self::Fetch => "neo:fetch",
             Self::Fs => "neo:fs",
             Self::Hash => "neo:hash",
-            Self::Os => "neo:os",
-            Self::OsUser => "neo:os/user",
             Self::Path => "neo:path",
             Self::Process => "neo:process",
-            Self::Scheduler => "neo:scheduler",
-            Self::SchedulerSystemd => "neo:os/schedulers/systemd",
-            Self::SchedulerWindows => "neo:os/schedulers/windows",
             Self::Semver => "neo:semver",
             Self::StringBuilder => "neo:string-builder",
             Self::Test => "neo:test",
@@ -168,13 +146,8 @@ impl RuntimeModule {
             "neo:fetch" => Self::Fetch,
             "neo:fs" => Self::Fs,
             "neo:hash" => Self::Hash,
-            "neo:os" => Self::Os,
-            "neo:os/user" => Self::OsUser,
             "neo:path" => Self::Path,
             "neo:process" => Self::Process,
-            "neo:scheduler" => Self::Scheduler,
-            "neo:os/schedulers/systemd" => Self::SchedulerSystemd,
-            "neo:os/schedulers/windows" => Self::SchedulerWindows,
             "neo:semver" => Self::Semver,
             "neo:string-builder" => Self::StringBuilder,
             "neo:test" => Self::Test,
@@ -242,11 +215,18 @@ impl std::error::Error for UnknownModuleNames {}
 /// relative JavaScript imports, and the always-present `console` untouched.
 ///
 /// Build one from values ([`Self::from_modules`], [`Self::with`]) or from
-/// exact names ([`Self::from_names`], which rejects unknown names). A value is
+/// exact names ([`Self::from_names`] for built-in names, or
+/// [`Self::from_names_with`] when host extensions are registered). A value is
 /// cheap to clone and contains no global mutable state.
+///
+/// [`Self::iter`] yields built-in modules only, because its item type cannot
+/// represent an extension's name. Use [`Self::extension_names`] for registered
+/// extension names. [`Self::len`] counts both kinds; [`Self::builtin_len`]
+/// counts the built-in subset that [`Self::iter`] yields.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ModuleAllowlist {
     modules: BTreeSet<RuntimeModule>,
+    extension_modules: BTreeSet<String>,
 }
 
 impl ModuleAllowlist {
@@ -255,82 +235,154 @@ impl ModuleAllowlist {
         Self::default()
     }
 
-    /// An allowlist that accepts every host module this build provides.
+    /// An allowlist that accepts every built-in host module this build
+    /// provides.
     ///
-    /// [`RuntimeOptions::default`] is unrestricted and equivalent for module
-    /// access, but it is not the same configuration: an explicit
+    /// [`RuntimeOptions::default`] is unrestricted and equivalent for built-in
+    /// module access, but it is not the same configuration: an explicit
     /// [`Self::all`] allowlist remains a fixed set, while the default also
-    /// admits host modules added by a later neo-js version.
+    /// admits host modules added by a later neo-js version. Registered
+    /// extensions are not included; use [`Self::all_with_extensions`] for a
+    /// fixed set that names them too.
     pub fn all() -> Self {
         Self::from_modules(Self::every())
     }
 
-    /// Build an allowlist from module values.
+    /// An allowlist that accepts every built-in module and every exact module
+    /// registered in `extensions`.
+    pub fn all_with_extensions(extensions: &ExtensionRegistry) -> Self {
+        let mut allowlist = Self::all();
+        allowlist
+            .extension_modules
+            .extend(extensions.module_names().map(str::to_owned));
+        allowlist
+    }
+
+    /// Build an allowlist from built-in module values.
     pub fn from_modules<I>(modules: I) -> Self
     where
         I: IntoIterator<Item = RuntimeModule>,
     {
         Self {
             modules: modules.into_iter().collect(),
+            extension_modules: BTreeSet::new(),
         }
     }
 
-    /// Build an allowlist from exact canonical `neo:` names.
+    /// Build an allowlist from exact canonical built-in `neo:` names.
     ///
     /// Every name is checked. If any name is unknown, the returned error lists
     /// all of them and no allowlist is produced, so a caller can report a typo
     /// instead of running with a silently smaller set. An empty iterator is
     /// valid and produces an empty allowlist.
+    ///
+    /// This constructor knows only built-in modules. An extension module name
+    /// is reported as unknown here even when the name is registered; use
+    /// [`Self::from_names_with`] to accept registered extension names.
     pub fn from_names<I, S>(names: I) -> Result<Self, UnknownModuleNames>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        Self::from_names_known(names, None)
+    }
+
+    /// Build an allowlist from exact canonical names, including the exact names
+    /// registered in `extensions`.
+    ///
+    /// Built-in names must still be exact. An extension name is accepted only
+    /// when `extensions` registered it. If any name is unknown, the returned
+    /// error lists all of them and no allowlist is produced.
+    pub fn from_names_with<I, S>(
+        names: I,
+        extensions: &ExtensionRegistry,
+    ) -> Result<Self, UnknownModuleNames>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self::from_names_known(names, Some(extensions))
+    }
+
+    fn from_names_known<I, S>(
+        names: I,
+        extensions: Option<&ExtensionRegistry>,
+    ) -> Result<Self, UnknownModuleNames>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
         let mut modules = BTreeSet::new();
+        let mut extension_modules = BTreeSet::new();
         let mut unknown = Vec::new();
         for name in names {
             let name = name.as_ref();
-            match RuntimeModule::from_name(name) {
-                Some(module) => {
-                    modules.insert(module);
-                }
-                None => unknown.push(name.to_owned()),
+            if let Some(module) = RuntimeModule::from_name(name) {
+                modules.insert(module);
+            } else if extensions.is_some_and(|extensions| extensions.contains_module(name)) {
+                extension_modules.insert(name.to_owned());
+            } else {
+                unknown.push(name.to_owned());
             }
         }
         if unknown.is_empty() {
-            Ok(Self { modules })
+            Ok(Self {
+                modules,
+                extension_modules,
+            })
         } else {
             Err(UnknownModuleNames { names: unknown })
         }
     }
 
-    /// Add one module and return the updated allowlist.
+    /// Add one built-in module and return the updated allowlist.
     pub fn with(mut self, module: RuntimeModule) -> Self {
         self.modules.insert(module);
         self
     }
 
-    /// True when this allowlist contains `module`.
+    /// True when this allowlist contains the built-in `module`.
     pub fn contains(&self, module: RuntimeModule) -> bool {
         self.modules.contains(&module)
     }
 
-    /// The allowed modules in a deterministic order.
+    /// True when this allowlist names the exact extension module `name`.
+    pub fn contains_extension_name(&self, name: &str) -> bool {
+        self.extension_modules.contains(name)
+    }
+
+    /// The allowed built-in modules in a deterministic order.
+    ///
+    /// Extension module names are available from [`Self::extension_names`].
     pub fn iter(&self) -> impl Iterator<Item = RuntimeModule> + '_ {
         self.modules.iter().copied()
     }
 
-    /// Number of allowed modules.
+    /// The allowed extension module names in a deterministic order.
+    pub fn extension_names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.extension_modules.iter().map(String::as_str)
+    }
+
+    /// Number of allowed built-in and extension modules.
     pub fn len(&self) -> usize {
+        self.modules.len() + self.extension_modules.len()
+    }
+
+    /// Number of allowed built-in modules, matching [`Self::iter`].
+    pub fn builtin_len(&self) -> usize {
         self.modules.len()
     }
 
-    /// True when no module is allowed.
+    /// True when no built-in or extension module is allowed.
     pub fn is_empty(&self) -> bool {
-        self.modules.is_empty()
+        self.len() == 0
     }
 
-    /// Every module this build provides, in declaration order.
+    pub(crate) fn extension_name_set(&self) -> &BTreeSet<String> {
+        &self.extension_modules
+    }
+
+    /// Every built-in module this build provides, in declaration order.
     fn every() -> impl Iterator<Item = RuntimeModule> {
         RuntimeModule::ALL.into_iter()
     }
@@ -362,20 +414,29 @@ impl ModuleAllowlist {
 /// the other permission flags or module selections.
 ///
 /// Withdrawing a module also withdraws the global or native callback that only
-/// it uses: `neo:os` owns `os`, `neo:env` owns `env`, `neo:fs` owns `fs`,
-/// `neo:hash` owns `__neoHash` (and `__neoHashFile` with filesystem
-/// permission), and `neo:exec` owns the `__neoExec*` callbacks. `neo:hash`'s
-/// `digestFile` remains part of `neo:hash`; it additionally needs
+/// it uses: the optional `neo:os` extension installs `os`, `neo:env` owns
+/// `env`, `neo:fs` owns `fs`, `neo:hash` owns `__neoHash` (and
+/// `__neoHashFile` with filesystem permission), and `neo:exec` owns the
+/// `__neoExec*` callbacks. `neo:hash`'s `digestFile` remains part of
+/// `neo:hash`; it additionally needs
 /// [`crate::Permissions::filesystem`] but not the `neo:fs` module.
 ///
 /// This is not a sandbox. It does not limit CPU or memory, and `console`
 /// remains available in every runtime because it is the existing output
 /// channel rather than an importable module.
+///
+/// Static host extensions are registered with [`Self::with_extension`] or
+/// [`Self::with_extensions`]. Their exact names are checked by the same
+/// allowlist and permission gates as built-in modules, and extension state is
+/// per runtime. See [`crate::extension`].
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeOptions {
     // `None` means unrestricted, the backward-compatible default. `Some` means
     // fail closed: a module absent from the set is denied.
     allowlist: Option<ModuleAllowlist>,
+    // Static extension descriptors. Registration validates exact names and
+    // rejects duplicates and built-in collisions before a runtime exists.
+    extensions: ExtensionRegistry,
 }
 
 impl RuntimeOptions {
@@ -389,13 +450,47 @@ impl RuntimeOptions {
     pub fn with_allowlist(allowlist: ModuleAllowlist) -> Self {
         Self {
             allowlist: Some(allowlist),
+            extensions: ExtensionRegistry::new(),
         }
+    }
+
+    /// Register one host extension.
+    ///
+    /// The descriptor is validated as described by [`crate::extension`]. A
+    /// rejected descriptor returns an error and no options value. Register
+    /// extensions before calling [`Self::module_names`] for their exact names.
+    pub fn with_extension(
+        mut self,
+        descriptor: ExtensionDescriptor,
+    ) -> Result<Self, ExtensionRegistrationError> {
+        self.extensions.register(descriptor)?;
+        Ok(self)
+    }
+
+    /// Register several host extensions in order.
+    ///
+    /// A rejected descriptor returns an error and no options value; the
+    /// partially built options are dropped. Use [`ExtensionRegistry::register`]
+    /// directly when earlier successful registrations must be retained.
+    pub fn with_extensions<I>(mut self, descriptors: I) -> Result<Self, ExtensionRegistrationError>
+    where
+        I: IntoIterator<Item = ExtensionDescriptor>,
+    {
+        for descriptor in descriptors {
+            self.extensions.register(descriptor)?;
+        }
+        Ok(self)
+    }
+
+    /// The registered extension descriptors and exact module lookups.
+    pub fn extensions(&self) -> &ExtensionRegistry {
+        &self.extensions
     }
 
     /// Builder form of [`Self::with_allowlist`].
     ///
     /// ```
-    /// use neo_js::{RuntimeModule, RuntimeOptions};
+    /// use neojs_core::{RuntimeModule, RuntimeOptions};
     ///
     /// let options = RuntimeOptions::new().modules([RuntimeModule::Path, RuntimeModule::Hash]);
     /// assert!(options.is_module_allowed(RuntimeModule::Hash));
@@ -409,16 +504,23 @@ impl RuntimeOptions {
         self
     }
 
-    /// Builder form of [`ModuleAllowlist::from_names`].
+    /// Builder form of [`ModuleAllowlist::from_names_with`].
     ///
-    /// Every name must be a canonical `neo:` name. If any name is unknown, the
-    /// call returns an error and no options; nothing is silently dropped.
+    /// Every name must be an exact built-in `neo:` name or a name registered by
+    /// one of these options' extensions. If any name is unknown, the call
+    /// returns an error and no options; nothing is silently dropped.
     pub fn module_names<I, S>(self, names: I) -> Result<Self, UnknownModuleNames>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        Ok(Self::with_allowlist(ModuleAllowlist::from_names(names)?))
+        let allowlist = ModuleAllowlist::from_names_with(names, &self.extensions)?;
+        Ok(self.set_allowlist(allowlist))
+    }
+
+    fn set_allowlist(mut self, allowlist: ModuleAllowlist) -> Self {
+        self.allowlist = Some(allowlist);
+        self
     }
 
     /// The explicit allowlist, or `None` when unrestricted.
@@ -426,41 +528,83 @@ impl RuntimeOptions {
         self.allowlist.as_ref()
     }
 
-    /// True when `module` may be constructed under these options.
+    /// True when built-in `module` may be constructed under these options.
     ///
     /// This answers only the allowlist question. The module's permission is a
-    /// separate condition and is checked when it is imported.
+    /// separate condition and is checked when it is imported. Extension
+    /// modules are not represented by [`RuntimeModule`]; use
+    /// [`Self::is_module_name_allowed`] for an exact name.
     pub fn is_module_allowed(&self, module: RuntimeModule) -> bool {
         self.allowlist
             .as_ref()
             .is_none_or(|allowlist| allowlist.contains(module))
     }
 
-    /// The copyable bit set used by the loader.
+    /// True when the exact `neo:` name may be constructed under these options.
+    ///
+    /// Built-in names use [`Self::is_module_allowed`]. A registered extension
+    /// name is allowed only when this options value has no explicit allowlist,
+    /// or when the allowlist names it exactly. An unregistered name is false.
+    pub fn is_module_name_allowed(&self, name: &str) -> bool {
+        if let Some(module) = RuntimeModule::from_name(name) {
+            return self.is_module_allowed(module);
+        }
+        self.extensions.contains_module(name)
+            && self
+                .allowlist
+                .as_ref()
+                .is_none_or(|allowlist| allowlist.contains_extension_name(name))
+    }
+
+    /// The copyable built-in bit set plus the exact extension names used by the
+    /// loader and by extension initialization.
     pub(crate) fn allowed_modules(&self) -> AllowedModules {
+        let (bits, extension_names) = match self.allowlist.as_ref() {
+            None => (None, None),
+            Some(allowlist) => (
+                Some(
+                    allowlist
+                        .iter()
+                        .fold(0, |bits, module| bits | module.mask()),
+                ),
+                Some(Rc::new(allowlist.extension_name_set().clone())),
+            ),
+        };
         AllowedModules {
-            bits: self.allowlist.as_ref().map(|allowlist| {
-                allowlist
-                    .iter()
-                    .fold(0, |bits, module| bits | module.mask())
-            }),
+            bits,
+            extension_names,
         }
     }
 }
 
-/// Copyable, allocation-free form of an optional allowlist.
+/// Allocate-once form of an optional allowlist.
 ///
 /// `None` is unrestricted; `Some` is explicit and fail closed. Kept crate
-/// private so callers cannot set a raw bit and bypass name validation.
-#[derive(Clone, Copy, Debug)]
+/// private so callers cannot set a raw bit or name and bypass registration and
+/// name validation.
+#[derive(Clone, Debug)]
 pub(crate) struct AllowedModules {
     bits: Option<u64>,
+    extension_names: Option<Rc<BTreeSet<String>>>,
 }
 
 impl AllowedModules {
-    /// True when `module` may be constructed.
-    pub(crate) fn allows(self, module: RuntimeModule) -> bool {
+    /// True when built-in `module` may be constructed.
+    pub(crate) fn allows(&self, module: RuntimeModule) -> bool {
         self.bits.is_none_or(|bits| bits & module.mask() != 0)
+    }
+
+    /// True when the exact registered extension `name` may be constructed.
+    ///
+    /// Callers check the registry first, so an unknown name never reaches this
+    /// function. `None` names are unrestricted, matching the default runtime.
+    pub(crate) fn allows_name(&self, name: &str) -> bool {
+        if let Some(module) = RuntimeModule::from_name(name) {
+            return self.allows(module);
+        }
+        self.extension_names
+            .as_ref()
+            .is_none_or(|names| names.contains(name))
     }
 }
 
