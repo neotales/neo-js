@@ -458,17 +458,22 @@ fn write_string_op(
     write_value_op(hive, path, name, kind, bytes)
 }
 
-fn write_dword_op(hive: &str, path: &str, name: &str, value: f64) -> Result<(), RegistryError> {
+/// Encode an integer JavaScript number as the four little-endian bytes of a
+/// `REG_DWORD`.
+///
+/// The JavaScript wrapper also checks the range. The native interface repeats
+/// the check so a non-finite, fractional, negative, or above-`u32::MAX` value
+/// is rejected instead of being truncated or saturated.
+fn dword_bytes(value: f64) -> Result<[u8; 4], RegistryError> {
     if !value.is_finite() || value.fract() != 0.0 || value < 0.0 || value > f64::from(u32::MAX) {
         return Err(invalid_value());
     }
-    write_value_op(
-        hive,
-        path,
-        name,
-        TYPE_DWORD,
-        (value as u32).to_le_bytes().to_vec(),
-    )
+    Ok((value as u32).to_le_bytes())
+}
+
+fn write_dword_op(hive: &str, path: &str, name: &str, value: f64) -> Result<(), RegistryError> {
+    let bytes = dword_bytes(value)?;
+    write_value_op(hive, path, name, TYPE_DWORD, bytes.to_vec())
 }
 
 fn write_qword_op(hive: &str, path: &str, name: &str, value: &str) -> Result<(), RegistryError> {
@@ -1192,19 +1197,20 @@ fn list_subkeys_js<'js>(
     })
 }
 
-fn list_values_js<'js>(
-    ctx: Ctx<'js>,
-    hive: String,
-    path: String,
-    limit: u32,
+/// Build the `listValues` response for the values read from a key.
+///
+/// Kept separate from the platform enumeration so the value types, which are
+/// unsigned registry DWORDs, are testable on hosts without a registry.
+fn list_values_response<'js>(
+    ctx: &Ctx<'js>,
+    result: Result<Vec<(String, u32)>, RegistryError>,
 ) -> JsResult<Object<'js>> {
-    let result = validate_limit(limit).and_then(|limit| list_values_op(&hive, &path, limit));
-    respond(&ctx, result, |object, values| {
+    respond(ctx, result, |object, values| {
         let array = Array::new(ctx.clone())?;
         for (index, (name, kind)) in values.into_iter().enumerate() {
             let entry = Object::new_proto(ctx.clone(), None)?;
             entry.set("name", name)?;
-            entry.set("type", kind)?;
+            entry.set("type", js_uint32(ctx, kind))?;
             array.as_object().prop(
                 index as u32,
                 rquickjs::object::Property::from(entry)
@@ -1217,22 +1223,39 @@ fn list_values_js<'js>(
     })
 }
 
+fn list_values_js<'js>(
+    ctx: Ctx<'js>,
+    hive: String,
+    path: String,
+    limit: u32,
+) -> JsResult<Object<'js>> {
+    let result = validate_limit(limit).and_then(|limit| list_values_op(&hive, &path, limit));
+    list_values_response(&ctx, result)
+}
+
+/// Build the `readValue` response for one raw value.
+///
+/// Kept separate from the platform read so the unsigned value type is
+/// testable on hosts without a registry.
+fn read_value_response<'js>(
+    ctx: &Ctx<'js>,
+    result: Result<(u32, Vec<u8>), RegistryError>,
+) -> JsResult<Object<'js>> {
+    respond(ctx, result, |object, (kind, bytes)| {
+        let value = Object::new_proto(ctx.clone(), None)?;
+        value.set("type", js_uint32(ctx, kind))?;
+        value.set("data", TypedArray::new(ctx.clone(), bytes)?)?;
+        object.set("value", value)
+    })
+}
+
 fn read_value_js<'js>(
     ctx: Ctx<'js>,
     hive: String,
     path: String,
     name: String,
 ) -> JsResult<Object<'js>> {
-    respond(
-        &ctx,
-        read_value_op(&hive, &path, &name),
-        |object, (kind, bytes)| {
-            let value = Object::new_proto(ctx.clone(), None)?;
-            value.set("type", kind)?;
-            value.set("data", TypedArray::new(ctx.clone(), bytes)?)?;
-            object.set("value", value)
-        },
-    )
+    read_value_response(&ctx, read_value_op(&hive, &path, &name))
 }
 
 fn read_string_js<'js>(
@@ -1250,6 +1273,32 @@ fn read_string_js<'js>(
     respond(&ctx, result, |object, value| object.set("value", value))
 }
 
+/// The JavaScript number for a registry `u32`: a DWORD value or a value type.
+///
+/// The number is built as an `f64` on purpose: `IntoJs` for `u32` in
+/// rquickjs 0.14 narrows every value to `i32` whenever the round trip
+/// succeeds, which it always does. A DWORD or a value type from `0x8000_0000`
+/// upward would then reach script as a negative number, contradicting the
+/// documented unsigned range and `readValue`'s "numeric type unchanged"
+/// contract. Every `u32` is exact in `f64`, so converting through it keeps
+/// these values unsigned and still a plain JavaScript `number`.
+fn js_uint32<'js>(ctx: &Ctx<'js>, value: u32) -> Value<'js> {
+    Value::new_float(ctx.clone(), f64::from(value))
+}
+
+/// Build the `readUint32` response for a parsed DWORD.
+///
+/// Kept separate from the platform read so this conversion is testable on
+/// hosts that have no registry.
+fn read_uint32_response<'js>(
+    ctx: &Ctx<'js>,
+    result: Result<u32, RegistryError>,
+) -> JsResult<Object<'js>> {
+    respond(ctx, result, |object, value| {
+        object.set("value", js_uint32(ctx, value))
+    })
+}
+
 fn read_uint32_js<'js>(
     ctx: Ctx<'js>,
     hive: String,
@@ -1260,7 +1309,7 @@ fn read_uint32_js<'js>(
         let bytes: [u8; 4] = bytes.try_into().map_err(|_| invalid_value())?;
         Ok(u32::from_le_bytes(bytes))
     });
-    respond(&ctx, result, |object, value| object.set("value", value))
+    read_uint32_response(&ctx, result)
 }
 
 fn read_uint64_js<'js>(
@@ -1448,6 +1497,8 @@ impl ModuleDef for WinRegistryModule {
             Function::new(ctx.clone(), owned::acquire_js)?,
         )?;
         let limits = Object::new_proto(ctx.clone(), None)?;
+        // Every limit is a constant of at most 8 MiB, far below 2^31, so
+        // rquickjs's u32/usize narrowing cannot make one negative here.
         limits.set("hive", MAX_HIVE_UTF16)?;
         limits.set("path", MAX_PATH_UTF16)?;
         limits.set("valueName", MAX_VALUE_NAME_UTF16)?;
@@ -1799,6 +1850,120 @@ pub(crate) fn factory<'js>(ctx: &Ctx<'js>) -> JsResult<Function<'js>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A unit test because the public path needs a real registry: the host
+    /// read is unreachable without one. This builds the response object
+    /// `readUint32` returns and inspects what script sees. Reverting the
+    /// conversion to a raw `u32` makes it fail.
+    #[test]
+    fn dword_values_reach_script_as_unsigned_numbers() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            for value in [0, i32::MAX as u32, 1 << 31, u32::MAX] {
+                let object = read_uint32_response(&ctx, Ok(value)).unwrap();
+                ctx.globals().set("probe", object).unwrap();
+                let exact: bool = ctx
+                    .eval(format!(
+                        "probe.ok === true && probe.value === {value} &&
+                         Number.isSafeInteger(probe.value)"
+                    ))
+                    .unwrap();
+                assert!(
+                    exact,
+                    "DWORD {value} did not reach script as that unsigned number"
+                );
+            }
+        });
+    }
+
+    /// Synthetic types: a host without a registry cannot store one, so build
+    /// the `readValue` and `listValues` response objects directly and check
+    /// what script sees for each boundary type.
+    #[test]
+    fn registry_types_reach_script_as_unsigned_numbers() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            let kinds = [0, i32::MAX as u32, 1 << 31, u32::MAX];
+            for kind in kinds {
+                let object = read_value_response(&ctx, Ok((kind, vec![0xde, 0xad]))).unwrap();
+                ctx.globals().set("probe", object).unwrap();
+                let exact: bool = ctx
+                    .eval(format!(
+                        "probe.ok === true &&
+                         typeof probe.value.type === 'number' &&
+                         Number.isSafeInteger(probe.value.type) &&
+                         probe.value.type === {kind} &&
+                         probe.value.data instanceof Uint8Array &&
+                         probe.value.data.length === 2 &&
+                         probe.value.data[0] === 0xde && probe.value.data[1] === 0xad"
+                    ))
+                    .unwrap();
+                assert!(
+                    exact,
+                    "value type {kind} did not reach script as that unsigned number"
+                );
+            }
+
+            let entries = kinds
+                .iter()
+                .enumerate()
+                .map(|(index, &kind)| (format!("v{index}"), kind))
+                .collect::<Vec<_>>();
+            let object = list_values_response(&ctx, Ok(entries)).unwrap();
+            ctx.globals().set("listed", object).unwrap();
+            for (index, kind) in kinds.iter().enumerate() {
+                let exact: bool = ctx
+                    .eval(format!(
+                        "listed.ok === true && listed.value.length === 4 &&
+                         listed.value[{index}].name === 'v{index}' &&
+                         typeof listed.value[{index}].type === 'number' &&
+                         Number.isSafeInteger(listed.value[{index}].type) &&
+                         listed.value[{index}].type === {kind}"
+                    ))
+                    .unwrap();
+                assert!(
+                    exact,
+                    "listed value type {kind} did not reach script as that unsigned number"
+                );
+            }
+        });
+    }
+
+    /// A unit test because this is the exact encode-side bounds check; the
+    /// public path would need a real key and would only observe the bytes
+    /// through another read.
+    #[test]
+    fn dword_bytes_cover_the_unsigned_range() {
+        for (value, expected) in [
+            (0.0, [0x00, 0x00, 0x00, 0x00]),
+            (2_147_483_647.0, [0xff, 0xff, 0xff, 0x7f]),
+            (2_147_483_648.0, [0x00, 0x00, 0x00, 0x80]),
+            (4_294_967_295.0, [0xff, 0xff, 0xff, 0xff]),
+        ] {
+            assert_eq!(dword_bytes(value), Ok(expected), "{value}");
+        }
+    }
+
+    /// The rejection half of the same bounds check; see above.
+    #[test]
+    fn dword_bytes_reject_non_integers_and_out_of_range_values() {
+        for value in [
+            -1.0,
+            4_294_967_296.0,
+            0.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert_eq!(
+                dword_bytes(value).unwrap_err().code(),
+                "WINREGISTRY_INVALID_VALUE",
+                "{value}"
+            );
+        }
+    }
 
     #[test]
     fn enumeration_checks_one_entry_beyond_the_limit() {

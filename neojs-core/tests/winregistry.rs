@@ -391,6 +391,68 @@ fn mutated_intrinsics_and_own_length_do_not_bypass_validation() {
     .unwrap();
 }
 
+/// The wrapper and the native interface both reject a DWORD outside
+/// 0..=4,294,967,295. These checks happen before any platform call, so they
+/// run on every host and must raise `TypeError` rather than a registry error.
+#[test]
+fn uint32_inputs_outside_the_unsigned_range_are_type_errors() {
+    let js = runtime(true);
+    js.run_module(
+        "uint32-invalid.js",
+        r#"import {writeUint32} from 'neo:winregistry';
+
+         function expectTypeError(value) {
+             let error = null;
+             try { writeUint32('HKCU', 'Software\\neo-js-tests', 'Value', value); }
+             catch (caught) { error = caught; }
+             if (!(error instanceof TypeError)) {
+                 throw Error('expected TypeError, got ' + String(error));
+             }
+             if ('code' in error) throw Error('invalid input reached the registry layer');
+         }
+
+         expectTypeError(-1);
+         expectTypeError(4294967296);
+         expectTypeError(0.5);
+         expectTypeError(2147483648.5);
+         expectTypeError(NaN);
+         expectTypeError(Infinity);
+         expectTypeError(-Infinity);
+         expectTypeError('4294967295');
+         expectTypeError(4294967295n);
+         expectTypeError(undefined);
+         expectTypeError(null);"#,
+    )
+    .unwrap();
+}
+
+/// The documented DWORD range is inclusive at both ends. On a host without a
+/// registry these values pass JavaScript and native validation and then report
+/// `WINREGISTRY_UNSUPPORTED`, which is the furthest observable step here.
+#[cfg(not(windows))]
+#[test]
+fn uint32_boundaries_reach_the_unsupported_host() {
+    let js = runtime(true);
+    js.run_module(
+        "uint32-boundaries.js",
+        r#"import {writeUint32} from 'neo:winregistry';
+
+         function expectCode(fn, code) {
+             let seen = null;
+             try { fn(); } catch (error) { seen = error.code; }
+             if (seen !== code) throw Error('expected ' + code + ', got ' + seen);
+         }
+
+         for (const value of [0, 2147483647, 2147483648, 4294967295]) {
+             expectCode(
+                 () => writeUint32('HKCU', 'Software\\neo-js-tests', 'Value', value),
+                 'WINREGISTRY_UNSUPPORTED'
+             );
+         }"#,
+    )
+    .unwrap();
+}
+
 #[cfg(not(windows))]
 #[test]
 fn maximum_accepted_inputs_reach_the_unsupported_host() {

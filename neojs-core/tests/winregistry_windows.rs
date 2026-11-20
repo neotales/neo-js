@@ -459,9 +459,20 @@ fn writes_reads_enumerates_and_deletes_a_temporary_key() {
                  throw Error('expand string roundtrip');
              }
 
-             writeUint32(hive, path, 'Count', 4294967295);
-             if (readUint32(hive, path, 'Count') !== 4294967295) throw Error('dword');
-             if (typeof readUint32(hive, path, 'Count') !== 'number') throw Error('dword type');
+             for (const value of [0, 2147483647, 2147483648, 4294967295]) {
+                 writeUint32(hive, path, 'Count', value);
+                 const back = readUint32(hive, path, 'Count');
+                 if (back !== value) throw Error('dword ' + value + ' read as ' + back);
+                 if (typeof back !== 'number' || !Number.isSafeInteger(back)) {
+                     throw Error('dword type ' + value);
+                 }
+             }
+             // The maximum is stored as four 0xFF bytes, not saturated or signed.
+             const lastDword = readValue(hive, path, 'Count').data;
+             if (lastDword[0] !== 255 || lastDword[1] !== 255 ||
+                 lastDword[2] !== 255 || lastDword[3] !== 255) {
+                 throw Error('dword max bytes');
+             }
 
              writeUint64(hive, path, 'Big', 18446744073709551615n);
              const big = readUint64(hive, path, 'Big');
@@ -651,6 +662,9 @@ fn arbitrary_types_long_names_and_large_values_roundtrip() {
     // numeric type and exact bytes rather than rejecting the type.
     set_raw_value(&key.path, "Custom", 0xFFFF, &[0xde, 0xad, 0xbe, 0xef, 0x00]);
     set_raw_value(&key.path, "None", 0, &[]);
+    // Types with the high bit set are still unsigned numbers in JavaScript.
+    set_raw_value(&key.path, "High", 0x8000_0000, &[0x01, 0x02, 0x03, 0x04]);
+    set_raw_value(&key.path, "Max", 0xFFFF_FFFF, &[]);
     let large = vec![0x5a; 64 * 1024];
     set_raw_value(&key.path, "Large", 3, &large);
 
@@ -678,6 +692,13 @@ fn arbitrary_types_long_names_and_large_values_roundtrip() {
              const none = readValue('HKCU', path, 'None');
              if (none.type !== 0 || none.data.length !== 0) throw Error('reg none');
 
+             const high = readValue('HKCU', path, 'High');
+             if (high.type !== 2147483648) throw Error('high bit type');
+             if (high.data.length !== 4 || high.data[0] !== 1) throw Error('high bit data');
+             const max = readValue('HKCU', path, 'Max');
+             if (max.type !== 4294967295) throw Error('max type');
+             if (max.data.length !== 0) throw Error('max data');
+
              const big = readBinary('HKCU', path, 'Large');
              if (big.length !== 65536) throw Error('large length');
              if (big[0] !== 0x5a || big[65535] !== 0x5a) throw Error('large bytes');
@@ -692,11 +713,13 @@ fn arbitrary_types_long_names_and_large_values_roundtrip() {
              for (const entry of values) byName.set(entry.name, entry.type);
              if (byName.get('Custom') !== 0xFFFF) throw Error('listed custom type');
              if (byName.get('None') !== 0) throw Error('listed none type');
+             if (byName.get('High') !== 2147483648) throw Error('listed high bit type');
+             if (byName.get('Max') !== 4294967295) throw Error('listed max type');
              if (byName.get(longName) !== 1) throw Error('listed long name');
 
              if (deleteValue('HKCU', path, longName) !== true) throw Error('delete long name');
-             expectCode(() => listValues('HKCU', path, 2), 'WINREGISTRY_LIMIT');
-             if (listValues('HKCU', path, 3).length !== 3) throw Error('value limit');
+             expectCode(() => listValues('HKCU', path, 4), 'WINREGISTRY_LIMIT');
+             if (listValues('HKCU', path, 5).length !== 5) throw Error('value limit');
              if (deleteKey('HKCU', path) !== true) throw Error('delete key');"#,
             &key,
         ),
