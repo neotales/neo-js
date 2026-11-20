@@ -1,0 +1,10 @@
+[package]
+name = "neojs-io"
+description = "Optional synchronous in-memory byte reader and writer for neojs-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+neojs-core = { path = "../neojs-core" }

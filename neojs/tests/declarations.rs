@@ -85,6 +85,7 @@ fn core_declarations_omit_optional_modules() {
         "neo:os/schedulers/windows",
         "neo:scheduler",
         "neo:sqlite",
+        "neo:io",
     ] {
         assert!(
             !declared_modules(&core).contains(&name),
@@ -100,6 +101,7 @@ fn core_declarations_omit_optional_modules() {
         "neo:os/schedulers/windows",
         "neo:scheduler",
         "neo:sqlite",
+        "neo:io",
     ] {
         assert!(
             !declared_modules(&core_only).contains(&name),
@@ -116,7 +118,11 @@ fn core_declarations_omit_optional_modules() {
     );
     assert!(
         !core_only.contains("neo-sqlite.d.ts"),
-        "a core-only composition must not name the optional fragment"
+        "a core-only composition must not name the optional SQLite fragment"
+    );
+    assert!(
+        !core_only.contains("neo-io.d.ts"),
+        "a core-only composition must not name the optional byte I/O fragment"
     );
     assert!(
         core_only.contains("// Selection: core\n"),
@@ -133,6 +139,25 @@ fn enabling_os_user_does_not_enable_os_metadata() {
     assert_eq!(declared_modules(&composed), expected);
     assert!(!composed.contains("declare const os:"));
     assert!(composed.contains("// Selection: core, os-user\n"));
+}
+
+#[test]
+fn enabling_io_adds_exactly_one_module_declaration() {
+    let composed = declarations::compose(&root(), &["io"]).unwrap();
+    assert_eq!(
+        declared_modules(&composed)
+            .iter()
+            .filter(|module| **module == "neo:io")
+            .count(),
+        1,
+        "the byte I/O selection must declare neo:io exactly once"
+    );
+    assert!(composed.contains("// Selection: core, io\n"));
+    assert_no_duplicate_modules(&composed);
+    assert!(
+        !declared_modules(&read(declarations::CORE_PATH)).contains(&"neo:io"),
+        "the byte I/O fragment must own neo:io"
+    );
 }
 
 #[test]
@@ -417,7 +442,7 @@ fn rejects_unknown_and_duplicate_selections() {
         "{unknown}"
     );
     assert!(
-        unknown.contains("available: os, os-user, schedulers, sqlite"),
+        unknown.contains("available: io, os, os-user, schedulers, sqlite"),
         "{unknown}"
     );
 
