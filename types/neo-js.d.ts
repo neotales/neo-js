@@ -1,22 +1,14 @@
+// Generated declarations for the selected compiled modules. Do not edit.
+// Inputs: types/neo-js.core.d.ts, crates/neojs-os/types/neo-os.d.ts, crates/neojs-os-user/types/neo-os-user.d.ts, crates/neojs-schedulers/types/neo-schedulers.d.ts, crates/neojs-sqlite/types/neo-sqlite.d.ts
+// Selection: core, os, os-user, schedulers, sqlite
+// See types/README.md for the compose-types command.
+
 /// <reference lib="esnext.disposable" />
 
-/**
- * Host OS information. `platform` and `arch` identify the Rust compilation
- * target, not necessarily a separately detected host. Optional fields follow
- * the same platform-specific rules as the `neo:os` exports. This discloses
- * bounded, best-effort OS metadata without filesystem or registry permission;
- * it does not grant arbitrary filesystem or registry access or invoke a
- * subprocess. The object exists only when `neo:os` is admitted by the runtime
- * module allowlist. Global properties remain writable; named module exports
- * use the runtime's private snapshot.
- */
-declare const os: {
-  platform: string;
-  arch: string;
-  version: string | undefined;
-  codename: string | undefined;
-  variant: string | undefined;
-};
+// Core declarations for neojs-core. Optional modules owned by separate crates
+// are added by composition; see types/README.md. This file deliberately omits
+// `neo:os`, the scheduler generators, and `neo:sqlite`, because neojs-core
+// does not compile or register them.
 
 /** Available only with --allow-env. */
 declare const env: {
@@ -27,7 +19,7 @@ declare const env: {
 /**
  * The `neo:fs` API. Available only with `--allow-fs` and when the runtime's
  * module allowlist admits `neo:fs`. Relative paths use the runtime's working
- * directory, not the host process's. Every call is synchronous and blocking.
+ * directory, not the host process's. Only `readFile` is asynchronous.
  *
  * This is not a sandbox: a script with this object has the host user's
  * filesystem authority. Reads and writes are bounded; see the `neo:fs`
@@ -37,7 +29,14 @@ declare const fs: {
   readText(path: string): string;
   /** Same text validation and error precedence as `neo:fs.writeText`. */
   writeText(path: string, data: string): void;
-  readFile(path: string): Uint8Array;
+  /**
+   * Read bytes during managed module evaluation. Outside it, this throws
+   * `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. At most four reads are
+   * outstanding and two can run on workers. There is no caller cancellation
+   * API; teardown cancels cooperatively and may wait for an OS call.
+   */
+  readFile(path: string): Promise<Uint8Array>;
+  readFileSync(path: string): Uint8Array;
   writeFile(
     path: string,
     data: Uint8Array,
@@ -62,33 +61,6 @@ declare const fs: {
   MAX_LIST_TOTAL_BYTES: number;
 };
 
-declare module "neo:os" {
-  /** OS name of the Rust compilation target (`std::env::consts::OS`). */
-  export const platform: string;
-  /** CPU architecture of the Rust compilation target (`std::env::consts::ARCH`). */
-  export const arch: string;
-  /**
-   * Linux: distribution VERSION_ID from `/etc/os-release` (or
-   * `/usr/lib/os-release` only if the former is absent), not the kernel version.
-   * Windows: DisplayVersion, or `build <number>` from decimal CurrentBuildNumber.
-   * The fixed registry probes use the process-default WOW64 view (no view
-   * selector); a 32-bit process can see different values or find them unavailable.
-   * macOS: product version from `kern.osproductversion`.
-   * Undefined if unsupported or no usable value is available.
-   */
-  export const version: string | undefined;
-  /**
-   * Linux VERSION_CODENAME, falling back to UBUNTU_CODENAME when unavailable.
-   * Undefined off Linux or when no usable value is available.
-   */
-  export const codename: string | undefined;
-  /**
-   * Linux VARIANT_ID, falling back to VARIANT when unavailable; Windows EditionID.
-   * Undefined on other platforms or when no usable value is available.
-   */
-  export const variant: string | undefined;
-}
-
 declare module "neo:env" {
   /**
    * Read one environment variable. Returns `undefined` when it is absent or
@@ -103,15 +75,20 @@ declare module "neo:env" {
 }
 
 /**
- * Synchronous, bounded filesystem access. Requires `--allow-fs` and a runtime
+ * Bounded filesystem access. Requires `--allow-fs` and a runtime
  * allowlist that admits `neo:fs`.
  *
- * Every operation is blocking. Relative paths resolve against the runtime's
- * working directory; an unavailable runtime directory throws `FS_CWD` rather
- * than falling back to the host directory. Absolute paths and `..` components
- * still reach everything the host user can reach. This is not a sandbox.
+ * During managed module evaluation, `readFile` reads on a worker and returns
+ * a `Promise<Uint8Array>`. `readFileSync` and the other operations block the
+ * JavaScript thread. Relative paths resolve against the runtime's working
+ * directory, with no fallback to the host directory. If that directory is
+ * unavailable, `readFile` rejects with `FS_CWD` during a managed turn and
+ * synchronous operations throw `FS_CWD`. Outside a managed turn, `readFile`
+ * instead throws `FS_ASYNC_OUTSIDE_TURN` before I/O. Absolute paths and `..`
+ * components still reach everything the host user can reach. This is not a
+ * sandbox.
  *
- * `readFile`, `readText`, `writeFile`, and `writeText` require a regular file.
+ * `readFile`, `readFileSync`, `readText`, `writeFile`, and `writeText` require a regular file.
  * An open may occur before a non-regular object is rejected. If the type is
  * identified, the error is `FS_IS_DIRECTORY` or `FS_TYPE`; an open failure
  * can take precedence. Device-open side effects and latency are not bounded.
@@ -121,7 +98,7 @@ declare module "neo:env" {
  * and fallible allocation failures; this cannot catch every failure inside
  * QuickJS or the process allocator.
  *
- * `stat`, `readFile`, `readText`, `writeFile`, `writeText`, `exists`, and
+ * `stat`, `readFile`, `readFileSync`, `readText`, `writeFile`, `writeText`, `exists`, and
  * `readDir` follow a symlink at the final path component. `lstat` does not.
  * `readDir` does not follow entries and reports a symlink entry with
  * `isSymlink: true`. `remove` never follows a symlink at the target, and
@@ -176,6 +153,8 @@ declare module "neo:fs" {
     | "FS_CWD"
     | "FS_TYPE"
     | "FS_UNSUPPORTED"
+    | "FS_ASYNC_OUTSIDE_TURN"
+    | "FS_CANCELLED"
     | "FS_IO";
 
   /**
@@ -287,13 +266,29 @@ declare module "neo:fs" {
   export function writeText(path: string, data: string): void;
 
   /**
-   * Read a regular file as bytes.
+   * Read a regular file on a worker, using the runtime directory captured
+   * at the call. Only available during managed module evaluation; otherwise
+   * throws `FS_ASYNC_OUTSIDE_TURN` before I/O. In a managed turn, invalid
+   * arguments and I/O errors reject the Promise. A module turn accepts up
+   * to four outstanding reads (including undelivered results) and runs up
+   * to two on workers. Each outstanding read charges `MAX_READ_BYTES` plus
+   * the encoded byte length of its resolved path against a turn budget of
+   * `4 * (MAX_READ_BYTES + MAX_PATH_BYTES)`. Excess work rejects with
+   * `FS_LIMIT`. This budget does not cover buffers JavaScript retains after
+   * delivery. There is no caller cancellation API. Turn teardown cancels
+   * cooperatively and may wait for an OS call to return. Use `readFileSync`
+   * to block.
+   */
+  export function readFile(path: string): Promise<Uint8Array>;
+
+  /**
+   * Read a regular file as bytes, blocking the JavaScript thread.
    *
    * Returns a `Uint8Array` view over a new buffer. The same regular-file and
    * `MAX_READ_BYTES` rules as `readText` apply. The result is a copy, not a
    * live view of the file.
    */
-  export function readFile(path: string): Uint8Array;
+  export function readFileSync(path: string): Uint8Array;
 
   /**
    * Synchronously stream bytes from a regular file into a new regular file.
@@ -951,32 +946,69 @@ declare module "neo:ansi" {
 }
 
 /**
- * Lexical path operations for POSIX and Windows syntax. Requires no permission
- * flag and grants none.
+ * Lexical path operations for POSIX and Windows syntax. Importing this module
+ * does not require a permission flag.
  *
- * The `posix` and `win32` namespaces are selected explicitly; the host
- * platform never chooses between them. No function reads the filesystem, the
- * working directory, environment variables, the locale, or the platform, and
- * none resolves symlinks, junctions, drive mappings, or short names, checks
- * existence, folds case, or normalizes Unicode. Functions are synchronous and
- * repeatable.
+ * Choose `posix` or `win32` explicitly, or use named functions and constants
+ * for the host dialect (Windows on Windows, POSIX elsewhere). These functions
+ * do not perform filesystem I/O or check containment, existence, symlinks or
+ * junctions. They never read the process environment or per-drive directories.
  *
- * Every path must be a primitive string; a boxed `String`, `URL`, number,
- * `null`, `undefined`, or other value throws `TypeError`, as does any NUL
- * (U+0000) in a string argument. `basename`'s `suffix` must be a string.
+ * Every path must be a primitive string; a boxed `String`, number, `null`,
+ * `undefined`, or other value throws `TypeError`, as does any NUL (U+0000) in
+ * a string argument. Only `fromFileUrl` accepts a URL object, and it must
+ * have this realm's private URL brand. `basename`'s `suffix` must be a string.
  * `format` requires a non-null, non-array object whose `root`, `dir`, `base`,
- * `ext`, and `name` fields are strings or absent. These are the only errors.
+ * `ext`, and `name` fields are strings or absent.
  *
- * `normalize` is purely lexical: `..` is resolved by string manipulation, so
- * its result is not a containment or safety decision. Windows drive letters
- * are ASCII `A`-`Z`/`a`-`z`, case is preserved, and `\\?\` and `\\.\` receive
- * no special treatment. POSIX `//` collapses to `/`. `parse` removes trailing
- * separators from `dir` except a root's own separator, and a root-only path
- * has an empty `base`. This is not a drop-in replacement for Node's `path` or
- * `@neotales/path`: `resolve`, `relative`, file-URL helpers, and globs are
- * deliberately absent.
+ * `resolve`, `relative`, and Windows `toNamespacedPath` can disclose the
+ * runtime-local cwd if the input does not provide a complete absolute base.
+ * This fallback is available only in the host dialect and requires admitted
+ * `neo:fs` with filesystem permission, or admitted `neo:process` with
+ * process or stdio permission. It observes runtime `chdir` and never changes
+ * or falls back to the host process's cwd. Glob and file URL helpers are
+ * lexical and never use cwd.
  */
 declare module "neo:path" {
+  /**
+   * An instance of neo-js's realm-local `globalThis.URL`, installed before
+   * user code when `neo:path` is admitted. This is a file-only subset, not a
+   * DOM URL: there is no `searchParams`, `URLSearchParams`, static URL
+   * parsing helper, object URL API, or support for non-file schemes and
+   * bases. The constructor accepts a primitive string or a same-realm URL
+   * and an optional file URL base.
+   * This declaration deliberately does not augment the global DOM/Worker
+   * `URL` type. TypeScript checks this interface structurally; at runtime the
+   * conversion checks the object's private realm-local brand.
+   */
+  export interface FileURL {
+    href: string;
+    /** Always the string `"null"` in neo-js. */
+    readonly origin: string;
+    protocol: string;
+    username: string;
+    password: string;
+    host: string;
+    hostname: string;
+    port: string;
+    pathname: string;
+    search: string;
+    hash: string;
+    toString(): string;
+    toJSON(): string;
+  }
+
+  /**
+   * Type of the realm's global constructor for projects without DOM or
+   * WebWorker libs. For example, `(globalThis as { URL?: FileURLConstructor }).URL`
+   * is defined when `neo:path` is admitted. Prefer {@link toFileUrl} when
+   * constructing a URL from a path.
+   */
+  export interface FileURLConstructor {
+    new(input: string | FileURL, base?: string | FileURL): FileURL;
+    readonly prototype: FileURL;
+  }
+
   /** A parsed path; every field is a string. */
   export interface ParsedPath {
     /** `/`, or a Windows root such as `C:\`, `C:`, `\\server\share\`, or `""`. */
@@ -989,6 +1021,20 @@ declare module "neo:path" {
     ext: string;
     /** The final component without its extension. */
     name: string;
+  }
+
+  /** Options for compiling a glob. Absent, inherited or undefined fields use defaults. */
+  export interface GlobOptions {
+    /** Enable `?(...)`, `@(...)`, `*(...)`, `+(...)`, and `!(...)`. Default: true. */
+    extended?: boolean;
+    /**
+     * Enable whole-component `**`. Default: true for compilation.
+     * In `normalizeGlob` and `joinGlobs`, preserve `..` directly following
+     * `**` instead; default: false.
+     */
+    globstar?: boolean;
+    /** Use JavaScript's `i` flag. Default: false, including on Windows. */
+    caseInsensitive?: boolean;
   }
 
   /** The shape shared by the `posix` and `win32` namespaces. */
@@ -1034,7 +1080,10 @@ declare module "neo:path" {
      */
     extname(path: string): string;
 
-    /** True only for a syntactically absolute path in this namespace. */
+    /**
+     * True for a syntactically absolute path. A Windows rooted path such as
+     * `\child` is absolute here but still needs a drive or share in `resolve`.
+     */
     isAbsolute(path: string): boolean;
 
     /** Split into `root`, `dir`, `base`, `ext`, and `name` without normalizing. */
@@ -1048,6 +1097,149 @@ declare module "neo:path" {
      * validate consistency.
      */
     format(pathObject: Partial<ParsedPath>): string;
+
+    /**
+     * Return the common prefix at component boundaries, or `""` if there is
+     * none (including an empty array). Compare spelling exactly, retaining
+     * the separator when paths diverge after a shared component. Does not
+     * normalize or read cwd; Windows splits on `\` only, as in the reference.
+     */
+    common(paths: readonly string[]): string;
+
+    /**
+     * Resolve right to left into an absolute path without a trailing
+     * separator, except at the root. Empty segments are ignored after
+     * validation. Reads the runtime cwd only if a complete base is missing;
+     * the non-host dialect requires an explicit base. On Windows, a
+     * drive-relative segment requires a matching drive base (or matching
+     * native cwd), and a rooted segment without a drive inherits a drive or
+     * share. UNC shares are indivisible roots. No per-drive cwd or drive-root
+     * fallback is used. Can throw `Error` with `PATH_PERMISSION`,
+     * `PATH_CWD_DIALECT`, `PATH_CWD`, or `PATH_WINDOWS_ROOT`.
+     *
+     * @example Resolve without access to the runtime cwd.
+     * ```ts
+     * import { posix } from "neo:path";
+     * const absolute = posix.resolve("/project", "src", "../README.md");
+     * // "/project/README.md"
+     * ```
+     */
+    resolve(...paths: string[]): string;
+
+    /**
+     * Resolve both operands as `resolve` would, then return the path from
+     * `from` to `to`. Returns `""` for equal paths. Windows compares roots
+     * and components case-insensitively, preserves destination spelling, and
+     * returns the absolute destination if the drive/share/namespace differs.
+     * Has the same cwd requirements and errors as `resolve`.
+     */
+    relative(from: string, to: string): string;
+
+    /**
+     * POSIX returns the validated input unchanged. Windows converts a
+     * resolved drive path to `\\?\` form or a UNC path to `\\?\UNC\` form.
+     * Empty and already-namespaced/device paths are returned unchanged.
+     * Conversion is lexical and does not validate paths for Windows I/O.
+     * When resolution is needed, its cwd requirements and errors apply.
+     */
+    toNamespacedPath(path: string): string;
+
+    /**
+     * Convert an absolute path to a branded file URL without using cwd or
+     * doing I/O. POSIX collapses leading slashes; Windows recognizes UNC
+     * hosts, translates separators, and percent-encodes line breaks in
+     * the pathname. URL dot segments are normalized, lone surrogates
+     * become U+FFFD, and carets in the pathname serialize as `%5E`.
+     * Relative paths and NUL throw `TypeError`. Input and serialized URL
+     * length limits are 65,536 UTF-16 code units each, or 8,192 code units
+     * for host text. Overflow throws `RangeError`; these are not memory caps.
+     */
+    toFileUrl(path: string): FileURL;
+
+    /**
+     * Decode only the pathname of a file URL string or branded URL from
+     * this realm. POSIX ignores the host; Windows keeps remote hosts as
+     * UNC roots, including when the first segment looks like a drive.
+     * Query and fragment do not enter the path. Escaped `/` and `\` are
+     * decoded, so the result is not a containment check. Bare or malformed
+     * percent escapes remain literal; invalid escaped UTF-8 throws
+     * `URIError`. Invalid URLs, a raw NUL in a string argument, and decoded
+     * pathname NUL throw `TypeError`.
+     * Uses the same limits as {@link PathApi.toFileUrl}.
+     */
+    fromFileUrl(url: string | FileURL): string;
+
+    /**
+     * Heuristically detect glob-like syntax, using backslash as the escape
+     * in both dialects. A true result does not imply that compilation will
+     * succeed. Rejects non-strings and NUL with `TypeError`; over 4096 UTF-16
+     * code units throws `RangeError` with code `PATH_GLOB_LIMIT`.
+     */
+    isGlob(glob: string): boolean;
+
+    /**
+     * Produce a fresh, whole-string `RegExp`; an empty glob never matches.
+     * Supports `*`, `?` (one UTF-16 code unit except line terminators),
+     * comma-separated braces (not numeric/letter sequences), ranges,
+     * `[!...]`, named classes such as `[[:digit:]]`, and extended groups.
+     * `*`, `?`, classes and groups cannot cross separators. POSIX escapes
+     * with backslash; Windows accepts both separators and escapes with a
+     * backtick. Neither escape can quote a separator. Repeated and trailing
+     * separators are tolerated. `!(x)` tests for a rejected prefix, so
+     * `!(foo).js` also excludes `foobar.js`.
+     * `/` matches separator-only paths, not the empty string. An intermediate
+     * `**` consumes zero or more separator-terminated components; a nullable
+     * suffix such as `{,x}` does not let it consume a final bare component.
+     * Unlike upstream, separators in braces or extglobs are syntax errors.
+     *
+     * Invalid types and NUL throw `TypeError`; invalid syntax throws
+     * `SyntaxError` (`PATH_GLOB_SYNTAX`). Limits on pattern length (4096 code
+     * units), RegExp constructor source (16384 code units), group depth (16),
+     * alternative combinations (64), and variable repetitions (6) throw
+     * `RangeError` (`PATH_GLOB_LIMIT`). `*(...)` and `+(...)` require nonempty
+     * fixed-width alternatives with distinguishable literal prefixes when
+     * there is more than one alternative. Do not use the returned `RegExp`
+     * when either the pattern or subject is untrusted: compilation limits
+     * do not bound regex execution. Only `match` (default options) has an
+     * evaluation work budget. Neither is a security boundary.
+     *
+     * @example
+     * ```ts
+     * import { posix } from "neo:path";
+     * posix.globToRegExp("src/" + "**" + "/*.ts", { caseInsensitive: true })
+     *   .test("src/tools/PATH.TS"); // true
+     * ```
+     */
+    globToRegExp(glob: string, options?: GlobOptions): RegExp;
+
+    /**
+     * Normalize as a lexical path, without parsing its glob syntax. With
+     * `{ globstar: true }`, treat `..` immediately after `**` as literal.
+     * Rejects non-strings and NUL with `TypeError`; over 4096 UTF-16 code
+     * units throws `RangeError` (`PATH_GLOB_LIMIT`).
+     */
+    normalizeGlob(glob: string, options?: Pick<GlobOptions, "globstar">): string;
+
+    /**
+     * Join nonempty parts without modifying the input. An empty result
+     * from filtering the input is `"."`. With `{ globstar: true }`, join
+     * literally and use `normalizeGlob`; otherwise use normal `join` rules.
+     * Reads array length once and does not coerce it. Rejects invalid types,
+     * invalid array lengths, holes and NUL with `TypeError`. More than 256
+     * parts or 4096 joined code units throws `RangeError` (`PATH_GLOB_LIMIT`).
+     */
+    joinGlobs(globs: readonly string[], options?: Pick<GlobOptions, "globstar">): string;
+
+    /**
+     * Match against the default glob grammar with no cwd, I/O, or implicit
+     * normalization. Has the same input and pattern errors as `globToRegExp`;
+     * subjects over 16384 UTF-16 code units or evaluations beyond a fixed
+     * work budget throw `RangeError` (`PATH_GLOB_LIMIT`).
+     */
+    match(path: string, pattern: string): boolean;
+
+    /** Exact alias for {@link PathApi.match}. */
+    matchesGlob(path: string, pattern: string): boolean;
   }
 
   /** POSIX syntax: `/` separator, `:` delimiter. */
@@ -1055,6 +1247,54 @@ declare module "neo:path" {
 
   /** Windows syntax: `\` separator, `;` delimiter; both separators accepted. */
   export const win32: Readonly<PathApi<"\\", ";">>;
+
+  /** Host path separator: `\` on Windows, `/` elsewhere. */
+  export const SEPARATOR: "/" | "\\";
+  /** Host PATH-list separator: `;` on Windows, `:` elsewhere. */
+  export const DELIMITER: ":" | ";";
+  /** Matches runs of host path separators (Windows accepts both spellings). */
+  export const SEPARATOR_PATTERN: RegExp;
+
+  /** The host dialect's {@link PathApi.join}. */
+  export const join: PathApi<string, string>["join"];
+  /** The host dialect's {@link PathApi.normalize}. */
+  export const normalize: PathApi<string, string>["normalize"];
+  /** The host dialect's {@link PathApi.basename}. */
+  export const basename: PathApi<string, string>["basename"];
+  /** The host dialect's {@link PathApi.dirname}. */
+  export const dirname: PathApi<string, string>["dirname"];
+  /** The host dialect's {@link PathApi.extname}. */
+  export const extname: PathApi<string, string>["extname"];
+  /** The host dialect's {@link PathApi.isAbsolute}. */
+  export const isAbsolute: PathApi<string, string>["isAbsolute"];
+  /** The host dialect's {@link PathApi.parse}. */
+  export const parse: PathApi<string, string>["parse"];
+  /** The host dialect's {@link PathApi.format}. */
+  export const format: PathApi<string, string>["format"];
+  /** The host dialect's {@link PathApi.common}. */
+  export const common: PathApi<string, string>["common"];
+  /** The host dialect's {@link PathApi.resolve}. */
+  export const resolve: PathApi<string, string>["resolve"];
+  /** The host dialect's {@link PathApi.relative}. */
+  export const relative: PathApi<string, string>["relative"];
+  /** The host dialect's {@link PathApi.toNamespacedPath}. */
+  export const toNamespacedPath: PathApi<string, string>["toNamespacedPath"];
+  /** The host dialect's {@link PathApi.toFileUrl}. */
+  export const toFileUrl: PathApi<string, string>["toFileUrl"];
+  /** The host dialect's {@link PathApi.fromFileUrl}. */
+  export const fromFileUrl: PathApi<string, string>["fromFileUrl"];
+  /** The host dialect's {@link PathApi.isGlob}. */
+  export const isGlob: PathApi<string, string>["isGlob"];
+  /** The host dialect's {@link PathApi.globToRegExp}. */
+  export const globToRegExp: PathApi<string, string>["globToRegExp"];
+  /** The host dialect's {@link PathApi.normalizeGlob}. */
+  export const normalizeGlob: PathApi<string, string>["normalizeGlob"];
+  /** The host dialect's {@link PathApi.joinGlobs}. */
+  export const joinGlobs: PathApi<string, string>["joinGlobs"];
+  /** The host dialect's {@link PathApi.match}. */
+  export const match: PathApi<string, string>["match"];
+  /** Exact alias for the host dialect's {@link match}. */
+  export const matchesGlob: typeof match;
 }
 
 /**
@@ -1289,336 +1529,6 @@ declare module "neo:yaml" {
   export default parse;
 }
 
-/**
- * Pure, synchronous generation of systemd unit text. Requires no permission
- * flag and grants no host capability.
- *
- * No function reads or writes a file or directory, changes permissions,
- * creates a process, runs a shell, calls a service manager, registers a task,
- * or enables anything. The returned strings are inert until a caller with
- * separate authority writes and installs them. A caller that uses `neo:fs` to
- * write them needs `--allow-fs`; a caller that uses a deployment tool needs
- * whatever authority that tool requires. This module never installs. This is
- * not isolation from other code in the same realm.
- *
- * A schedule is `{kind: "daily", at: "HH:MM"}` or
- * `{kind: "weekly", at: "HH:MM", weekdays: [...]}`. `HH` is 00 through 23 and
- * `MM` is 00 through 59; seconds are not accepted. Weekdays are the lowercase
- * three-letter names `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, and `sun`.
- * They are emitted in Monday-through-Sunday order. Daily becomes
- * `OnCalendar=*-*-* HH:MM:00`; weekly becomes
- * `OnCalendar=Mon,Wed *-*-* HH:MM:00`. Other kinds and contradictory fields
- * are rejected.
- *
- * Time zones are not converted. An OnCalendar expression without a time-zone
- * suffix uses the timer's local time. Daylight-saving transitions and
- * missed runs are not modelled here.
- *
- * systemd arguments are emitted as one quoted `ExecStart` item per argument,
- * and systemd's own parser, not a shell, turns the line back into an argv.
- * `%` is doubled for specifier expansion, `$` is doubled for environment
- * substitution, and `\` and `"` are backslash-escaped. A lone `;` argument, a
- * program containing `$`, control characters, and unpaired surrogates are
- * rejected. `Description`, `User`, and `WorkingDirectory` accept a smaller
- * character set than systemd itself: `%`, backslashes, quotation marks,
- * control characters, and leading or trailing whitespace are rejected.
- * `WorkingDirectory` must be an absolute POSIX path. `User` must be a simple
- * name or a decimal numeric ID; it is not looked up.
- *
- * Every options object must be a plain object (prototype `Object.prototype`)
- * or a null-prototype record whose own properties are enumerable data
- * properties. Accessors, own symbol properties, non-enumerable own properties,
- * unknown keys, arrays, class instances, and objects with another prototype
- * are rejected. Validation reads property descriptors rather than
- * `object[key]`, so an accessor is rejected without being invoked. Only own
- * values are used: an inherited enumerable property is rejected, an inherited
- * value never satisfies a known option, and accepted values are copied onto a
- * null-prototype record before use. A transparent Proxy over a conforming
- * record is indistinguishable and may be accepted; a Proxy can run its traps
- * during inspection. `args` and `weekdays` are read by own index; an accessor
- * or non-enumerable index is rejected. Other own properties on those arrays
- * are ignored and cannot alter the generated schedule or argv. A misspelled
- * or unsupported key such as `interval` or `groupId` is not silently ignored. Shape violations use `SCHEDULER_TYPE` for a
- * non-object, array, or non-plain prototype, and `SCHEDULER_UNSUPPORTED`
- * for accessors, own symbols, non-enumerable own properties, inherited
- * enumerable properties, or unknown keys.
- *
- * Every string option rejects control characters, unpaired UTF-16 surrogates,
- * and U+FFFE or U+FFFF. Every rejected input throws `SchedulerError` with a
- * stable `code` and the option `field` that failed. Messages never include the
- * rejected value. A getter or Proxy trap on an options object can still throw
- * its own error.
- */
-declare module "neo:os/schedulers/systemd" {
-  /** Stable failure codes; match on these, never on the message. */
-  export type SchedulerErrorCode =
-    | "SCHEDULER_TYPE"
-    | "SCHEDULER_VALUE"
-    | "SCHEDULER_SCHEDULE"
-    | "SCHEDULER_UNSUPPORTED"
-    | "SCHEDULER_LIMIT";
-
-  /**
-   * Thrown for invalid options or unsupported values. Match against the
-   * `SchedulerError` exported by the same module as the generator.
-   */
-  export class SchedulerError extends Error {
-    name: "SchedulerError";
-    /** Stable code; match on this, never on the message. */
-    code: SchedulerErrorCode;
-    /** The option path that failed, such as `program` or `args[0]`. */
-    field: string;
-  }
-
-  /** A lowercase three-letter weekday name. */
-  export type Weekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
-
-  /** Every day at a local wall-clock time. */
-  export interface DailySchedule {
-    kind: "daily";
-    /** Exactly `HH:MM`, 00:00 through 23:59. */
-    at: string;
-  }
-
-  /** Selected weekdays at a local wall-clock time. */
-  export interface WeeklySchedule {
-    kind: "weekly";
-    /** Exactly `HH:MM`, 00:00 through 23:59. */
-    at: string;
-    /** One or more distinct weekdays; emitted in Monday-through-Sunday order. */
-    weekdays: readonly Weekday[];
-  }
-
-  /** The supported recurring schedules. No one-shot or interval form exists. */
-  export type Schedule = DailySchedule | WeeklySchedule;
-
-  /** Options for a systemd service unit. */
-  export interface SystemdServiceOptions {
-    /**
-     * Base unit name without `.service` or `.timer`. ASCII letters, digits,
-     * `_`, `.`, and `-` only; must start with a letter or digit; at most 200
-     * characters; must not end with a dot or a unit suffix.
-     */
-    name: string;
-    /**
-     * Optional `Description=`. Must not contain `%`, `\`, `"`, `'`, control
-     * characters, or leading or trailing whitespace.
-     */
-    description?: string;
-    /** Absolute POSIX path to the executable. Spaces are quoted safely. */
-    program: string;
-    /** Arguments passed directly as separate argv items, not through a shell. */
-    args?: readonly string[];
-    /** Optional absolute POSIX `WorkingDirectory=`. */
-    workingDirectory?: string;
-    /** Optional `User=` as a simple name or decimal numeric ID. */
-    user?: string;
-  }
-
-  /** Options for a systemd timer unit. */
-  export interface SystemdTimerOptions {
-    /** Same base name as the service unit. */
-    name: string;
-    /** The recurring calendar schedule. */
-    schedule: Schedule;
-    /** Emit `Persistent=true`; defaults to `false` and only affects OnCalendar. */
-    persistent?: boolean;
-  }
-
-  /** Options that produce a matched service and timer pair. */
-  export interface SystemdUnitsOptions
-    extends SystemdServiceOptions,
-      SystemdTimerOptions {}
-
-  /**
-   * Generate a `Type=oneshot` systemd service unit. The result ends with one
-   * newline and has no `[Install]` section: the timer is the enabled unit.
-   *
-   * @throws SchedulerError for an invalid or unsupported value.
-   */
-  export function systemdService(options: SystemdServiceOptions): string;
-
-  /**
-   * Generate a systemd timer unit that activates `<name>.service` and is
-   * wanted by `timers.target`. The result ends with one newline.
-   *
-   * @throws SchedulerError for an invalid or unsupported value.
-   */
-  export function systemdTimer(options: SystemdTimerOptions): string;
-
-  /**
-   * Generate a matched service and timer. The caller must install them as
-   * `<name>.service` and `<name>.timer`; this function writes nothing.
-   *
-   * @throws SchedulerError for an invalid or unsupported value.
-   */
-  export function systemdUnits(options: SystemdUnitsOptions): {
-    service: string;
-    timer: string;
-  };
-
-  /** Maximum UTF-8 byte length of a generated systemd `ExecStart=` line. */
-  export const MAX_SYSTEMD_LINE_BYTES: 1048576;
-}
-
-/**
- * Pure, synchronous generation of Windows Task Scheduler XML. Requires no
- * permission flag and grants no host capability. It returns text only; it
- * never writes, installs, registers, or runs a task.
- *
- * Uses the same local wall-clock schedules and options record validation as
- * the systemd module. Daily schedules use `ScheduleByDay`/`DaysInterval=1`;
- * weekly schedules use `ScheduleByWeek`/`WeeksInterval=1`. Task Scheduler
- * interprets `StartBoundary` in local time; no time-zone conversion is done.
- *
- * `<Command>` is not quoted. `<Arguments>` uses the Microsoft C/C++ runtime
- * `CommandLineToArgvW` convention, not `cmd.exe` or PowerShell quoting.
- * Write the returned XML as UTF-16LE with a byte-order mark, or replace its
- * `encoding="UTF-16"` declaration to match the bytes you write.
- *
- * Paths must be absolute drive or UNC paths with backslash separators.
- * Relative paths, forward slashes, `.` and `..` components, empty
- * components, invalid filename characters, percent signs, and device paths
- * are rejected. The Task Scheduler XSD's 260-character path limit applies.
- * No path is checked for existence.
- *
- * The generated task declares schema version 1.3. `CalendarTrigger` emits
- * `Enabled` before `StartBoundary`, weekly output emits `DaysOfWeek` before
- * `WeeksInterval`, and `Actions/@Context` is emitted only with a principal.
- */
-declare module "neo:os/schedulers/windows" {
-  import type { Schedule, SchedulerErrorCode } from "neo:os/schedulers/systemd";
-  export type {
-    DailySchedule,
-    Schedule,
-    SchedulerErrorCode,
-    Weekday,
-    WeeklySchedule,
-  } from "neo:os/schedulers/systemd";
-
-  /**
-   * Thrown for invalid options or unsupported values. Match against the
-   * `SchedulerError` exported by the same module as the generator.
-   */
-  export class SchedulerError extends Error {
-    name: "SchedulerError";
-    /** Stable code; match on this, never on the message. */
-    code: SchedulerErrorCode;
-    /** The option path that failed, such as `program` or `args[0]`. */
-    field: string;
-  }
-
-  /**
-   * Task Scheduler logon type accepted by the authoritative XSD. `Password`
-   * sets only the XML value; this module never accepts, handles, or stores a
-   * password. `Group` and `ServiceAccount` are not in the XSD enumeration
-   * and are rejected.
-   */
-  export type WindowsLogonType =
-    | "InteractiveToken"
-    | "Password"
-    | "S4U"
-    | "InteractiveTokenOrPassword";
-
-  /** Task Scheduler run level. */
-  export type WindowsRunLevel = "LeastPrivilege" | "HighestAvailable";
-
-  /** Optional Task Scheduler principal. Omitting it omits `<Principals>`. */
-  export interface WindowsPrincipal {
-    /** Account name or SID. Not looked up. */
-    userId: string;
-    logonType: WindowsLogonType;
-    runLevel?: WindowsRunLevel;
-  }
-
-  /** Options for a Windows Task Scheduler task. */
-  export interface WindowsTaskOptions {
-    /**
-     * Task name, emitted as `\<name>` in `<URI>`. At most 255 characters; no
-     * backslash or slash; not `.` or `..`; no leading or trailing whitespace.
-     */
-    name: string;
-    /** Optional `Description`. XML-escaped. */
-    description?: string;
-    /**
-     * First eligible local date as `YYYY-MM-DD`. A Gregorian date from 1601
-     * through 9999. Combined with the schedule time and `:00` seconds.
-     */
-    startDate: string;
-    /** Absolute Windows drive or UNC path to the executable. */
-    program: string;
-    /** Arguments quoted with the C/C++ `CommandLineToArgvW` convention. */
-    args?: readonly string[];
-    /** Optional absolute Windows `WorkingDirectory`. */
-    workingDirectory?: string;
-    /** The recurring calendar schedule. */
-    schedule: Schedule;
-    /** Optional principal; omitting it lets registration apply its defaults. */
-    principal?: WindowsPrincipal;
-  }
-
-  /**
-   * Generate Task Scheduler 2.0 XML. The result ends with one newline and
-   * declares `encoding="UTF-16"`; see the module notes for writing it.
-   *
-   * @throws SchedulerError for an invalid or unsupported value.
-   */
-  export function windowsTask(options: WindowsTaskOptions): string;
-
-  /** Byte encoding to use when writing `windowsTask` output: UTF-16LE with a BOM. */
-  export const WINDOWS_XML_ENCODING: "UTF-16LE";
-
-  /** Maximum Windows command-line length, including the terminating NUL. */
-  export const MAX_WINDOWS_COMMAND_LINE: 32767;
-}
-
-/**
- * @deprecated Import from `neo:os/schedulers/systemd` or
- * `neo:os/schedulers/windows` instead. Allowlisting this legacy name grants
- * both generators through this name only. All three specifiers are checked
- * separately. Catch `SchedulerError` from the same module as the generator.
- */
-declare module "neo:scheduler" {
-  import type { SchedulerErrorCode } from "neo:os/schedulers/systemd";
-
-  /** Thrown by the legacy module for invalid options or unsupported values. */
-  export class SchedulerError extends Error {
-    name: "SchedulerError";
-    /** Stable code; match on this, never on the message. */
-    code: SchedulerErrorCode;
-    /** The option path that failed, such as `program` or `args[0]`. */
-    field: string;
-  }
-
-  export {
-    MAX_SYSTEMD_LINE_BYTES,
-    systemdService,
-    systemdTimer,
-    systemdUnits,
-  } from "neo:os/schedulers/systemd";
-  export type {
-    DailySchedule,
-    Schedule,
-    SchedulerErrorCode,
-    SystemdServiceOptions,
-    SystemdTimerOptions,
-    SystemdUnitsOptions,
-    Weekday,
-    WeeklySchedule,
-  } from "neo:os/schedulers/systemd";
-  export {
-    MAX_WINDOWS_COMMAND_LINE,
-    WINDOWS_XML_ENCODING,
-    windowsTask,
-  } from "neo:os/schedulers/windows";
-  export type {
-    WindowsLogonType,
-    WindowsPrincipal,
-    WindowsRunLevel,
-    WindowsTaskOptions,
-  } from "neo:os/schedulers/windows";
-}
-
 /** Synchronous assertions. There are no asynchronous forms. */
 declare module "neo:assert" {
   type UnsupportedCallbackResult =
@@ -1783,10 +1693,12 @@ declare module "neo:test" {
 }
 
 /**
- * Synchronous standard streams and a runtime-local working directory.
+ * Synchronous standard streams, a runtime-local working directory, and host
+ * process elevation status.
  *
  * The module is available with `--allow-run` or `--allow-stdio`; without one of
- * those flags the import fails and no host callback is installed. Reading the
+ * those flags the import fails and no host callback is installed. If the
+ * embedder uses a module allowlist, it must include `neo:process`. Reading the
  * host's standard input requires one of those flags too; `--allow-stdio` is the
  * narrower choice. Writing `stdout` and `stderr` needs no separate permission
  * because `console` already reaches those streams.
@@ -1863,6 +1775,13 @@ declare module "neo:process" {
     constructor(message: string, options?: { cause?: unknown });
   }
 
+  /** Thrown when `isElevated` cannot determine the host process elevation. */
+  export class ElevationError extends Error {
+    /** Set by `isElevated` when it throws; absent on manually constructed errors. */
+    readonly code?: "PROCESS_ELEVATION" | "PROCESS_ELEVATION_UNSUPPORTED";
+    constructor(message: string);
+  }
+
   /** The host standard output stream. */
   export const stdout: StdWriter;
   /** The host standard error stream. */
@@ -1890,13 +1809,26 @@ declare module "neo:process" {
    */
   export function chdir(directory: string): void;
 
+  /**
+   * Report whether the host process has effective UID 0 on Unix or an elevated
+   * primary process token on Windows. Each call takes a fresh snapshot. It does
+   * not check Windows Administrators membership, change privileges, or predict
+   * whether an operation will succeed.
+   *
+   * @throws ElevationError with code `PROCESS_ELEVATION` when the token query
+   * fails or `PROCESS_ELEVATION_UNSUPPORTED` on an unsupported platform.
+   */
+  export function isElevated(): boolean;
+
   const _default: {
     cwd: typeof cwd;
     chdir: typeof chdir;
+    isElevated: typeof isElevated;
     stdin: StdReader;
     stdout: StdWriter;
     stderr: StdWriter;
     ChangeDirectoryError: typeof ChangeDirectoryError;
+    ElevationError: typeof ElevationError;
   };
   export default _default;
 }
@@ -2823,4 +2755,532 @@ declare module "neo:age" {
    * or out-of-bounds view.
    */
   export function decrypt(identity: string, ciphertext: Uint8Array): Uint8Array;
+}
+
+// Type fragment owned by neojs-os. The CLI composition includes it because the
+// CLI links this crate. Declaring `neo:os` records compiled availability; it
+// does not grant permission (none is needed) or admit the module through a
+// runtime allowlist. types/neo-js.core.d.ts omits both this module and the
+// `os` global.
+
+/**
+ * Host OS information. `platform` and `arch` identify the Rust compilation
+ * target, not necessarily a separately detected host. Optional fields follow
+ * the same platform-specific rules as the `neo:os` exports. This discloses
+ * bounded, best-effort OS metadata without filesystem or registry permission;
+ * it does not grant arbitrary filesystem or registry access or invoke a
+ * subprocess. The object exists only when the host links `neojs-os`,
+ * registers its extension, and admits `neo:os` in any explicit runtime
+ * module allowlist. No permission flag is required. Global properties
+ * remain writable; named module exports use the runtime's private snapshot.
+ */
+declare const os: {
+  platform: string;
+  arch: string;
+  version: string | undefined;
+  codename: string | undefined;
+  variant: string | undefined;
+};
+
+declare module "neo:os" {
+  /** OS name of the Rust compilation target (`std::env::consts::OS`). */
+  export const platform: string;
+  /** CPU architecture of the Rust compilation target (`std::env::consts::ARCH`). */
+  export const arch: string;
+  /**
+   * Linux: distribution VERSION_ID from `/etc/os-release` (or
+   * `/usr/lib/os-release` only if the former is absent), not the kernel version.
+   * Windows: DisplayVersion, or `build <number>` from decimal CurrentBuildNumber.
+   * The fixed registry probes use the process-default WOW64 view (no view
+   * selector); a 32-bit process can see different values or find them unavailable.
+   * macOS: product version from `kern.osproductversion`.
+   * Undefined if unsupported or no usable value is available.
+   */
+  export const version: string | undefined;
+  /**
+   * Linux VERSION_CODENAME, falling back to UBUNTU_CODENAME when unavailable.
+   * Undefined off Linux or when no usable value is available.
+   */
+  export const codename: string | undefined;
+  /**
+   * Linux VARIANT_ID, falling back to VARIANT when unavailable; Windows EditionID.
+   * Undefined on other platforms or when no usable value is available.
+   */
+  export const variant: string | undefined;
+}
+
+/**
+ * Sensitive host account and process identity. Requires registration of
+ * `neojs-os-user`, `--allow-user` (`Permissions::user` for embedders), and
+ * admission by any configured runtime module allowlist. Implemented on
+ * Linux and macOS; operations throw `USER_UNSUPPORTED` elsewhere, including
+ * Windows.
+ *
+ * Grant this capability only to scripts you trust with account names, home
+ * paths, user IDs, and group memberships. Do not use the results as an
+ * authorization check. The OS account service (NSS on Linux) can consult a
+ * remote directory and block without a deadline. Importing the module
+ * performs no identity lookup and adds no global. The module does not
+ * directly read the environment. A temp directory API is pending because
+ * selecting it can reveal environment values. IDs are exact unsigned
+ * 32-bit numbers.
+ *
+ * Lookups are uncached and non-atomic. The runtime's account buffer is capped
+ * at 256 KiB and seven attempts; the single group query has room for 4,096
+ * entries. These limits bound neo-js buffers and retries, not the account
+ * service's work or latency. Lookup failures are `Error` values with a stable
+ * `code` and fixed message, without account data, paths, OS error strings,
+ * or a stack.
+ */
+declare module "neo:os/user" {
+  /** The account database entry for the caller's real UID. */
+  export interface UserAccount {
+    uid: number;
+    /** The account's primary GID, not the caller's real or effective GID. */
+    primaryGid: number;
+    username: string;
+    /** Account profile directory, not an environment override. */
+    homeDir: string;
+  }
+
+  /** The caller's real/effective IDs, sampled separately. */
+  export interface ProcessIds {
+    realUid: number;
+    effectiveUid: number;
+    realGid: number;
+    effectiveGid: number;
+  }
+
+  /** Stable `code` values on identity lookup errors. */
+  export type UserErrorCode =
+    | "USER_NOT_FOUND"
+    | "USER_ENCODING"
+    | "USER_LIMIT"
+    | "USER_LOOKUP"
+    | "USER_UNSUPPORTED";
+
+  /**
+   * Look up the real user's account, not the effective user or login account.
+   * @throws `USER_NOT_FOUND`, `USER_ENCODING`, `USER_LIMIT`, `USER_LOOKUP`, or `USER_UNSUPPORTED`.
+   */
+  export function currentUserSync(): UserAccount;
+  /**
+   * Read the real user's account profile directory, without checking that it
+   * exists. Unlike Go's `os.UserHomeDir()`, this does not consult the environment.
+   * @throws `USER_NOT_FOUND`, `USER_ENCODING`, `USER_LIMIT`, `USER_LOOKUP`, or `USER_UNSUPPORTED`.
+   */
+  export function homeDirSync(): string;
+  /**
+   * Read caller IDs without an account lookup.
+   * @throws `USER_UNSUPPORTED` on hosts without a backend.
+   */
+  export function processIdsSync(): ProcessIds;
+  /**
+   * OS-reported memberships for the real user's account, including its primary
+   * GID, sorted ascending and deduplicated. These are not the live process
+   * group credentials and must not be used to authorize operations.
+   * @throws `USER_NOT_FOUND`, `USER_LIMIT`, `USER_LOOKUP`, or `USER_UNSUPPORTED`.
+   */
+  export function accountGroupIdsSync(): number[];
+}
+
+// Optional scheduler generators for neojs-schedulers. Referenced by the
+// compose-types selection; core declarations deliberately omit these modules.
+
+/**
+ * Pure, synchronous generation of systemd unit text. Requires no permission
+ * flag and grants no host capability.
+ *
+ * No function reads or writes a file or directory, changes permissions,
+ * creates a process, runs a shell, calls a service manager, registers a task,
+ * or enables anything. The returned strings are inert until a caller with
+ * separate authority writes and installs them. A caller that uses `neo:fs` to
+ * write them needs `--allow-fs`; a caller that uses a deployment tool needs
+ * whatever authority that tool requires. This module never installs. This is
+ * not isolation from other code in the same realm.
+ *
+ * A schedule is `{kind: "daily", at: "HH:MM"}` or
+ * `{kind: "weekly", at: "HH:MM", weekdays: [...]}`. `HH` is 00 through 23 and
+ * `MM` is 00 through 59; seconds are not accepted. Weekdays are the lowercase
+ * three-letter names `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, and `sun`.
+ * They are emitted in Monday-through-Sunday order. Daily becomes
+ * `OnCalendar=*-*-* HH:MM:00`; weekly becomes
+ * `OnCalendar=Mon,Wed *-*-* HH:MM:00`. Other kinds and contradictory fields
+ * are rejected.
+ *
+ * Time zones are not converted. An OnCalendar expression without a time-zone
+ * suffix uses the timer's local time. Daylight-saving transitions and
+ * missed runs are not modelled here.
+ *
+ * systemd arguments are emitted as one quoted `ExecStart` item per argument,
+ * and systemd's own parser, not a shell, turns the line back into an argv.
+ * `%` is doubled for specifier expansion, `$` is doubled for environment
+ * substitution, and `\` and `"` are backslash-escaped. A lone `;` argument, a
+ * program containing `$`, control characters, and unpaired surrogates are
+ * rejected. `Description`, `User`, and `WorkingDirectory` accept a smaller
+ * character set than systemd itself: `%`, backslashes, quotation marks,
+ * control characters, and leading or trailing whitespace are rejected.
+ * `WorkingDirectory` must be an absolute POSIX path. `User` must be a simple
+ * name or a decimal numeric ID; it is not looked up.
+ *
+ * Every options object must be a plain object (prototype `Object.prototype`)
+ * or a null-prototype record whose own properties are enumerable data
+ * properties. Accessors, own symbol properties, non-enumerable own properties,
+ * unknown keys, arrays, class instances, and objects with another prototype
+ * are rejected. Validation reads property descriptors rather than
+ * `object[key]`, so an accessor is rejected without being invoked. Only own
+ * values are used: an inherited enumerable property is rejected, an inherited
+ * value never satisfies a known option, and accepted values are copied onto a
+ * null-prototype record before use. A transparent Proxy over a conforming
+ * record is indistinguishable and may be accepted; a Proxy can run its traps
+ * during inspection. `args` and `weekdays` are read by own index; an accessor
+ * or non-enumerable index is rejected. Other own properties on those arrays
+ * are ignored and cannot alter the generated schedule or argv. A misspelled
+ * or unsupported key such as `interval` or `groupId` is not silently ignored. Shape violations use `SCHEDULER_TYPE` for a
+ * non-object, array, or non-plain prototype, and `SCHEDULER_UNSUPPORTED`
+ * for accessors, own symbols, non-enumerable own properties, inherited
+ * enumerable properties, or unknown keys.
+ *
+ * Every string option rejects control characters, unpaired UTF-16 surrogates,
+ * and U+FFFE or U+FFFF. Every rejected input throws `SchedulerError` with a
+ * stable `code` and the option `field` that failed. Messages never include the
+ * rejected value. A getter or Proxy trap on an options object can still throw
+ * its own error.
+ */
+declare module "neo:os/schedulers/systemd" {
+  /** Stable failure codes; match on these, never on the message. */
+  export type SchedulerErrorCode =
+    | "SCHEDULER_TYPE"
+    | "SCHEDULER_VALUE"
+    | "SCHEDULER_SCHEDULE"
+    | "SCHEDULER_UNSUPPORTED"
+    | "SCHEDULER_LIMIT";
+
+  /**
+   * Thrown for invalid options or unsupported values. Match against the
+   * `SchedulerError` exported by the same module as the generator.
+   */
+  export class SchedulerError extends Error {
+    name: "SchedulerError";
+    /** Stable code; match on this, never on the message. */
+    code: SchedulerErrorCode;
+    /** The option path that failed, such as `program` or `args[0]`. */
+    field: string;
+  }
+
+  /** A lowercase three-letter weekday name. */
+  export type Weekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
+
+  /** Every day at a local wall-clock time. */
+  export interface DailySchedule {
+    kind: "daily";
+    /** Exactly `HH:MM`, 00:00 through 23:59. */
+    at: string;
+  }
+
+  /** Selected weekdays at a local wall-clock time. */
+  export interface WeeklySchedule {
+    kind: "weekly";
+    /** Exactly `HH:MM`, 00:00 through 23:59. */
+    at: string;
+    /** One or more distinct weekdays; emitted in Monday-through-Sunday order. */
+    weekdays: readonly Weekday[];
+  }
+
+  /** The supported recurring schedules. No one-shot or interval form exists. */
+  export type Schedule = DailySchedule | WeeklySchedule;
+
+  /** Options for a systemd service unit. */
+  export interface SystemdServiceOptions {
+    /**
+     * Base unit name without `.service` or `.timer`. ASCII letters, digits,
+     * `_`, `.`, and `-` only; must start with a letter or digit; at most 200
+     * characters; must not end with a dot or a unit suffix.
+     */
+    name: string;
+    /**
+     * Optional `Description=`. Must not contain `%`, `\`, `"`, `'`, control
+     * characters, or leading or trailing whitespace.
+     */
+    description?: string;
+    /** Absolute POSIX path to the executable. Spaces are quoted safely. */
+    program: string;
+    /** Arguments passed directly as separate argv items, not through a shell. */
+    args?: readonly string[];
+    /** Optional absolute POSIX `WorkingDirectory=`. */
+    workingDirectory?: string;
+    /** Optional `User=` as a simple name or decimal numeric ID. */
+    user?: string;
+  }
+
+  /** Options for a systemd timer unit. */
+  export interface SystemdTimerOptions {
+    /** Same base name as the service unit. */
+    name: string;
+    /** The recurring calendar schedule. */
+    schedule: Schedule;
+    /** Emit `Persistent=true`; defaults to `false` and only affects OnCalendar. */
+    persistent?: boolean;
+  }
+
+  /** Options that produce a matched service and timer pair. */
+  export interface SystemdUnitsOptions
+    extends SystemdServiceOptions,
+      SystemdTimerOptions {}
+
+  /**
+   * Generate a `Type=oneshot` systemd service unit. The result ends with one
+   * newline and has no `[Install]` section: the timer is the enabled unit.
+   *
+   * @throws SchedulerError for an invalid or unsupported value.
+   */
+  export function systemdService(options: SystemdServiceOptions): string;
+
+  /**
+   * Generate a systemd timer unit that activates `<name>.service` and is
+   * wanted by `timers.target`. The result ends with one newline.
+   *
+   * @throws SchedulerError for an invalid or unsupported value.
+   */
+  export function systemdTimer(options: SystemdTimerOptions): string;
+
+  /**
+   * Generate a matched service and timer. The caller must install them as
+   * `<name>.service` and `<name>.timer`; this function writes nothing.
+   *
+   * @throws SchedulerError for an invalid or unsupported value.
+   */
+  export function systemdUnits(options: SystemdUnitsOptions): {
+    service: string;
+    timer: string;
+  };
+
+  /** Maximum UTF-8 byte length of a generated systemd `ExecStart=` line. */
+  export const MAX_SYSTEMD_LINE_BYTES: 1048576;
+}
+
+/**
+ * Pure, synchronous generation of Windows Task Scheduler XML. Requires no
+ * permission flag and grants no host capability. It returns text only; it
+ * never writes, installs, registers, or runs a task.
+ *
+ * Uses the same local wall-clock schedules and options record validation as
+ * the systemd module. Daily schedules use `ScheduleByDay`/`DaysInterval=1`;
+ * weekly schedules use `ScheduleByWeek`/`WeeksInterval=1`. Task Scheduler
+ * interprets `StartBoundary` in local time; no time-zone conversion is done.
+ *
+ * `<Command>` is not quoted. `<Arguments>` uses the Microsoft C/C++ runtime
+ * `CommandLineToArgvW` convention, not `cmd.exe` or PowerShell quoting.
+ * Write the returned XML as UTF-16LE with a byte-order mark, or replace its
+ * `encoding="UTF-16"` declaration to match the bytes you write.
+ *
+ * Paths must be absolute drive or UNC paths with backslash separators.
+ * Relative paths, forward slashes, `.` and `..` components, empty
+ * components, invalid filename characters, percent signs, and device paths
+ * are rejected. The Task Scheduler XSD's 260-character path limit applies.
+ * No path is checked for existence.
+ *
+ * The generated task declares schema version 1.3. `CalendarTrigger` emits
+ * `Enabled` before `StartBoundary`, weekly output emits `DaysOfWeek` before
+ * `WeeksInterval`, and `Actions/@Context` is emitted only with a principal.
+ */
+declare module "neo:os/schedulers/windows" {
+  import type { Schedule, SchedulerErrorCode } from "neo:os/schedulers/systemd";
+  export type {
+    DailySchedule,
+    Schedule,
+    SchedulerErrorCode,
+    Weekday,
+    WeeklySchedule,
+  } from "neo:os/schedulers/systemd";
+
+  /**
+   * Thrown for invalid options or unsupported values. Match against the
+   * `SchedulerError` exported by the same module as the generator.
+   */
+  export class SchedulerError extends Error {
+    name: "SchedulerError";
+    /** Stable code; match on this, never on the message. */
+    code: SchedulerErrorCode;
+    /** The option path that failed, such as `program` or `args[0]`. */
+    field: string;
+  }
+
+  /**
+   * Task Scheduler logon type accepted by the authoritative XSD. `Password`
+   * sets only the XML value; this module never accepts, handles, or stores a
+   * password. `Group` and `ServiceAccount` are not in the XSD enumeration
+   * and are rejected.
+   */
+  export type WindowsLogonType =
+    | "InteractiveToken"
+    | "Password"
+    | "S4U"
+    | "InteractiveTokenOrPassword";
+
+  /** Task Scheduler run level. */
+  export type WindowsRunLevel = "LeastPrivilege" | "HighestAvailable";
+
+  /** Optional Task Scheduler principal. Omitting it omits `<Principals>`. */
+  export interface WindowsPrincipal {
+    /** Account name or SID. Not looked up. */
+    userId: string;
+    logonType: WindowsLogonType;
+    runLevel?: WindowsRunLevel;
+  }
+
+  /** Options for a Windows Task Scheduler task. */
+  export interface WindowsTaskOptions {
+    /**
+     * Task name, emitted as `\<name>` in `<URI>`. At most 255 characters; no
+     * backslash or slash; not `.` or `..`; no leading or trailing whitespace.
+     */
+    name: string;
+    /** Optional `Description`. XML-escaped. */
+    description?: string;
+    /**
+     * First eligible local date as `YYYY-MM-DD`. A Gregorian date from 1601
+     * through 9999. Combined with the schedule time and `:00` seconds.
+     */
+    startDate: string;
+    /** Absolute Windows drive or UNC path to the executable. */
+    program: string;
+    /** Arguments quoted with the C/C++ `CommandLineToArgvW` convention. */
+    args?: readonly string[];
+    /** Optional absolute Windows `WorkingDirectory`. */
+    workingDirectory?: string;
+    /** The recurring calendar schedule. */
+    schedule: Schedule;
+    /** Optional principal; omitting it lets registration apply its defaults. */
+    principal?: WindowsPrincipal;
+  }
+
+  /**
+   * Generate Task Scheduler 2.0 XML. The result ends with one newline and
+   * declares `encoding="UTF-16"`; see the module notes for writing it.
+   *
+   * @throws SchedulerError for an invalid or unsupported value.
+   */
+  export function windowsTask(options: WindowsTaskOptions): string;
+
+  /** Byte encoding to use when writing `windowsTask` output: UTF-16LE with a BOM. */
+  export const WINDOWS_XML_ENCODING: "UTF-16LE";
+
+  /** Maximum Windows command-line length, including the terminating NUL. */
+  export const MAX_WINDOWS_COMMAND_LINE: 32767;
+}
+
+/**
+ * @deprecated Import from `neo:os/schedulers/systemd` or
+ * `neo:os/schedulers/windows` instead. Allowlisting this legacy name grants
+ * both generators through this name only. All three specifiers are checked
+ * separately. Catch `SchedulerError` from the same module as the generator.
+ */
+declare module "neo:scheduler" {
+  import type { SchedulerErrorCode } from "neo:os/schedulers/systemd";
+
+  /** Thrown by the legacy module for invalid options or unsupported values. */
+  export class SchedulerError extends Error {
+    name: "SchedulerError";
+    /** Stable code; match on this, never on the message. */
+    code: SchedulerErrorCode;
+    /** The option path that failed, such as `program` or `args[0]`. */
+    field: string;
+  }
+
+  export {
+    MAX_SYSTEMD_LINE_BYTES,
+    systemdService,
+    systemdTimer,
+    systemdUnits,
+  } from "neo:os/schedulers/systemd";
+  export type {
+    DailySchedule,
+    Schedule,
+    SchedulerErrorCode,
+    SystemdServiceOptions,
+    SystemdTimerOptions,
+    SystemdUnitsOptions,
+    Weekday,
+    WeeklySchedule,
+  } from "neo:os/schedulers/systemd";
+  export {
+    MAX_WINDOWS_COMMAND_LINE,
+    WINDOWS_XML_ENCODING,
+    windowsTask,
+  } from "neo:os/schedulers/windows";
+  export type {
+    WindowsLogonType,
+    WindowsPrincipal,
+    WindowsRunLevel,
+    WindowsTaskOptions,
+  } from "neo:os/schedulers/windows";
+}
+
+// Type fragment owned by neojs-sqlite. The CLI composition includes it because
+// the CLI links this crate. Declaring `neo:sqlite` records compiled
+// availability; it does not grant `Permissions::sqlite` or admit the module
+// through a runtime allowlist. types/neo-js.core.d.ts omits this module.
+
+/** Synchronous SQLite for private in-memory databases. Requires the host's SQLite grant. */
+declare module "neo:sqlite" {
+  /** SQLite NULL, INTEGER (signed 64-bit), REAL, UTF-8 TEXT, or an owned BLOB snapshot. */
+  export type SqliteValue = null | bigint | number | string | Uint8Array;
+
+  /** Stable SQLite failure codes; match on these rather than error messages. */
+  export type SqliteErrorCode =
+    | "SQLITE_ARGUMENT"
+    | "SQLITE_ENCODING"
+    | "SQLITE_LIMIT"
+    | "SQLITE_WORK_LIMIT"
+    | "SQLITE_DENIED"
+    | "SQLITE_CLOSED"
+    | "SQLITE_CONSTRAINT"
+    | "SQLITE_SQL"
+    | "SQLITE_OPEN";
+
+  /** Operational error with no generated stack or SQL, paths, or bound values in its message. */
+  export interface SqliteError extends Error {
+    readonly code: SqliteErrorCode;
+  }
+
+  /** An owned, private database. Use `using` or call `close()` to release it. */
+  export interface Database {
+    /**
+     * Run one statement without result columns. Return the number of SQLite
+     * row changes (including foreign-key actions), as a bigint.
+     * Parameters are own data elements of a dense array bound to anonymous `?`
+     * in order. Numbers must be finite and bind as REAL; bigints bind as
+     * signed 64-bit INTEGER. Strings must be well-formed Unicode; Uint8Array
+     * arguments are copied and require attached, fixed-length non-shared buffers.
+     * Savepoints are not supported. Foreign-key cascade depth is limited to eight.
+     * SQLite's normal conflict and rollback semantics apply on failure.
+     * @throws SqliteError for invalid, denied, failed, oversized or interrupted work.
+     */
+    execute(sql: string, parameters?: readonly SqliteValue[]): bigint;
+
+    /**
+     * Run one read-only statement with result columns, using the same bindings
+     * as `execute`. Return independent rows in result-column order, without
+     * column names. Row order is only guaranteed by SQL `ORDER BY`. All BLOBs
+     * are owned copies. A limit failure returns no partial result.
+     * @throws SqliteError for invalid, denied, failed, oversized or interrupted work.
+     */
+    query(sql: string, parameters?: readonly SqliteValue[]): SqliteValue[][];
+
+    /** Roll back any open transaction and discard the database. Repeat calls do nothing. */
+    close(): void;
+
+    /** Same as `close()`; called when JavaScript `using` leaves its scope. */
+    [Symbol.dispose](): void;
+  }
+
+  /**
+   * Open a new private database with no filename, URI, or attachment support.
+   * Requires `--allow-sqlite` or `Permissions::sqlite`, and admission by any
+   * explicit module allowlist. Synchronous and in-process. Use only trusted
+   * SQL: there is no SQLite intermediate-heap cap or hard execution deadline.
+   * @throws SqliteError if initialization fails or the live-handle limit is reached.
+   */
+  export function openMemory(): Database;
 }

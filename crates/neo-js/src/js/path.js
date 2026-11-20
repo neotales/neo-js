@@ -3,18 +3,21 @@
  *
  * The module exports two frozen namespaces, `posix` and `win32`, with the same
  * synchronous functions: `join`, `normalize`, `basename`, `dirname`, `extname`,
- * `isAbsolute`, `parse`, and `format`, plus the constants `sep` and `delimiter`.
- * Neither namespace is selected by the host platform: a script on Linux uses
- * `win32` by asking for it, and a script on Windows can use `posix`. There is
- * no host-default namespace.
+ * `isAbsolute`, `parse`, `format`, `common`, `resolve`, `relative`, and
+ * `toNamespacedPath`, the file URL helpers, and the glob helpers, plus `sep`
+ * and `delimiter`.
+ * Named exports select `win32` on Windows and `posix` elsewhere,
+ * independently of `neo:os`.
  *
  * These are pure lexical operations. No function reads or writes the
- * filesystem, the working directory, environment variables, the locale, or the
- * platform; none resolves symlinks, junctions, drive mappings, or short names;
- * none checks existence; none folds case or normalizes Unicode. A path is a
+ * filesystem or environment variables; none resolves symlinks, junctions,
+ * drive mappings, or short names, and none checks existence. Windows
+ * `resolve` and `relative` compare roots case-insensitively; `relative` also
+ * compares components case-insensitively. No Unicode normalization occurs. A path is a
  * sequence of UTF-16 code units, and every code unit except the separators and
  * dots described below is opaque. Unpaired surrogates are preserved, not
- * rejected or repaired. A NUL (U+0000) in any argument throws `TypeError`: a
+ * rejected or repaired, except by file URL conversion (which uses USVString
+ * semantics). A NUL (U+0000) in any path argument throws `TypeError`: a
  * NUL terminates C paths and cannot appear in a usable path, so returning a
  * lexical result containing one would look usable when it is not.
  *
@@ -27,10 +30,12 @@
  * - `basename`'s `suffix` must be a string. `format`'s argument must be a
  *   non-null, non-array object, and each of `root`, `dir`, `base`, `ext`, and
  *   `name` must be a string or absent. `undefined` means absent; `null` throws.
- * - These are the only errors this module raises; a getter or Proxy trap on a
- *   `format` argument can still throw its own error. There are no I/O,
- *   permission, or host errors; the module needs no permission flag and grants
- *   none.
+ * - `resolve`, `relative`, and Windows `toNamespacedPath` use the runtime's
+ *   current directory only when their inputs do not supply a complete base.
+ *   This exposes cwd text only with admitted filesystem or process/stdio
+ *   authority and only in the native dialect. They do not read per-drive
+ *   directories or fall back to the process cwd. Use explicit absolute bases
+ *   to work independently of cwd.
  *
  * A path that resolves to nothing uses the platform's conventional dot: an
  * empty path normalizes to `.`, `join()` with no non-empty segment is `.`, and
@@ -83,7 +88,8 @@
  *   Drive letters must be ASCII `A`-`Z` or `a`-`z`; case is preserved.
  *   Server and share names are opaque, may contain any non-separator
  *   characters, and are not validated or resolved.
- *   `\\\\?\\` and `\\\\.\\` receive no special treatment: `\\\\?\\C:\\foo`
+ *   The original parsing and normalization helpers give `\\\\?\\` and
+ *   `\\\\.\\` no special treatment: `\\\\?\\C:\\foo`
  *   parses as a UNC-shaped root (`\\\\?\\C:\\`) followed by `foo`, and
  *   `\\\\?\\UNC\\server\\share\\foo` parses with root `\\\\?\\UNC\\`.
  * - Exactly two leading separators followed by a non-empty server and share
@@ -148,10 +154,9 @@
  * module.
  *
  * Deliberately unsupported, compared with Node's `path` and `@neotales/path`:
- * `resolve` (it would read the working directory), `relative`, `common`,
- * `toFileUrl`, `fromFileUrl`, `toNamespacedPath`, and the glob helpers. URL
+ * `toFileUrl` and `fromFileUrl`. URL
  * inputs, buffers, and type coercion are not accepted. There is no filesystem
- * or symlink resolution, no case folding, no Windows long-path translation,
+ * or symlink resolution or validation of Windows device paths,
  * no POSIX `//` root preservation, and no asynchronous form. For a path that
  * is a drive root or a complete UNC root, returned `basename` and `parse`
  * fields are empty rather than a separator. This module is not a drop-in
@@ -168,17 +173,28 @@
 // module adds the two-namespace shape, validation, the NUL rule, and the edge
 // cases documented above.
 
-// Capture the builtins used below at module evaluation. This does not isolate
-// the module from replacements made before the import, or from arbitrary later
-// mutation of the shared realm.
+// The host builds this API in the fresh realm, before running user code.
+const NativeError = Error;
 const NativeTypeError = TypeError;
+const NativeSyntaxError = SyntaxError;
+const NativeRangeError = RangeError;
+const NativeRegExp = RegExp;
+const createNullObject = Object.create;
+const defineProperty = Object.defineProperty;
 const freeze = Object.freeze;
 const isArray = Array.isArray;
+const isSafeInteger = Number.isSafeInteger;
+const charAt = Function.prototype.call.bind(String.prototype.charAt);
 const charCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
 const slice = Function.prototype.call.bind(String.prototype.slice);
+const split = Function.prototype.call.bind(String.prototype.split);
+const lower = Function.prototype.call.bind(String.prototype.toLowerCase);
 const indexOf = Function.prototype.call.bind(String.prototype.indexOf);
 const lastIndexOf = Function.prototype.call.bind(String.prototype.lastIndexOf);
 const joinArray = Function.prototype.call.bind(Array.prototype.join);
+const sliceArray = Function.prototype.call.bind(Array.prototype.slice);
+const hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+const regExpExec = Function.prototype.call.bind(RegExp.prototype.exec);
 
 const SLASH = 47;
 const BACKSLASH = 92;
@@ -428,8 +444,10 @@ function readField(pathObject, name) {
 }
 
 function normalizePosix(path) {
-  assertPath(path);
+  return normalizePosixText(assertPath(path));
+}
 
+function normalizePosixText(path) {
   const absolute = path.length > 0 && isPosixSeparator(charCodeAt(path, 0));
   const trailing =
     path.length > 0 && isPosixSeparator(charCodeAt(path, path.length - 1));
@@ -570,8 +588,10 @@ function formatPosix(pathObject) {
 }
 
 function normalizeWin32(path) {
-  assertPath(path);
+  return normalizeWin32Text(assertPath(path));
+}
 
+function normalizeWin32Text(path) {
   const length = path.length;
   let rootEnd = 0;
   let device;
@@ -654,6 +674,10 @@ function joinWin32(...paths) {
     const part = assertPath(paths[i]);
     if (part.length > 0) parts[parts.length] = part;
   }
+  return joinWin32Parts(parts);
+}
+
+function joinWin32Parts(parts) {
   if (parts.length === 0) return '.';
 
   let needsReplace = true;
@@ -901,7 +925,226 @@ function formatWin32(pathObject) {
   return formatPath('\\', pathObject);
 }
 
+/** Read one length from a possibly proxied array, without coercion. */
+function arrayLength(value, name) {
+  if (!isArray(value)) throw new NativeTypeError(name + ' must be an array');
+  const length = value.length;
+  if (!isSafeInteger(length) || length < 0 || length > 0xffffffff)
+    throw new NativeTypeError(name + ' length must be a valid array length');
+  return length;
+}
+
+/** Find the shared spelling at component boundaries, without normalizing. */
+function commonPath(paths, separator) {
+  const length = arrayLength(paths, 'paths');
+  if (length === 0) return '';
+  const first = split(assertPath(paths[0]), separator);
+  let end = first.length;
+  let append = '';
+  for (let j = 1; j < length; ++j) {
+    const parts = split(assertPath(paths[j]), separator);
+    if (parts.length <= end) {
+      end = parts.length;
+      append = '';
+    }
+    for (let i = 0; i < end; ++i) {
+      if (first[i] !== parts[i]) {
+        end = i;
+        append = i === 0 ? '' : separator;
+        break;
+      }
+    }
+  }
+  return joinArray(sliceArray(first, 0, end), separator) + append;
+}
+
+function pathError(code, message) {
+  const error = new NativeError(message);
+  defineProperty(error, 'code', { value: code, enumerable: true });
+  return error;
+}
+
+/** Obtain only the runtime cwd for the host dialect; never translate it. */
+function requireCwd(windows) {
+  if (windows !== hostWindows) {
+    throw pathError('PATH_CWD_DIALECT', 'provide an absolute base for the non-host path dialect');
+  }
+  const directory = readCwd();
+  if (directory === undefined) {
+    throw pathError('PATH_PERMISSION', 'provide an absolute base or grant access to the runtime working directory');
+  }
+  if (directory === null) {
+    throw pathError('PATH_CWD', 'the runtime working directory is unavailable; provide an absolute base');
+  }
+  return directory;
+}
+
+/** Resolve from the rightmost absolute segment, or the current runtime cwd. */
+function resolvePosix(...paths) {
+  for (let i = 0; i < paths.length; ++i) assertPath(paths[i]);
+  const tails = [];
+  for (let i = paths.length - 1; i >= -1; --i) {
+    const path = i === -1 ? requireCwd(false) : paths[i];
+    if (path === '') continue;
+    tails[tails.length] = path;
+    if (isPosixSeparator(charCodeAt(path, 0))) break;
+  }
+  return '/' + normalizedTail(tails, '/', isPosixSeparator);
+}
+
+function normalizedTail(tails, separator, isSeparator) {
+  // Segments were collected right to left. Swap in place before normalizing.
+  for (let i = 0, j = tails.length - 1; i < j; ++i, --j) {
+    const tail = tails[i];
+    tails[i] = tails[j];
+    tails[j] = tail;
+  }
+  return normalizeString(joinArray(tails, separator), false, separator, isSeparator);
+}
+
+function skipWin32Separators(path, start) {
+  while (isWin32Separator(charCodeAt(path, start))) ++start;
+  return start;
+}
+
+function win32ComponentEnd(path, start) {
+  while (start < path.length && !isWin32Separator(charCodeAt(path, start))) ++start;
+  return start;
+}
+
+/** A namespace prefix such as `\\?\` or `\\.\`, including slash spellings. */
+function hasNamespacePrefix(path) {
+  const marker = charCodeAt(path, 2);
+  return isWin32Separator(charCodeAt(path, 0)) && isWin32Separator(charCodeAt(path, 1)) &&
+    (marker === 63 || marker === DOT) && isWin32Separator(charCodeAt(path, 3));
+}
+
+/** Extract a device/share as a unit so `..` cannot climb above it. */
+function resolutionRootWin32(path) {
+  const first = charCodeAt(path, 0);
+  if (isDeviceRoot(first) && charCodeAt(path, 1) === COLON) {
+    const device = slice(path, 0, 2);
+    const absolute = isWin32Separator(charCodeAt(path, 2));
+    return { device, drive: device, absolute, end: absolute ? 3 : 2 };
+  }
+  if (!isWin32Separator(first)) return { device: '', drive: '', absolute: false, end: 0 };
+  if (isWin32Separator(charCodeAt(path, 1))) {
+    const serverEnd = win32ComponentEnd(path, 2);
+    const shareStart = skipWin32Separators(path, serverEnd);
+    let end = win32ComponentEnd(path, shareStart);
+    if (serverEnd > 2 && end > shareStart) {
+      const server = slice(path, 2, serverEnd);
+      const share = slice(path, shareStart, end);
+      let device = '\\\\' + server + '\\' + share;
+      let drive = '';
+      if (server === '?' && lower(share) === 'unc') {
+        const hostStart = skipWin32Separators(path, end);
+        const hostEnd = win32ComponentEnd(path, hostStart);
+        const volumeStart = skipWin32Separators(path, hostEnd);
+        end = win32ComponentEnd(path, volumeStart);
+        if (hostStart === hostEnd || volumeStart === end) {
+          throw pathError('PATH_WINDOWS_ROOT', 'provide a server and share for a namespaced UNC path');
+        }
+        device += '\\' + slice(path, hostStart, hostEnd) + '\\' + slice(path, volumeStart, end);
+      } else if (server === '?' && share.length === 2 &&
+        isDeviceRoot(charCodeAt(share, 0)) && charCodeAt(share, 1) === COLON) {
+        drive = share;
+      }
+      return { device, drive, absolute: true, end };
+    }
+  }
+  if (hasNamespacePrefix(path)) {
+    throw pathError('PATH_WINDOWS_ROOT', 'provide a complete Windows namespace root');
+  }
+  return { device: '', drive: '', absolute: true, end: 1 };
+}
+
+/** Resolve on one drive/share, without consulting any per-drive environment. */
+function resolveWin32(...paths) {
+  for (let i = 0; i < paths.length; ++i) assertPath(paths[i]);
+  let device = '';
+  let driveRelative = false;
+  let absolute = false;
+  const tails = [];
+  for (let i = paths.length - 1; i >= -1; --i) {
+    const path = i === -1 ? requireCwd(true) : paths[i];
+    if (path === '') continue;
+    const root = resolutionRootWin32(path);
+    if (root.device !== '') {
+      if (device === '') {
+        device = root.device;
+        driveRelative = !root.absolute;
+      } else if (lower(device) !== lower(root.device)) {
+        // Windows canonicalization can store a verbatim drive cwd. Match a
+        // drive-relative input to this drive, but keep the verbatim spelling.
+        if (driveRelative && lower(device) === lower(root.drive)) device = root.device;
+        else continue;
+      }
+    }
+    if (!absolute) {
+      tails[tails.length] = slice(path, root.end);
+      absolute = root.absolute;
+    }
+    if (absolute && device !== '') break;
+  }
+  if (!absolute || device === '') {
+    throw pathError('PATH_WINDOWS_ROOT', 'provide an absolute Windows base on the requested drive or share');
+  }
+  return device + '\\' + normalizedTail(tails, '\\', isWin32Separator);
+}
+
+/** Compare whole components, retaining the destination's original spelling. */
+function relativeTail(from, to, separator, foldCase) {
+  const source = from === '' ? [] : split(from, separator);
+  const target = to === '' ? [] : split(to, separator);
+  let i = 0;
+  while (i < source.length && i < target.length &&
+    (foldCase ? lower(source[i]) === lower(target[i]) : source[i] === target[i])) ++i;
+  const result = [];
+  for (let j = i; j < source.length; ++j) result[result.length] = '..';
+  for (; i < target.length; ++i) result[result.length] = target[i];
+  const path = joinArray(result, separator);
+  // A destination component that starts with a drive letter and colon
+  // must not turn this relative result into a drive-relative path.
+  return foldCase && isDeviceRoot(charCodeAt(path, 0)) && charCodeAt(path, 1) === COLON
+    ? '.\\' + path : path;
+}
+
+function relativePosix(from, to) {
+  assertPath(from);
+  assertPath(to);
+  return relativeTail(slice(resolvePosix(from), 1), slice(resolvePosix(to), 1), '/', false);
+}
+
+function relativeWin32(from, to) {
+  assertPath(from);
+  assertPath(to);
+  const source = resolveWin32(from);
+  const target = resolveWin32(to);
+  const sourceRoot = resolutionRootWin32(source);
+  const targetRoot = resolutionRootWin32(target);
+  if (lower(sourceRoot.device) !== lower(targetRoot.device)) return target;
+  return relativeTail(
+    slice(source, skipWin32Separators(source, sourceRoot.end)),
+    slice(target, skipWin32Separators(target, targetRoot.end)),
+    '\\',
+    true,
+  );
+}
+
+function toNamespacedPathWin32(path) {
+  assertPath(path);
+  if (path === '' || hasNamespacePrefix(path)) return path;
+  const resolved = resolveWin32(path);
+  if (hasNamespacePrefix(resolved)) return resolved;
+  if (charCodeAt(resolved, 0) === BACKSLASH) return '\\\\?\\UNC\\' + slice(resolved, 2);
+  return '\\\\?\\' + resolved;
+}
+
+const fileUrls = fileUrlApi(parseFileHost);
+
 const posix = freeze({
+  ...globApi(false, normalizePosixText),
   sep: '/',
   delimiter: ':',
   join: joinPosix,
@@ -912,9 +1155,16 @@ const posix = freeze({
   isAbsolute: isAbsolutePosix,
   parse: parsePosix,
   format: formatPosix,
+  common: (paths) => commonPath(paths, '/'),
+  resolve: resolvePosix,
+  relative: relativePosix,
+  toNamespacedPath: assertPath,
+  toFileUrl: (path) => fileUrls.toFileUrl(path, false, isAbsolutePosix),
+  fromFileUrl: (url) => fileUrls.fromFileUrl(url, false),
 });
 
 const win32 = freeze({
+  ...globApi(true, normalizeWin32Text),
   sep: '\\',
   delimiter: ';',
   join: joinWin32,
@@ -925,6 +1175,24 @@ const win32 = freeze({
   isAbsolute: isAbsoluteWin32,
   parse: parseWin32,
   format: formatWin32,
+  common: (paths) => commonPath(paths, '\\'),
+  resolve: resolveWin32,
+  relative: relativeWin32,
+  toNamespacedPath: toNamespacedPathWin32,
+  toFileUrl: (path) => fileUrls.toFileUrl(path, true, isAbsoluteWin32),
+  fromFileUrl: (url) => fileUrls.fromFileUrl(url, true),
 });
 
-export { posix, win32 };
+const native = hostWindows ? win32 : posix;
+const { join, normalize, basename, dirname, extname, isAbsolute, parse, format,
+  common, resolve, relative, toNamespacedPath, toFileUrl, fromFileUrl, isGlob, globToRegExp, normalizeGlob,
+  joinGlobs, match, matchesGlob } = native;
+return {
+  posix, win32, join, normalize, basename, dirname, extname, isAbsolute, parse, format,
+  common, resolve, relative, toNamespacedPath, toFileUrl, fromFileUrl, isGlob, globToRegExp, normalizeGlob,
+  joinGlobs, match, matchesGlob,
+  SEPARATOR: native.sep,
+  DELIMITER: native.delimiter,
+  // Public RegExp is intentionally independent of the internal algorithms.
+  SEPARATOR_PATTERN: hostWindows ? /[\\/]+/ : /\/+/,
+};

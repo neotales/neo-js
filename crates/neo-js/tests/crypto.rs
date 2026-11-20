@@ -4,7 +4,7 @@
 //! (no) permissions. The tests exercise the JavaScript surface and its error
 //! codes; the Rust unit tests cover the primitive and the envelope internals.
 
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions};
 
 fn runtime() -> NeoJs {
     NeoJs::new(Permissions::default()).unwrap()

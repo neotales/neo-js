@@ -14,6 +14,7 @@ use rquickjs::{
 
 use crate::{
     Permissions,
+    extension::{ExtensionRegistry, ExtensionRuntime},
     modules::{AllowedModules, RuntimeModule},
 };
 
@@ -21,42 +22,9 @@ const ASSERT_MODULE: &str = include_str!("js/assert.js");
 const TEST_MODULE: &str = include_str!("js/test.js");
 const ANSI_MODULE: &str = include_str!("js/ansi.js");
 const CHARS_MODULE: &str = include_str!("js/chars.js");
-const PATH_MODULE: &str = include_str!("js/path.js");
 const STRING_BUILDER_MODULE: &str = include_str!("js/string_builder.js");
 const EXEC_MODULE: &str = include_str!("js/exec.js");
 const REGISTRY_ATTRIBUTES_UNSUPPORTED: &str = "Windows Registry imports do not support attributes";
-
-// Give each scheduler specifier its own export surface, without importing
-// another public specifier or introducing an importable internal module.
-// The legacy surface intentionally exports both sets of helpers.
-macro_rules! scheduler_module {
-    ($($export:ident),+ $(,)?) => {
-        concat!(
-            include_str!("js/scheduler.js"),
-            "\nexport { SchedulerError, ",
-            $(stringify!($export), ", ",)+
-            "};\n",
-        )
-    };
-}
-
-const SCHEDULER_SYSTEMD_MODULE: &str = scheduler_module!(
-    systemdService,
-    systemdTimer,
-    systemdUnits,
-    MAX_SYSTEMD_LINE_BYTES
-);
-const SCHEDULER_WINDOWS_MODULE: &str =
-    scheduler_module!(windowsTask, WINDOWS_XML_ENCODING, MAX_WINDOWS_COMMAND_LINE);
-const LEGACY_SCHEDULER_MODULE: &str = scheduler_module!(
-    systemdService,
-    systemdTimer,
-    systemdUnits,
-    MAX_SYSTEMD_LINE_BYTES,
-    windowsTask,
-    WINDOWS_XML_ENCODING,
-    MAX_WINDOWS_COMMAND_LINE,
-);
 
 /// Detect nonempty attributes using the same own enumerable string keys as
 /// QuickJS's module cache. An empty attribute bag matches an absent one.
@@ -72,9 +40,12 @@ fn has_import_attributes(attributes: Option<ImportAttributes<'_>>) -> Result<boo
 pub(crate) struct ModuleLoader {
     pub permissions: Permissions,
     pub formats: Rc<RefCell<ModuleFormats>>,
-    pub os_metadata: crate::os::Metadata,
     /// Optional fail-closed module allowlist. `None` bits are unrestricted.
     pub allowed: AllowedModules,
+    /// Registered extension descriptors, used only for exact name lookup.
+    pub extensions: Rc<ExtensionRegistry>,
+    /// Per-runtime extension state shared with `NeoJs` for teardown.
+    pub extension_runtime: Rc<RefCell<ExtensionRuntime>>,
 }
 
 #[derive(Default)]
@@ -182,10 +153,6 @@ impl ModuleLoader {
         match name {
             "neo:ansi" => Some(ANSI_MODULE),
             "neo:chars" => Some(CHARS_MODULE),
-            "neo:path" => Some(PATH_MODULE),
-            "neo:scheduler" => Some(LEGACY_SCHEDULER_MODULE),
-            "neo:os/schedulers/systemd" => Some(SCHEDULER_SYSTEMD_MODULE),
-            "neo:os/schedulers/windows" => Some(SCHEDULER_WINDOWS_MODULE),
             "neo:string-builder" => Some(STRING_BUILDER_MODULE),
             "neo:hash" if self.permissions.filesystem => Some(
                 "export function digest(algorithm, bytes) { \
@@ -222,11 +189,7 @@ impl ModuleLoader {
             | RuntimeModule::Crypto
             | RuntimeModule::Dotenv
             | RuntimeModule::Hash
-            | RuntimeModule::Os
             | RuntimeModule::Path
-            | RuntimeModule::Scheduler
-            | RuntimeModule::SchedulerSystemd
-            | RuntimeModule::SchedulerWindows
             | RuntimeModule::Semver
             | RuntimeModule::StringBuilder
             | RuntimeModule::Test
@@ -283,6 +246,22 @@ impl Resolver for ModuleLoader {
                 ));
             }
             return Ok(module.name().to_owned());
+        }
+        // Extension module names are exact and registered. The allowlist check
+        // runs here, before QuickJS consults its module cache, so neither a
+        // static nor a dynamic import can reach a withdrawn extension module.
+        if let Some(registration) = self.extensions.registration(name) {
+            if !self.allowed.allows_name(name) {
+                return Err(Error::new_resolving_message(
+                    base,
+                    name,
+                    "module is not enabled by this runtime's allowlist",
+                ));
+            }
+            if !registration.permission().granted(&self.permissions) {
+                return Err(Error::new_resolving(base, name));
+            }
+            return Ok(name.to_owned());
         }
         if self.permissions.filesystem && (name.starts_with("./") || name.starts_with("../")) {
             crate::typescript::validate_extension(name)
@@ -354,6 +333,25 @@ impl Loader for ModuleLoader {
                 );
             }
         }
+        // Defense in depth: repeat both gates before dispatching to an
+        // extension. `try_borrow_mut` makes a re-entrant load fail closed
+        // instead of panicking while the same extension state is borrowed.
+        if let Some(registration) = self.extensions.registration(name) {
+            if !self.allowed.allows_name(name) {
+                return Err(Error::new_loading_message(
+                    name,
+                    "module is not enabled by this runtime's allowlist",
+                ));
+            }
+            if !registration.permission().granted(&self.permissions) {
+                return Err(Error::new_loading(name));
+            }
+            let extension_runtime = Rc::clone(&self.extension_runtime);
+            let mut runtime = extension_runtime.try_borrow_mut().map_err(|_| {
+                Error::new_loading_message(name, "extension state is already in use")
+            })?;
+            return runtime.load(&self.extensions, registration.descriptor(), ctx, name);
+        }
         if name == "neo:crypto" {
             return Module::declare_def::<crate::crypto::CryptoModule, _>(ctx.clone(), name);
         }
@@ -384,6 +382,9 @@ impl Loader for ModuleLoader {
             }
             return Module::declare_def::<crate::fs::FsModule, _>(ctx.clone(), name);
         }
+        if name == "neo:path" {
+            return Module::declare_def::<crate::path::PathModule, _>(ctx.clone(), name);
+        }
         if name == "neo:fetch" {
             if !self.permissions.network {
                 return Err(Error::new_loading(name));
@@ -395,13 +396,6 @@ impl Loader for ModuleLoader {
         }
         if name == "neo:assert" {
             return Module::declare_def::<AssertModule, _>(ctx.clone(), name);
-        }
-        if name == "neo:os" {
-            return Module::declare(
-                ctx.clone(),
-                name,
-                crate::os::module_source(&self.os_metadata),
-            );
         }
         if let Some(source) = self.builtin(name) {
             return Module::declare(ctx.clone(), name, source);

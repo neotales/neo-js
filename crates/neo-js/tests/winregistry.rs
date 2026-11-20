@@ -4,7 +4,7 @@
 //! behavior are shared by every host. Windows-only success paths live in
 //! `winregistry_windows.rs` and use temporary HKCU keys only.
 
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions};
 
 fn runtime(registry: bool) -> NeoJs {
     NeoJs::new(Permissions {

@@ -121,6 +121,23 @@ fn tests_registered_before_a_module_error_still_run() {
 }
 
 #[test]
+fn an_abandoned_module_reports_the_error_without_running_registered_tests_or_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = run_cli(
+        dir.path(),
+        &[],
+        "import test from 'neo:test';
+         test('must not run', () => console.log('test executed'));
+         Promise.resolve().then(() => console.log('job executed'));
+         throw Error('module exploded with work queued');",
+    );
+    assert_failed(&output);
+    assert!(stdout(&output).is_empty(), "{}", stdout(&output));
+    assert!(stderr(&output).contains("module exploded with work queued"));
+    assert!(stderr(&output).contains("NEO_MODULE_ABORTED"));
+}
+
+#[test]
 fn async_and_generator_callbacks_are_rejected_at_registration() {
     let dir = tempfile::tempdir().unwrap();
 

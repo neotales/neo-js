@@ -3,7 +3,7 @@
 //! No test enables a permission: the module must be available in the default
 //! runtime and must install nothing on the global object.
 
-use neo_js::{NeoJs, Permissions, TestReport};
+use neojs_core::{NeoJs, Permissions, TestReport};
 
 fn run(source: &str) -> TestReport {
     let js = NeoJs::new(Permissions::default()).unwrap();
@@ -312,6 +312,8 @@ fn module_is_available_with_every_permission_enabled() {
         process: true,
         registry: true,
         network: true,
+        sqlite: true,
+        user: true,
     })
     .unwrap();
     js.run_module(

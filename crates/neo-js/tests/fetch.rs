@@ -17,7 +17,7 @@ use std::{
     time::Duration,
 };
 
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions};
 
 fn runtime(network: bool, filesystem: bool) -> NeoJs {
     NeoJs::new(Permissions {

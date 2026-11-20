@@ -4,7 +4,7 @@
 //! assert privacy, object safety, alias and duplicate rejection, limits, and
 //! error behaviour through the real module loader.
 
-use neo_js::{NeoJs, Permissions};
+use neojs_core::{NeoJs, Permissions};
 
 #[test]
 fn parses_nested_types_without_permissions() {

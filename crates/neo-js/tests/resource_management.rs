@@ -1,6 +1,6 @@
 //! Native JavaScript disposal in entry modules, with no host resources.
 
-use neo_js::{ModuleAllowlist, NeoJs, Permissions, RuntimeOptions};
+use neojs_core::{ModuleAllowlist, NeoJs, Permissions, RuntimeOptions};
 
 #[test]
 fn using_disposes_in_reverse_order_when_an_entry_finishes_or_throws() {
