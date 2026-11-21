@@ -381,9 +381,23 @@
     }
 
     function rename(source, destination) {
+      // Outside a managed turn there is no owner to deliver a rejection.
+      if (!native.canAsync()) throw makeError('FS_ASYNC_OUTSIDE_TURN');
+      try {
+        requirePath(source, makeError);
+        requirePath(destination, makeError);
+        // Native code validates both entries and resolves them against one
+        // cwd snapshot before dispatch.
+        return native.rename(source, destination, makeError);
+      } catch (error) {
+        return rejectPromise(error);
+      }
+    }
+
+    function renameSync(source, destination) {
       requirePath(source);
       requirePath(destination);
-      unwrap(native.rename(source, destination));
+      unwrap(native.renameSync(source, destination));
     }
 
     function copyFile(source, destination) {
@@ -414,6 +428,7 @@
     defineValue(api, 'remove', remove);
     defineValue(api, 'removeSync', removeSync);
     defineValue(api, 'rename', rename);
+    defineValue(api, 'renameSync', renameSync);
     defineValue(api, 'copyFile', copyFile);
     defineValue(api, 'FsError', FsError);
     defineValue(api, 'MAX_PATH_BYTES', limits.MAX_PATH_BYTES);

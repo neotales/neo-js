@@ -198,8 +198,14 @@ fn permission_and_allowlist_gate_the_global_and_the_module() {
          if (module.remove !== fs.remove || module.removeSync !== fs.removeSync) {
            throw Error('remove module and global differ');
          }
-         if (typeof module.rename !== 'function' || module.rename !== fs.rename) {
-           throw Error('missing or mismatched rename');
+         if (typeof fs.rename !== 'function' || typeof module.rename !== 'function') {
+           throw Error('missing async rename');
+         }
+         if (typeof fs.renameSync !== 'function' || typeof module.renameSync !== 'function') {
+           throw Error('missing sync rename');
+         }
+         if (module.rename !== fs.rename || module.renameSync !== fs.renameSync) {
+           throw Error('rename module and global differ');
          }
          if (typeof module.copyFile !== 'function' || module.copyFile !== fs.copyFile) {
            throw Error('missing or mismatched copyFile');
@@ -2314,20 +2320,27 @@ fn rename_moves_files_and_nonempty_directories_using_runtime_cwd() {
     let js = chunked_runtime();
     let source = r#"
         import {chdir} from 'neo:process';
-        import {rename} from 'neo:fs';
+        import {rename, renameSync} from 'neo:fs';
         chdir(__DIR__);
-        if (fs.rename('entrée.txt', 'moved.txt') !== undefined) throw Error('rename return');
+        if ((await fs.rename('entrée.txt', 'moved.txt')) !== undefined) {
+            throw Error('rename return');
+        }
         fs.rename = () => { throw Error('mutated global rename ran'); };
-        rename('tree', 'moved-tree', new Proxy({}, {
+        await rename('tree', 'moved-tree', new Proxy({}, {
             ownKeys() { throw Error('rename reflected on an extra argument'); },
         }));
+        renameSync('moved.txt', 'moved-again.txt');
     "#
     .replace("__DIR__", &literal(dir.path()));
     run(&js, &source);
 
     assert!(!file.exists());
     assert!(!tree.exists());
-    assert_eq!(fs::read(dir.path().join("moved.txt")).unwrap(), b"file");
+    assert!(!dir.path().join("moved.txt").exists());
+    assert_eq!(
+        fs::read(dir.path().join("moved-again.txt")).unwrap(),
+        b"file"
+    );
     assert_eq!(
         fs::read(dir.path().join("moved-tree").join("child.txt")).unwrap(),
         b"child"
@@ -2346,31 +2359,36 @@ fn rename_rejects_invalid_operands_and_reports_missing_paths_without_leaks() {
     let js = chunked_runtime();
     let source = r#"
         import {chdir} from 'neo:process';
-        import {rename, FsError, MAX_PATH_BYTES} from 'neo:fs';
+        import {rename, renameSync, FsError, MAX_PATH_BYTES} from 'neo:fs';
         chdir(__DIR__);
         const existing = 'private-existing.txt';
         const output = 'private-output.txt';
         const missing = 'private-missing.txt';
 
-        function rejects(expected, source, destination) {
-            try { rename(source, destination); }
-            catch (error) {
-                if (expected === 'TypeError' && error instanceof TypeError) return;
-                if (!(error instanceof FsError) || error.code !== expected) throw error;
-                if (error.message !== new FsError(expected).message) {
-                    throw Error('rename did not return the fixed error message');
-                }
-                return;
+        function check(expected, error) {
+            if (expected === 'TypeError' && error instanceof TypeError) return;
+            if (!(error instanceof FsError) || error.code !== expected) throw error;
+            if (error.message !== new FsError(expected).message) {
+                throw Error('rename did not return the fixed error message');
             }
-            throw Error('rename unexpectedly succeeded');
+        }
+        async function rejects(expected, source, destination) {
+            try { await rename(source, destination); }
+            catch (error) { return check(expected, error); }
+            throw Error('async rename unexpectedly succeeded');
+        }
+        function rejectsSync(expected, source, destination) {
+            try { renameSync(source, destination); }
+            catch (error) { return check(expected, error); }
+            throw Error('sync rename unexpectedly succeeded');
         }
 
         const hostile = new Proxy({}, {
             get() { throw Error('rename coerced its operand'); },
         });
-        rejects('TypeError', hostile, output);
-        rejects('TypeError', existing, hostile);
-        rejects('TypeError', existing, undefined);
+        await rejects('TypeError', hostile, output);
+        await rejects('TypeError', existing, hostile);
+        await rejects('TypeError', existing, undefined);
         for (const [code, path] of [
             ['FS_PATH', ''],
             ['FS_PATH', existing + '\0suffix'],
@@ -2380,15 +2398,28 @@ fn rename_rejects_invalid_operands_and_reports_missing_paths_without_leaks() {
             ['FS_ENCODING', 'private-\uD800'],
             ['FS_LIMIT', '😀'.repeat(MAX_PATH_BYTES / 4) + 'a'],
         ]) {
-            rejects(code, path, output);
-            rejects(code, existing, path);
+            await rejects(code, path, output);
+            await rejects(code, existing, path);
+            rejectsSync(code, path, output);
+            rejectsSync(code, existing, path);
         }
-        rejects('FS_PATH', missing, output + '/.');
-        rejects('FS_NOT_FOUND', missing, existing);
-        rejects('FS_NOT_FOUND', existing, missing + '/child.txt');
+        await rejects('FS_PATH', missing, output + '/.');
+        await rejects('FS_NOT_FOUND', missing, existing);
+        await rejects('FS_NOT_FOUND', existing, missing + '/child.txt');
+        rejectsSync('FS_PATH', missing, output + '/.');
+        rejectsSync('FS_NOT_FOUND', missing, existing);
     "#
     .replace("__DIR__", &literal(dir.path()));
     run(&js, &source);
+    js.run(&format!(
+        "try {{ fs.rename({existing}, {output}); throw Error('dispatched outside managed turn'); }}
+         catch (error) {{
+           if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error;
+         }}",
+        existing = literal(&existing),
+        output = literal(&output),
+    ))
+    .unwrap();
 
     assert_eq!(fs::read(&existing).unwrap(), b"keep");
     assert!(!output.exists());
@@ -2415,8 +2446,8 @@ fn rename_moves_dangling_symlinks_and_replaces_destination_entries() {
     let js = runtime();
     let script = r#"
         import {rename} from 'neo:fs';
-        rename(__LINK__, __MOVED__);
-        rename(__SOURCE__, __REPLACED__);
+        await rename(__LINK__, __MOVED__);
+        await rename(__SOURCE__, __REPLACED__);
     "#
     .replace("__LINK__", &literal(&link))
     .replace("__MOVED__", &literal(&moved))
@@ -2456,9 +2487,9 @@ fn rename_replaces_a_file_but_does_not_predelete_a_nonempty_directory() {
     let js = runtime();
     let script = r#"
         import {rename, FsError} from 'neo:fs';
-        rename(__REPLACEMENT__, __FILE__);
+        await rename(__REPLACEMENT__, __FILE__);
         let failure;
-        try { rename(__SOURCE__, __DESTINATION__); }
+        try { await rename(__SOURCE__, __DESTINATION__); }
         catch (error) { failure = error; }
         // POSIX permits either ENOTEMPTY or EEXIST for this replacement.
         if (!(failure instanceof FsError) ||

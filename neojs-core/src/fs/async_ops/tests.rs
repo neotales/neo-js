@@ -2093,3 +2093,380 @@ fn failing_turn_cancels_a_removal_after_its_deletion_effect() {
     assert!(js.run("1").unwrap_err().contains("NEO_MODULE_ABORTED"));
     drop(js);
 }
+
+#[test]
+fn a_rename_completes_while_first_worker_is_blocked() {
+    let dir = tempfile::tempdir().unwrap();
+    let first_source = dir.path().join("first-source");
+    let first_destination = dir.path().join("first-destination");
+    let second_source = dir.path().join("second-source");
+    let second_destination = dir.path().join("second-destination");
+    fs::write(&first_source, b"first").unwrap();
+    fs::write(&second_source, b"second").unwrap();
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    js.ops.gates.borrow_mut().push_back(Gate(Box::new(move |_| {
+        started_tx.send(()).unwrap();
+        release_rx.recv_timeout(TIMEOUT).unwrap();
+        Ok(())
+    })));
+    let (progress, progress_rx) = mpsc::channel();
+    js.context.with(|ctx| {
+        let progress = Function::new(ctx.clone(), move |phase: u8| {
+            progress.send(phase).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("progress", progress).unwrap();
+    });
+    let controller = thread::spawn(move || {
+        started.recv_timeout(TIMEOUT).unwrap();
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 1);
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 2);
+        release.send(()).unwrap();
+    });
+    let result = js.run_module(
+        "rename-progress.js",
+        &format!(
+            r#"import {{rename}} from 'neo:fs';
+            let done = false;
+            const first = rename({first_source}, {first_destination}).then(() => {{
+                done = true;
+            }});
+            await Promise.resolve();
+            if (done) throw Error('first rename finished before release');
+            progress(1);
+            await rename({second_source}, {second_destination});
+            if (done) throw Error('first finished before its worker was released');
+            progress(2);
+            await first;"#,
+            first_source = literal(&first_source),
+            first_destination = literal(&first_destination),
+            second_source = literal(&second_source),
+            second_destination = literal(&second_destination),
+        ),
+    );
+    controller.join().unwrap();
+    result.unwrap();
+    assert!(!first_source.exists() && !second_source.exists());
+    assert_eq!(fs::read(&first_destination).unwrap(), b"first");
+    assert_eq!(fs::read(&second_destination).unwrap(), b"second");
+}
+
+#[test]
+fn outstanding_renames_share_the_operation_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let sources: Vec<_> = (0..=MAX_PENDING)
+        .map(|index| dir.path().join(format!("rename-source-{index}")))
+        .collect();
+    let destinations: Vec<_> = (0..=MAX_PENDING)
+        .map(|index| dir.path().join(format!("rename-destination-{index}")))
+        .collect();
+    for source in &sources {
+        fs::write(source, b"x").unwrap();
+    }
+    let source_literals: Vec<_> = sources.iter().map(|path| literal(path)).collect();
+    let destination_literals: Vec<_> = destinations.iter().map(|path| literal(path)).collect();
+    let source_array = format!("[{}]", source_literals.join(","));
+    let destination_array = format!("[{}]", destination_literals.join(","));
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (progress, progress_rx) = std::sync::mpsc::channel();
+    js.context.with(|ctx| {
+        let progress = Function::new(ctx.clone(), move |phase: u8| {
+            progress.send(phase).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("progress", progress).unwrap();
+    });
+    let (release_first_tx, release_first) = mpsc::channel::<()>();
+    let (release_second_tx, release_second) = mpsc::channel::<()>();
+    {
+        let mut gates = js.ops.gates.borrow_mut();
+        for wait in [release_first, release_second] {
+            let started_tx = started_tx.clone();
+            gates.push_back(Gate(Box::new(move |_| {
+                started_tx.send(()).unwrap();
+                wait.recv_timeout(TIMEOUT).unwrap();
+                Ok(())
+            })));
+        }
+    }
+    drop(started_tx);
+    let controller = thread::spawn(move || {
+        started.recv_timeout(TIMEOUT).unwrap();
+        started.recv_timeout(TIMEOUT).unwrap();
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 1);
+        release_first_tx.send(()).unwrap();
+        release_second_tx.send(()).unwrap();
+    });
+    let result = js.run_module(
+        "rename-saturation.js",
+        &format!(
+            r#"import {{rename, exists, FsError}} from 'neo:fs';
+            const sources = {sources};
+            const destinations = {destinations};
+            const renames = [];
+            for (let i = 0; i < {limit}; i++) renames.push(rename(sources[i], destinations[i]));
+            try {{
+                await rename(sources[{limit}], destinations[{limit}]);
+                throw Error('admitted one rename beyond the bound');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_LIMIT') throw error;
+            }}
+            progress(1);
+            for (const result of await Promise.all(renames)) {{
+                if (result !== undefined) throw Error('rename resolved with a value');
+            }}
+            for (let i = 0; i < {limit}; i++) {{
+                if (exists(sources[i]) || !exists(destinations[i])) {{
+                    throw Error('accepted rename did not move the entry');
+                }}
+            }}
+            await rename(sources[{limit}], destinations[{limit}]);
+            if (exists(sources[{limit}]) || !exists(destinations[{limit}])) {{
+                throw Error('rename admission did not recover');
+            }}"#,
+            sources = source_array,
+            destinations = destination_array,
+            limit = MAX_PENDING,
+        ),
+    );
+    controller.join().unwrap();
+    result.unwrap();
+    for index in 0..=MAX_PENDING {
+        assert!(!sources[index].exists());
+        assert!(destinations[index].exists());
+    }
+}
+
+#[test]
+fn a_panicking_rename_is_reported_as_io_and_leaves_the_worker_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("panic-source");
+    let destination = dir.path().join("panic-destination");
+    fs::write(&source, b"x").unwrap();
+    let js = runtime();
+    js.ops.gates.borrow_mut().push_back(Gate(Box::new(|_| {
+        panic!("injected worker panic");
+    })));
+    js.run_module(
+        "panic-rename.js",
+        &format!(
+            r#"import {{rename, exists, FsError}} from 'neo:fs';
+            try {{
+                await rename({source}, {destination});
+                throw Error('panicking rename fulfilled');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_IO') throw error;
+            }}
+            if (!exists({source}) || exists({destination})) {{
+                throw Error('panicking rename moved the entry');
+            }}
+            await rename({source}, {destination});
+            if (exists({source}) || !exists({destination})) {{
+                throw Error('worker did not recover');
+            }}"#,
+            source = literal(&source),
+            destination = literal(&destination),
+        ),
+    )
+    .unwrap();
+    assert!(!source.exists());
+    assert!(destination.exists());
+}
+
+#[test]
+fn failing_turn_cancels_pending_renames() {
+    let dir = tempfile::tempdir().unwrap();
+    let pairs: Vec<_> = (0..3)
+        .map(|index| {
+            (
+                dir.path().join(format!("cancel-source-{index}")),
+                dir.path().join(format!("cancel-destination-{index}")),
+            )
+        })
+        .collect();
+    for (source, _) in &pairs {
+        fs::write(source, b"x").unwrap();
+    }
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (joined_tx, joined) = mpsc::channel();
+    let (third_tx, third_started) = mpsc::channel();
+    let mut release = Vec::new();
+    {
+        let mut gates = js.ops.gates.borrow_mut();
+        for _ in 0..2 {
+            let (send, wait) = mpsc::channel::<()>();
+            release.push(send);
+            let started_tx = started_tx.clone();
+            let joined_tx = joined_tx.clone();
+            gates.push_back(Gate(Box::new(move |cancel| {
+                started_tx.send(()).unwrap();
+                assert_eq!(
+                    wait.recv_timeout(TIMEOUT),
+                    Err(mpsc::RecvTimeoutError::Disconnected)
+                );
+                joined_tx.send(cancel.requested()).unwrap();
+                Ok(())
+            })));
+        }
+        gates.push_back(Gate(Box::new(move |_| {
+            drop(release);
+            third_tx.send(()).unwrap();
+            Ok(())
+        })));
+    }
+    js.context.with(|ctx| {
+        let wait = Function::new(ctx.clone(), move || {
+            started.recv_timeout(TIMEOUT).unwrap();
+            started.recv_timeout(TIMEOUT).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("finishRenames", wait).unwrap();
+    });
+    let result = js.run_module(
+        "cancel-rename.js",
+        &format!(
+            "globalThis.cancelledRename = fs.rename({first_source}, {first_destination});
+             fs.rename({second_source}, {second_destination});
+             fs.rename({third_source}, {third_destination});
+             finishRenames(); throw Error('entry failed');",
+            first_source = literal(&pairs[0].0),
+            first_destination = literal(&pairs[0].1),
+            second_source = literal(&pairs[1].0),
+            second_destination = literal(&pairs[1].1),
+            third_source = literal(&pairs[2].0),
+            third_destination = literal(&pairs[2].1),
+        ),
+    );
+    assert!(result.unwrap_err().contains("entry failed"));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(
+        third_started.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    );
+    assert!(pairs.iter().all(|(source, _)| source.exists()));
+    assert!(pairs.iter().all(|(_, destination)| !destination.exists()));
+    assert!(js.ops.active.borrow().is_none());
+    js.context.with(|ctx| {
+        let promise: Promise = ctx.globals().get("cancelledRename").unwrap();
+        assert!(matches!(
+            promise.result::<()>(),
+            Some(Err(JsError::Exception))
+        ));
+        let reason = ctx.catch().into_object().unwrap();
+        assert_eq!(reason.get::<_, String>("code").unwrap(), "FS_CANCELLED");
+    });
+    assert!(js.run("1").unwrap_err().contains("NEO_MODULE_ABORTED"));
+    drop(js);
+}
+
+#[test]
+fn failing_turn_cancels_a_rename_after_its_effect() {
+    let dir = tempfile::tempdir().unwrap();
+    let pairs: Vec<_> = (0..3)
+        .map(|index| {
+            (
+                dir.path().join(format!("effect-source-{index}")),
+                dir.path().join(format!("effect-destination-{index}")),
+            )
+        })
+        .collect();
+    for (source, _) in &pairs {
+        fs::write(source, b"x").unwrap();
+    }
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (joined_tx, joined) = mpsc::channel();
+    let (queued_tx, queued_started) = mpsc::channel();
+    let mut release = Vec::new();
+    {
+        // Each of the two running workers pauses only after `rename_at` has
+        // returned, so the entry is already moved when the wait begins.
+        let mut rename_gates = js.ops.rename_gates.borrow_mut();
+        for (source, destination) in pairs.iter().take(2) {
+            let source = source.clone();
+            let destination = destination.clone();
+            let (send, wait) = mpsc::channel::<()>();
+            release.push(send);
+            let started_tx = started_tx.clone();
+            let joined_tx = joined_tx.clone();
+            rename_gates.push_back(RenameGate(Box::new(move |cancel| {
+                assert!(!source.exists(), "gate ran before the rename effect");
+                assert!(destination.exists(), "gate ran before the rename effect");
+                started_tx.send(()).unwrap();
+                assert_eq!(
+                    wait.recv_timeout(TIMEOUT),
+                    Err(mpsc::RecvTimeoutError::Disconnected)
+                );
+                joined_tx.send(cancel.requested()).unwrap();
+                Ok(())
+            })));
+        }
+        // A no-op pre-execute gate occupies each running job. The third gate
+        // owns the senders and is attached to the queued job; discarding that
+        // request during shutdown disconnects both post-effect waits.
+        let mut gates = js.ops.gates.borrow_mut();
+        for _ in 0..2 {
+            gates.push_back(Gate(Box::new(|_| Ok(()))));
+        }
+        gates.push_back(Gate(Box::new(move |_| {
+            drop(release);
+            queued_tx.send(()).unwrap();
+            Ok(())
+        })));
+    }
+    js.context.with(|ctx| {
+        let wait = Function::new(ctx.clone(), move || {
+            started.recv_timeout(TIMEOUT).unwrap();
+            started.recv_timeout(TIMEOUT).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("finishRenames", wait).unwrap();
+    });
+    let result = js.run_module(
+        "cancel-rename-effect.js",
+        &format!(
+            "globalThis.cancelledRenameEffect = fs.rename({first_source}, {first_destination});
+             fs.rename({second_source}, {second_destination});
+             fs.rename({third_source}, {third_destination});
+             finishRenames(); throw Error('entry failed');",
+            first_source = literal(&pairs[0].0),
+            first_destination = literal(&pairs[0].1),
+            second_source = literal(&pairs[1].0),
+            second_destination = literal(&pairs[1].1),
+            third_source = literal(&pairs[2].0),
+            third_destination = literal(&pairs[2].1),
+        ),
+    );
+    assert!(result.unwrap_err().contains("entry failed"));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(
+        queued_started.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    );
+    // The two started renames are real side effects and were not rolled back.
+    for (source, destination) in pairs.iter().take(2) {
+        assert!(!source.exists());
+        assert!(destination.exists());
+    }
+    // The queued rename was never dispatched.
+    assert!(pairs[2].0.exists());
+    assert!(!pairs[2].1.exists());
+    assert!(js.ops.active.borrow().is_none());
+    js.context.with(|ctx| {
+        let promise: Promise = ctx.globals().get("cancelledRenameEffect").unwrap();
+        assert!(matches!(
+            promise.result::<()>(),
+            Some(Err(JsError::Exception))
+        ));
+        let reason = ctx.catch().into_object().unwrap();
+        assert_eq!(reason.get::<_, String>("code").unwrap(), "FS_CANCELLED");
+    });
+    assert!(js.run("1").unwrap_err().contains("NEO_MODULE_ABORTED"));
+    drop(js);
+}

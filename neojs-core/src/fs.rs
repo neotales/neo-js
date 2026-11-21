@@ -4,11 +4,12 @@
 //! granted and the runtime's module allowlist admits [`crate::RuntimeModule::Fs`].
 //! Both gates are checked before the `fs` global or any native callback is
 //! constructed. `readFile`, `writeFile`, `writeText`, `stat`, `lstat`,
-//! `readDir`, `mkdir`, and `remove` run on workers; `readFileSync`,
+//! `readDir`, `mkdir`, `remove`, and `rename` run on workers; `readFileSync`,
 //! `writeFileSync`, `writeTextSync`, `statSync`, `lstatSync`, `readDirSync`,
-//! `mkdirSync`, `removeSync`, and all other operations block. Nothing here
-//! starts a shell, a child process, or a network request directly. The OS may
-//! still perform network I/O for network paths and filesystems.
+//! `mkdirSync`, `removeSync`, `renameSync`, and all other operations block.
+//! Nothing here starts a shell, a child process, or a network request
+//! directly. The OS may still perform network I/O for network paths and
+//! filesystems.
 //!
 //! # Authority
 //!
@@ -162,15 +163,18 @@
 //!
 //! # Rename
 //!
-//! `rename(source, destination)` validates both entry paths, resolves them
-//! against the same runtime working directory, and delegates replacement to
-//! the OS. A rejected replacement of a non-empty directory can report
-//! `FS_ALREADY_EXISTS` or `FS_NOT_EMPTY`, depending on the OS error. It
-//! never pre-deletes the destination or copies and deletes across filesystems.
+//! `rename(source, destination)` runs on a worker; `renameSync(source,
+//! destination)` blocks. Both validate both entry paths, resolve them against
+//! the same runtime working directory, and delegate replacement to the OS. A
+//! rejected replacement of a non-empty directory can report
+//! `FS_ALREADY_EXISTS` or `FS_NOT_EMPTY`, depending on the OS error. Neither
+//! form pre-deletes the destination or copies and deletes across filesystems.
 //! An OS cross-device error reports `FS_CROSS_DEVICE`.
-//! It is pathname based: entries can change between resolution and use, and
-//! the runtime does not roll back or guarantee the outcome after an OS or
-//! network filesystem failure.
+//! Both are pathname based: entries can change between resolution and use,
+//! and the runtime does not roll back or guarantee the outcome after an OS or
+//! network filesystem failure. A started asynchronous rename cannot be
+//! interrupted by teardown and may still rename the entry after a failed turn;
+//! cancellation does not restore the source or remove the destination.
 //!
 //! # Copy
 //!
@@ -257,7 +261,7 @@ pub(crate) const MAX_LIST_NAME_BYTES: usize = 1024;
 /// Largest sum of directory-entry names `readDir` returns, in UTF-8 bytes.
 pub(crate) const MAX_LIST_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
-const EXPORTS: [&str; 27] = [
+const EXPORTS: [&str; 28] = [
     "readText",
     "writeText",
     "writeTextSync",
@@ -277,6 +281,7 @@ const EXPORTS: [&str; 27] = [
     "remove",
     "removeSync",
     "rename",
+    "renameSync",
     "copyFile",
     "FsError",
     "MAX_PATH_BYTES",
@@ -1142,6 +1147,11 @@ fn resolve_pair(
     ))
 }
 
+/// Delegate a rename of two already validated entries to the OS.
+fn rename_at(source: &Path, destination: &Path) -> Result<(), FsError> {
+    fs::rename(source, destination).map_err(FsError::from)
+}
+
 /// Rename two validated directory entries without inspecting either on disk.
 fn rename_path(
     cwd: &RefCell<WorkingDirectory>,
@@ -1151,7 +1161,7 @@ fn rename_path(
     let source = validate_entry_path(source)?;
     let destination = validate_entry_path(destination)?;
     let (source, destination) = resolve_pair(cwd, source, destination)?;
-    fs::rename(source, destination).map_err(FsError::from)
+    rename_at(&source, &destination)
 }
 
 /// On Windows restrict copy operands to ordinary disk paths, excluding
@@ -1592,7 +1602,7 @@ fn build_native<'js>(
 
     type EntryOperation = fn(&RefCell<WorkingDirectory>, &str, &str) -> Result<(), FsError>;
     let operations: [(&str, EntryOperation); 2] =
-        [("rename", rename_path), ("copyFile", copy_file_path)];
+        [("renameSync", rename_path), ("copyFile", copy_file_path)];
     for (name, operation) in operations {
         let cwd = Rc::clone(&cwd);
         native.set(

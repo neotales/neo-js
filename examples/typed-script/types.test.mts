@@ -1,5 +1,5 @@
 import process, { ElevationError, isElevated, stdout } from "neo:process";
-import { readFile, readFileSync, writeFile, writeFileSync, writeText, writeTextSync, stat, statSync, lstat, lstatSync, readDir, readDirSync, mkdir, mkdirSync, remove, removeSync } from "neo:fs";
+import { readFile, readFileSync, writeFile, writeFileSync, writeText, writeTextSync, stat, statSync, lstat, lstatSync, readDir, readDirSync, mkdir, mkdirSync, remove, removeSync, rename, renameSync } from "neo:fs";
 import type { DirEntry, FileInfo } from "neo:fs";
 
 const elevated: boolean = isElevated();
@@ -52,6 +52,16 @@ const pendingRemove: Promise<void> = remove("dir", { recursive: true });
 const syncedRemove: void = removeSync("dir", { recursive: true });
 const globalPendingRemove: Promise<void> = fs.remove("dir", { recursive: true });
 const globalSyncedRemove: void = fs.removeSync("dir", { recursive: true });
+
+const pendingRename: Promise<void> = rename("before.txt", "after.txt");
+const syncedRename: void = renameSync("before.txt", "after.txt");
+const globalPendingRename: Promise<void> = fs.rename("before.txt", "after.txt");
+const globalSyncedRename: void = fs.renameSync("before.txt", "after.txt");
+
+// @ts-expect-error The unsuffixed rename now completes asynchronously.
+const notRenamed: void = rename("before.txt", "after.txt");
+// @ts-expect-error The unsuffixed global rename now completes asynchronously.
+const notGlobalRenamed: void = fs.rename("before.txt", "after.txt");
 
 // @ts-expect-error The unsuffixed method no longer returns metadata synchronously.
 const notMetadata: FileInfo = stat("data.bin");

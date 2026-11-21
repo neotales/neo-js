@@ -53,8 +53,8 @@ declare const env: {
  * The `neo:fs` API. Available only with `--allow-fs` and when the runtime's
  * module allowlist admits `neo:fs`. Relative paths use the runtime's working
  * directory, not the host process's. `readFile`, `writeFile`, `writeText`,
- * `stat`, `lstat`, `readDir`, `mkdir`, and `remove` are asynchronous; their
- * `Sync` counterparts and every other operation block.
+ * `stat`, `lstat`, `readDir`, `mkdir`, `remove`, and `rename` are
+ * asynchronous; their `Sync` counterparts and every other operation block.
  *
  * This is not a sandbox: a script with this object has the host user's
  * filesystem authority. Reads and writes are bounded; see the `neo:fs`
@@ -162,8 +162,16 @@ declare const fs: {
    * `neo:fs.removeSync`.
    */
   removeSync(path: string, options?: import("neo:fs").RemoveOptions): void;
-  /** Same entry, replacement, and error semantics as `neo:fs.rename`. */
-  rename: typeof import("neo:fs").rename;
+  /**
+   * Rename a file, directory, or symlink entry on a worker during managed
+   * module evaluation. Outside it, this throws `FS_ASYNC_OUTSIDE_TURN`
+   * synchronously before I/O. It uses the same outstanding-operation and
+   * worker limits as `readFile`. See `neo:fs.rename` for the entry,
+   * replacement, and race rules.
+   */
+  rename(source: string, destination: string): Promise<void>;
+  /** Same entry and replacement rules as `neo:fs.renameSync`. */
+  renameSync(source: string, destination: string): void;
   /** Same bounded, no-clobber copy as `neo:fs.copyFile`. */
   copyFile: typeof import("neo:fs").copyFile;
   FsError: typeof import("neo:fs").FsError;

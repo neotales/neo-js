@@ -20,8 +20,8 @@ declare const env: {
  * The `neo:fs` API. Available only with `--allow-fs` and when the runtime's
  * module allowlist admits `neo:fs`. Relative paths use the runtime's working
  * directory, not the host process's. `readFile`, `writeFile`, `writeText`,
- * `stat`, `lstat`, `readDir`, `mkdir`, and `remove` are asynchronous; their
- * `Sync` counterparts and every other operation block.
+ * `stat`, `lstat`, `readDir`, `mkdir`, `remove`, and `rename` are
+ * asynchronous; their `Sync` counterparts and every other operation block.
  *
  * This is not a sandbox: a script with this object has the host user's
  * filesystem authority. Reads and writes are bounded; see the `neo:fs`
@@ -129,8 +129,16 @@ declare const fs: {
    * `neo:fs.removeSync`.
    */
   removeSync(path: string, options?: import("neo:fs").RemoveOptions): void;
-  /** Same entry, replacement, and error semantics as `neo:fs.rename`. */
-  rename: typeof import("neo:fs").rename;
+  /**
+   * Rename a file, directory, or symlink entry on a worker during managed
+   * module evaluation. Outside it, this throws `FS_ASYNC_OUTSIDE_TURN`
+   * synchronously before I/O. It uses the same outstanding-operation and
+   * worker limits as `readFile`. See `neo:fs.rename` for the entry,
+   * replacement, and race rules.
+   */
+  rename(source: string, destination: string): Promise<void>;
+  /** Same entry and replacement rules as `neo:fs.renameSync`. */
+  renameSync(source: string, destination: string): void;
   /** Same bounded, no-clobber copy as `neo:fs.copyFile`. */
   copyFile: typeof import("neo:fs").copyFile;
   FsError: typeof import("neo:fs").FsError;
@@ -161,10 +169,11 @@ declare module "neo:env" {
  *
  * During managed module evaluation, `readFile` reads, `writeFile` and
  * `writeText` write, `stat` and `lstat` read metadata, `readDir` lists a
- * directory, `mkdir` creates a directory, and `remove` deletes an entry on a
- * worker. Those eight return Promises. `readFileSync`, `writeFileSync`,
- * `writeTextSync`, `statSync`, `lstatSync`, `readDirSync`, `mkdirSync`,
- * `removeSync`, and the other operations block the JavaScript thread. Relative
+ * directory, `mkdir` creates a directory, `remove` deletes an entry, and
+ * `rename` moves an entry on a worker. Those nine return Promises.
+ * `readFileSync`, `writeFileSync`, `writeTextSync`, `statSync`, `lstatSync`,
+ * `readDirSync`, `mkdirSync`, `removeSync`, `renameSync`, and the other
+ * operations block the JavaScript thread. Relative
  * paths resolve
  * against the runtime's working directory, with no fallback to the host
  * directory. If that directory is unavailable, the asynchronous forms reject
@@ -232,8 +241,8 @@ declare module "neo:fs" {
   /**
    * Stable failure codes reported by `FsError.code`. `FS_PATH` includes
    * invalid or unsupported path syntax and, for `remove`, `removeSync`,
-   * `rename`, and `copyFile`, parsed roots, trailing separators, and final `.`
-   * or `..` components.
+   * `rename`, `renameSync`, and `copyFile`, parsed roots, trailing separators,
+   * and final `.` or `..` components.
    */
   export type FsErrorCode =
     | "FS_PATH"
@@ -689,23 +698,47 @@ declare module "neo:fs" {
   export function removeSync(path: string, options?: RemoveOptions): void;
 
   /**
-   * Synchronously rename a file, directory, or symlink entry. Both relative
-   * paths use the same runtime working directory. Final symlinks are not
-   * followed, and replacement follows the host OS rules.
-   * A rejected replacement of a non-empty directory can throw
-   * `FS_ALREADY_EXISTS` or `FS_NOT_EMPTY`, depending on the OS error.
+   * Rename a file, directory, or symlink entry on a worker.
+   *
+   * **Breaking change:** this function was synchronous. Use
+   * `await rename(source, destination)` during managed module evaluation, or
+   * `renameSync(source, destination)` in synchronous code. Outside a managed
+   * turn this throws `FS_ASYNC_OUTSIDE_TURN` before I/O.
+   *
+   * Both relative paths use the same runtime working directory captured at
+   * the call. Final symlinks are not followed, and replacement follows the
+   * host OS rules. A rejected replacement of a non-empty directory can
+   * reject with `FS_ALREADY_EXISTS` or `FS_NOT_EMPTY`, depending on the OS
+   * error.
    *
    * Both paths must name specific entries: parsed roots, trailing separators,
-   * final `.` or `..`, and Windows drive-relative paths throw `FS_PATH`.
-   * Neither path is canonicalized on disk; joining a relative path to a
-   * Windows verbatim working directory can normalize intermediate components
-   * lexically.
+   * final `.` or `..`, and Windows drive-relative paths reject with
+   * `FS_PATH`. Neither path is canonicalized on disk; joining a relative path
+   * to a Windows verbatim working directory can normalize intermediate
+   * components lexically.
    * The runtime never pre-deletes the destination, creates parents, or falls
-   * back to copy/delete. An OS cross-device error throws `FS_CROSS_DEVICE`.
-   * Paths can change between resolution and use; there is no sandbox, rollback,
-   * or guarantee of the outcome after an OS or network filesystem failure.
+   * back to copy/delete. An OS cross-device error rejects with
+   * `FS_CROSS_DEVICE`. A rename shares the four-operation outstanding bound
+   * and two-worker pool with the other asynchronous filesystem operations and
+   * charges both resolved paths against the same turn budget. Excess work
+   * rejects with `FS_LIMIT`.
+   * Paths can change between resolution and use; there is no sandbox,
+   * rollback, or guarantee of the outcome after an OS or network filesystem
+   * failure. A started asynchronous rename cannot be interrupted by teardown
+   * and may still move the entry after a failed turn; cancellation restores
+   * nothing.
    */
-  export function rename(source: string, destination: string): void;
+  export function rename(source: string, destination: string): Promise<void>;
+
+  /**
+   * Rename a file, directory, or symlink entry, blocking the JavaScript
+   * thread.
+   *
+   * The same entry, replacement, error, path, and no-rollback rules as
+   * `rename` apply, except that failures throw instead of rejecting and the
+   * call returns `undefined`.
+   */
+  export function renameSync(source: string, destination: string): void;
 }
 
 /**
