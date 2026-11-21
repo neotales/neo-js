@@ -36,18 +36,24 @@ Windows machine without GitHub Actions.
 > with that case but this is not confirmed. **No `mkdir` test has passed on
 > native Windows.**
 >
-> This branch removes the Unix-only expectation from the shared test, labels
+> Run [44943444444](https://github.com/neotales/neo-js/actions/runs/44943444444)
+> at `8475b21` reported `FS_ALREADY_EXISTS` for the async recursive `mkdir`
+> below an intermediate regular file. The non-recursive cases stayed within
+> `FS_NOT_FOUND`/`FS_NOT_DIRECTORY`. The sync recursive case was computed but
+> not logged because the diagnostic logged after its assertions; the filesystem
+> suite has not passed on native Windows.
+>
+> This change removes the Unix-only expectation from the shared test, labels
 > every `mkdir` case, and adds a Windows-only diagnostic for a missing parent
-> and an intermediate regular file (sync, async, and recursive). On a passing
-> run it records the validated missing-parent codes and the sanitized
-> intermediate-file codes with fixed labels and no path. The intermediate-file
-> result is restricted to `FS_NOT_FOUND` or `FS_NOT_DIRECTORY`; the test does
-> not claim which one Windows selects until a native run observes it. The
-> filesystem suite is now `38` Windows-selected integration tests,
-> plus one filtered pure validation unit test (`97` selected in total). This
-> revised suite has not been dispatched, so it is not evidence that the
-> filesystem path passes on Windows. The previous 58-test result remains the
-> only passing native Windows evidence.
+> and an intermediate regular file (sync, async, and recursive). It records the
+> sanitized observed outcomes before asserting them; the non-recursive
+> intermediate-file result is restricted to `FS_NOT_FOUND` or
+> `FS_NOT_DIRECTORY`, and the recursive result also accepts the observed
+> `FS_ALREADY_EXISTS`. The filesystem suite is now `38` Windows-selected
+> integration tests, plus one filtered pure validation unit test (`97` selected
+> in total). This revised suite has not been dispatched, so it is not evidence
+> that the filesystem path passes on Windows. The previous 58-test result
+> remains the only passing native Windows evidence.
 
 ## Runner environment
 
@@ -151,9 +157,11 @@ entry as a link, and fails closed if the process lacks
 `SeCreateSymbolicLinkPrivilege` or Developer Mode; one covers `mkdir` with a
 missing parent and with an intermediate regular file in sync, async, and
 recursive forms and logs the observed missing-parent and intermediate-file
-codes with fixed labels; the intermediate-file result is restricted to
-`FS_NOT_FOUND` or `FS_NOT_DIRECTORY` until a native run observes it; and one is
-a gated basic round trip. The previous Windows-only integration test that passed
+codes with fixed labels before asserting them; the non-recursive
+intermediate-file result is restricted to `FS_NOT_FOUND` or
+`FS_NOT_DIRECTORY`, and the recursive result also accepts the observed
+`FS_ALREADY_EXISTS`; and one is a gated basic round trip. The previous
+Windows-only integration test that passed
 root, namespace, UNC, device, and stream names to `copyFile` was removed; those
 cases now run in a pure validation unit test
 (`fs::tests::windows_copy_paths_are_rejected_before_io`) selected with

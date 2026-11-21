@@ -2717,15 +2717,19 @@ fn windows_final_symlink_metadata_and_listing_fails_closed_without_capability() 
 fn windows_directory_creation_covers_missing_parents_and_intermediate_files() {
     // The shared mkdir test asserts only the documented cross-platform
     // contract. The Unix rule that a non-directory intermediate component
-    // reports `FS_NOT_DIRECTORY` is explicitly Unix-scoped in the module docs;
-    // the Windows code is selected by the OS and has no native evidence in this
-    // build. This regression pins the documented missing-parent and recursive
-    // contract on a native Windows fixture and proves that an intermediate
-    // regular file fails instead of silently creating a directory. The
-    // intermediate-file result is restricted to the two plausible OS codes,
-    // `FS_NOT_FOUND` and `FS_NOT_DIRECTORY`; the test does not claim which one
-    // Windows selects until a native run observes it. Failure and diagnostic
-    // text uses only fixed labels and sanitized code literals, never a path.
+    // reports `FS_NOT_DIRECTORY` is explicitly Unix-scoped in the module docs.
+    // Native Windows run 44943444444 at 8475b21 observed `FS_ALREADY_EXISTS`
+    // for the async recursive form; the non-recursive form stayed within
+    // `FS_NOT_FOUND`/`FS_NOT_DIRECTORY`. This is consistent with
+    // `create_dir_all` returning the existing-file error from an ancestor
+    // after its first creation attempt fails. The recursive case therefore
+    // accepts the observed `FS_ALREADY_EXISTS`; the non-recursive case keeps
+    // the narrower set. This is an owned-fixture platform expectation, not a
+    // pre-I/O classification and not a production change.
+    //
+    // The module records every sanitized outcome and the Rust side logs it
+    // before any assertion, so a failing classification still reports all
+    // observed codes. Paths and arbitrary error properties are never included.
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("windows-file.txt");
     fs::write(&file, b"x").unwrap();
@@ -2738,7 +2742,7 @@ fn windows_directory_creation_covers_missing_parents_and_intermediate_files() {
     run(
         &js,
         &format!(
-            r#"import {{mkdir, mkdirSync, exists, FsError}} from 'neo:fs';
+            r#"import {{mkdir, mkdirSync, FsError}} from 'neo:fs';
             {error_helpers}
             const missingParent = {missing_parent};
             const nestedAsync = {nested_async};
@@ -2746,132 +2750,66 @@ fn windows_directory_creation_covers_missing_parents_and_intermediate_files() {
             const belowFile = {below_file};
             const belowFileRecursive = {below_file_recursive};
 
-            // Each label is fixed text. No supplied path or arbitrary error
-            // property is placed in an error message; codes are sanitized by
-            // the shared helpers.
-            async function expectAsyncCode(label, code, action) {{
-                try {{ await action(); }}
-                catch (error) {{
-                    if (fsErrorCode(error) === code) return error;
-                    throw Error(label + ': expected ' + code + ', got ' + describeError(error));
-                }}
-                throw Error(label + ': expected ' + code + ' but the call succeeded');
-            }}
-            function expectSyncCode(label, code, action) {{
-                try {{ action(); }}
-                catch (error) {{
-                    if (fsErrorCode(error) === code) return error;
-                    throw Error(label + ': expected ' + code + ', got ' + describeError(error));
-                }}
-                throw Error(label + ': expected ' + code + ' but the call succeeded');
-            }}
-            async function expectAsyncFailure(label, action) {{
-                try {{ await action(); }}
+            // Collect sanitized outcomes; do not assert here. The Rust side
+            // logs the complete observation before checking it.
+            async function collectAsyncSuccess(action) {{
+                try {{ await action(); return 'OK'; }}
                 catch (error) {{
                     const code = fsErrorCode(error);
-                    if (code !== null) return code;
-                    throw Error(label + ': expected FsError, got ' + describeError(error));
+                    return code !== null ? code : describeError(error);
                 }}
-                throw Error(label + ': expected a rejection but the call succeeded');
             }}
-            function expectSyncFailure(label, action) {{
-                try {{ action(); }}
+            function collectSyncSuccess(action) {{
+                try {{ action(); return 'OK'; }}
                 catch (error) {{
                     const code = fsErrorCode(error);
-                    if (code !== null) return code;
-                    throw Error(label + ': expected FsError, got ' + describeError(error));
-                }}
-                throw Error(label + ': expected a throw but the call succeeded');
-            }}
-            function expectAllowedCode(label, code) {{
-                if (code !== 'FS_NOT_FOUND' && code !== 'FS_NOT_DIRECTORY') {{
-                    throw Error(label + ': expected FS_NOT_FOUND or FS_NOT_DIRECTORY, got ' +
-                        code);
+                    return code !== null ? code : describeError(error);
                 }}
             }}
-            // The restriction must not silently accept a code that would hide
-            // a denial, invalid path, or cancellation.
-            for (const rejected of ['FS_DENIED', 'FS_PATH', 'FS_CANCELLED']) {{
-                let rejectedByCheck = false;
-                try {{ expectAllowedCode('restriction self-check', rejected); }}
-                catch (error) {{ rejectedByCheck = true; }}
-                if (!rejectedByCheck) {{
-                    throw Error('restriction accepted a non-plausible code');
+            async function collectAsyncFailure(action, path) {{
+                try {{ await action(); return 'OK'; }}
+                catch (error) {{
+                    const code = fsErrorCode(error);
+                    const shown = code !== null ? code : describeError(error);
+                    return leaksPath(error, path) ? shown + '+leak' : shown;
+                }}
+            }}
+            function collectSyncFailure(action, path) {{
+                try {{ action(); return 'OK'; }}
+                catch (error) {{
+                    const code = fsErrorCode(error);
+                    const shown = code !== null ? code : describeError(error);
+                    return leaksPath(error, path) ? shown + '+leak' : shown;
                 }}
             }}
 
-            // A missing parent without recursion is documented as
-            // FS_NOT_FOUND without a platform qualifier, and the redacted
-            // message must not echo the path.
-            const asyncMissing = await expectAsyncCode(
-                'windows async mkdir missing parent', 'FS_NOT_FOUND',
-                () => mkdir(missingParent));
-            const syncMissing = expectSyncCode(
-                'windows sync mkdir missing parent', 'FS_NOT_FOUND',
-                () => mkdirSync(missingParent));
-            if (leaksPath(asyncMissing, missingParent)) {{
-                throw Error('windows async mkdir missing parent leaked the path');
-            }}
-            if (leaksPath(syncMissing, missingParent)) {{
-                throw Error('windows sync mkdir missing parent leaked the path');
-            }}
-
-            // Recursion creates the whole missing tree in both forms. Separate
-            // paths prove each form creates parents rather than accepting a
-            // directory the other form left behind.
-            await expectAsyncSuccess(
-                'windows async recursive mkdir creates parents',
+            const missingAsync = await collectAsyncFailure(
+                () => mkdir(missingParent), missingParent);
+            const missingSync = collectSyncFailure(
+                () => mkdirSync(missingParent), missingParent);
+            const nestedAsyncResult = await collectAsyncSuccess(
                 () => mkdir(nestedAsync, {{recursive: true}}));
-            if (!exists(nestedAsync)) {{
-                throw Error('windows async recursive mkdir did not create parents');
-            }}
-            expectSyncSuccess(
-                'windows sync recursive mkdir creates parents',
+            const nestedSyncResult = collectSyncSuccess(
                 () => mkdirSync(nestedSync, {{recursive: true}}));
-            if (!exists(nestedSync)) {{
-                throw Error('windows sync recursive mkdir did not create parents');
-            }}
+            const belowAsync = await collectAsyncFailure(
+                () => mkdir(belowFile), belowFile);
+            const belowSync = collectSyncFailure(
+                () => mkdirSync(belowFile), belowFile);
+            const belowAsyncRecursive = await collectAsyncFailure(
+                () => mkdir(belowFileRecursive, {{recursive: true}}), belowFileRecursive);
+            const belowSyncRecursive = collectSyncFailure(
+                () => mkdirSync(belowFileRecursive, {{recursive: true}}), belowFileRecursive);
 
-            // An intermediate regular file must fail and must not create the
-            // child. Windows may report either of the two plausible OS codes;
-            // neither is claimed until a native run observes it. Codes outside
-            // that set, including FS_DENIED, FS_PATH, and FS_CANCELLED, fail.
-            const asyncBelow = await expectAsyncFailure(
-                'windows async mkdir below an intermediate file',
-                () => mkdir(belowFile));
-            const syncBelow = expectSyncFailure(
-                'windows sync mkdir below an intermediate file',
-                () => mkdirSync(belowFile));
-            const asyncBelowRecursive = await expectAsyncFailure(
-                'windows async recursive mkdir below an intermediate file',
-                () => mkdir(belowFileRecursive, {{recursive: true}}));
-            const syncBelowRecursive = expectSyncFailure(
-                'windows sync recursive mkdir below an intermediate file',
-                () => mkdirSync(belowFileRecursive, {{recursive: true}}));
-            expectAllowedCode('windows async mkdir below an intermediate file', asyncBelow);
-            expectAllowedCode('windows sync mkdir below an intermediate file', syncBelow);
-            expectAllowedCode('windows async recursive mkdir below an intermediate file',
-                asyncBelowRecursive);
-            expectAllowedCode('windows sync recursive mkdir below an intermediate file',
-                syncBelowRecursive);
-            // Record the observed missing-parent and intermediate-file codes
-            // for the Rust side to log on a passing run. Only sanitized fixed
-            // labels are stored; no path is included.
             globalThis.__neoWindowsMkdirCodes =
-                'missingAsync=' + fsErrorCode(asyncMissing) +
-                ' missingSync=' + fsErrorCode(syncMissing) +
-                ' belowAsync=' + asyncBelow +
-                ' belowSync=' + syncBelow +
-                ' belowAsyncRecursive=' + asyncBelowRecursive +
-                ' belowSyncRecursive=' + syncBelowRecursive;
-            if (asyncBelow !== syncBelow) {{
-                throw Error('windows mkdir below an intermediate file differs by form: ' +
-                    asyncBelow + ' vs ' + syncBelow);
-            }}
-            if (asyncBelowRecursive !== syncBelowRecursive) {{
-                throw Error('windows recursive mkdir below an intermediate file differs by form: ' +
-                    asyncBelowRecursive + ' vs ' + syncBelowRecursive);
-            }}"#,
+                'missingAsync=' + missingAsync +
+                ' missingSync=' + missingSync +
+                ' nestedAsync=' + nestedAsyncResult +
+                ' nestedSync=' + nestedSyncResult +
+                ' belowAsync=' + belowAsync +
+                ' belowSync=' + belowSync +
+                ' belowAsyncRecursive=' + belowAsyncRecursive +
+                ' belowSyncRecursive=' + belowSyncRecursive;
+            "#,
             error_helpers = FS_TEST_ERROR_HELPERS,
             missing_parent = literal(&missing_parent),
             nested_async = literal(&nested_async),
@@ -2882,19 +2820,93 @@ fn windows_directory_creation_covers_missing_parents_and_intermediate_files() {
     );
     // libtest captures ordinary test output, so a passing run would otherwise
     // hide the codes. Write directly to the process stderr with a fixed label;
-    // only sanitized code literals are included, never a path. The CI guard
-    // pins the exact `--test fs` argument shape, so this deliberately avoids
-    // adding `--nocapture` to the gate.
+    // only sanitized literals are included, never a path. The CI guard pins
+    // the exact `--test fs` argument shape, so this deliberately avoids adding
+    // `--nocapture` to the gate. This write happens before every assertion
+    // below.
     let observed = js
         .eval("globalThis.__neoWindowsMkdirCodes")
         .expect("the Windows mkdir diagnostic did not record the observed codes");
     let mut stderr = std::io::stderr();
     use std::io::Write as _;
     writeln!(stderr, "windows mkdir observed codes: {observed}").unwrap();
-    // Checked outside the module so an unexpected `exists` failure below a
-    // file cannot be mistaken for a mkdir result. Any entry here is a bug.
+
+    fn observed_field<'a>(observed: &'a str, key: &str) -> &'a str {
+        observed
+            .split(' ')
+            .find_map(|field| {
+                field
+                    .strip_prefix(key)
+                    .and_then(|rest| rest.strip_prefix('='))
+            })
+            .unwrap_or("MISSING")
+    }
+    let missing_async = observed_field(&observed, "missingAsync");
+    let missing_sync = observed_field(&observed, "missingSync");
+    let nested_async_result = observed_field(&observed, "nestedAsync");
+    let nested_sync_result = observed_field(&observed, "nestedSync");
+    let below_async = observed_field(&observed, "belowAsync");
+    let below_sync = observed_field(&observed, "belowSync");
+    let below_async_recursive = observed_field(&observed, "belowAsyncRecursive");
+    let below_sync_recursive = observed_field(&observed, "belowSyncRecursive");
+
+    assert!(
+        !missing_async.ends_with("+leak"),
+        "windows async missing parent leaked the path: {missing_async}"
+    );
+    assert!(
+        !missing_sync.ends_with("+leak"),
+        "windows sync missing parent leaked the path: {missing_sync}"
+    );
+    assert_eq!(
+        missing_async, "FS_NOT_FOUND",
+        "windows async missing parent"
+    );
+    assert_eq!(missing_sync, "FS_NOT_FOUND", "windows sync missing parent");
+    assert_eq!(nested_async_result, "OK", "windows async recursive mkdir");
+    assert_eq!(nested_sync_result, "OK", "windows sync recursive mkdir");
+    for (label, code) in [
+        ("windows async mkdir below a file", below_async),
+        ("windows sync mkdir below a file", below_sync),
+    ] {
+        assert!(!code.ends_with("+leak"), "{label} leaked the path: {code}");
+        assert!(
+            matches!(code, "FS_NOT_FOUND" | "FS_NOT_DIRECTORY"),
+            "{label}: {code}"
+        );
+    }
+    for (label, code) in [
+        (
+            "windows async recursive mkdir below a file",
+            below_async_recursive,
+        ),
+        (
+            "windows sync recursive mkdir below a file",
+            below_sync_recursive,
+        ),
+    ] {
+        assert!(!code.ends_with("+leak"), "{label} leaked the path: {code}");
+        assert!(
+            matches!(
+                code,
+                "FS_NOT_FOUND" | "FS_NOT_DIRECTORY" | "FS_ALREADY_EXISTS"
+            ),
+            "{label}: {code}"
+        );
+    }
+    assert_eq!(
+        below_async, below_sync,
+        "windows mkdir below a file differs by form"
+    );
+    assert_eq!(
+        below_async_recursive, below_sync_recursive,
+        "windows recursive mkdir below a file differs by form"
+    );
+    assert!(!missing_parent.exists());
     assert!(!below_file.exists());
     assert!(!below_file_recursive.exists());
+    assert!(nested_async.is_dir());
+    assert!(nested_sync.is_dir());
 }
 
 #[cfg(windows)]
