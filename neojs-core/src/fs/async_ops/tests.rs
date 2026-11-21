@@ -1,5 +1,11 @@
 //! The worker barrier is private so these integration-style owner-turn
 //! tests can prove ordering without a slow device or a timing assumption.
+//!
+//! These are the allowed unit-test exception from
+//! `code-ergonomics.md § Testing: integration first`: each asserts a critical
+//! concurrency path (admission, cancellation, panic containment, or teardown)
+//! that the public API cannot reach deterministically, because the private
+//! gate is the only way to hold a worker at a known point.
 
 use std::{fs, sync::mpsc, thread};
 
@@ -559,4 +565,237 @@ fn a_write_uses_the_cwd_captured_before_option_reflection() {
     .unwrap();
     assert_eq!(fs::read(old.path().join("out")).unwrap(), b"n");
     assert!(!new.path().join("out").exists());
+}
+
+#[test]
+fn outstanding_metadata_reads_share_the_operation_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("fixture");
+    fs::write(&file, b"abc").unwrap();
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (progress, progress_rx) = std::sync::mpsc::channel();
+    js.context.with(|ctx| {
+        let progress = Function::new(ctx.clone(), move |phase: u8| {
+            progress.send(phase).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("progress", progress).unwrap();
+    });
+    let (release_first_tx, release_first) = mpsc::channel::<()>();
+    let (release_second_tx, release_second) = mpsc::channel::<()>();
+    {
+        let mut gates = js.ops.gates.borrow_mut();
+        for wait in [release_first, release_second] {
+            let started_tx = started_tx.clone();
+            gates.push_back(Gate(Box::new(move |_| {
+                started_tx.send(()).unwrap();
+                wait.recv_timeout(TIMEOUT).unwrap();
+                Ok(())
+            })));
+        }
+    }
+    drop(started_tx);
+    let controller = thread::spawn(move || {
+        started.recv_timeout(TIMEOUT).unwrap();
+        started.recv_timeout(TIMEOUT).unwrap();
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 1);
+        release_first_tx.send(()).unwrap();
+        release_second_tx.send(()).unwrap();
+    });
+    let result = js.run_module(
+        "stat-saturation.js",
+        &format!(
+            r#"import {{stat, FsError}} from 'neo:fs';
+            const file = {file};
+            const reads = [];
+            for (let i = 0; i < {limit}; i++) reads.push(stat(file));
+            try {{
+                await stat(file);
+                throw Error('admitted one metadata read beyond the bound');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_LIMIT') throw error;
+            }}
+            progress(1);
+            for (const info of await Promise.all(reads)) {{
+                if (info.size !== '3' || !info.isFile) throw Error('missing metadata');
+            }}
+            if ((await stat(file)).size !== '3') throw Error('slot did not recover');"#,
+            file = literal(&file),
+            limit = MAX_PENDING,
+        ),
+    );
+    controller.join().unwrap();
+    result.unwrap();
+}
+
+#[test]
+fn metadata_reads_share_the_bound_with_reads_and_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let existing = dir.path().join("existing");
+    let written = dir.path().join("written");
+    fs::write(&existing, [42, 7]).unwrap();
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (progress, progress_rx) = std::sync::mpsc::channel();
+    js.context.with(|ctx| {
+        let progress = Function::new(ctx.clone(), move |phase: u8| {
+            progress.send(phase).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("progress", progress).unwrap();
+    });
+    let (release_read_tx, release_read) = mpsc::channel::<()>();
+    let (release_stat_tx, release_stat) = mpsc::channel::<()>();
+    {
+        let mut gates = js.ops.gates.borrow_mut();
+        gates.push_back(Gate(Box::new({
+            let started_tx = started_tx.clone();
+            move |_| {
+                started_tx.send(()).unwrap();
+                release_read.recv_timeout(TIMEOUT).unwrap();
+                Ok(())
+            }
+        })));
+        gates.push_back(Gate(Box::new(move |_| {
+            started_tx.send(()).unwrap();
+            release_stat.recv_timeout(TIMEOUT).unwrap();
+            Ok(())
+        })));
+    }
+    let controller = thread::spawn(move || {
+        started.recv_timeout(TIMEOUT).unwrap();
+        started.recv_timeout(TIMEOUT).unwrap();
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 1);
+        release_read_tx.send(()).unwrap();
+        release_stat_tx.send(()).unwrap();
+    });
+    let result = js.run_module(
+        "stat-mixed-saturation.js",
+        &format!(
+            r#"import {{readFile, writeFile, stat, readFileSync, FsError}} from 'neo:fs';
+            const existing = {existing};
+            const written = {written};
+            const read = readFile(existing);
+            const firstInfo = stat(existing);
+            const write = writeFile(written, new Uint8Array([5]));
+            const secondInfo = stat(existing);
+            try {{
+                await stat(existing);
+                throw Error('admitted work beyond the shared bound');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_LIMIT') throw error;
+            }}
+            progress(1);
+            const [bytes, first, wrote, second] = await Promise.all([read, firstInfo, write, secondInfo]);
+            if (bytes[0] !== 42 || first.size !== '2' || second.size !== '2') {{
+                throw Error('accepted metadata work did not finish');
+            }}
+            if (wrote !== undefined) throw Error('write resolved with a value');
+            if (readFileSync(written)[0] !== 5) throw Error('accepted write did not land');
+            if ((await stat(existing)).size !== '2') throw Error('metadata admission did not recover');"#,
+            existing = literal(&existing),
+            written = literal(&written),
+        ),
+    );
+    controller.join().unwrap();
+    result.unwrap();
+    assert_eq!(fs::read(&written).unwrap(), [5]);
+}
+
+#[test]
+fn a_panicking_metadata_read_is_reported_as_io_and_leaves_the_worker_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("fixture");
+    fs::write(&file, b"abc").unwrap();
+    let js = runtime();
+    js.ops.gates.borrow_mut().push_back(Gate(Box::new(|_| {
+        panic!("injected worker panic");
+    })));
+    js.run_module(
+        "panic-stat.js",
+        &format!(
+            r#"import {{stat, FsError}} from 'neo:fs';
+            try {{
+                await stat({file});
+                throw Error('panicking metadata read fulfilled');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_IO') throw error;
+            }}
+            if ((await stat({file})).size !== '3') throw Error('worker did not recover');"#,
+            file = literal(&file),
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn failing_turn_cancels_pending_metadata_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("fixture");
+    fs::write(&file, b"abc").unwrap();
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (joined_tx, joined) = mpsc::channel();
+    let (third_tx, third_started) = mpsc::channel();
+    let mut release = Vec::new();
+    {
+        let mut gates = js.ops.gates.borrow_mut();
+        for _ in 0..2 {
+            let (send, wait) = mpsc::channel::<()>();
+            release.push(send);
+            let started_tx = started_tx.clone();
+            let joined_tx = joined_tx.clone();
+            gates.push_back(Gate(Box::new(move |cancel| {
+                started_tx.send(()).unwrap();
+                assert_eq!(
+                    wait.recv_timeout(TIMEOUT),
+                    Err(mpsc::RecvTimeoutError::Disconnected)
+                );
+                joined_tx.send(cancel.requested()).unwrap();
+                Ok(())
+            })));
+        }
+        gates.push_back(Gate(Box::new(move |_| {
+            drop(release);
+            third_tx.send(()).unwrap();
+            Ok(())
+        })));
+    }
+    js.context.with(|ctx| {
+        let wait = Function::new(ctx.clone(), move || {
+            started.recv_timeout(TIMEOUT).unwrap();
+            started.recv_timeout(TIMEOUT).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("finishStats", wait).unwrap();
+    });
+    let result = js.run_module(
+        "cancel-stats.js",
+        &format!(
+            "globalThis.cancelledStat = fs.stat({file});
+             fs.stat({file}); fs.stat({file});
+             finishStats(); throw Error('entry failed');",
+            file = literal(&file),
+        ),
+    );
+    assert!(result.unwrap_err().contains("entry failed"));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(
+        third_started.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    );
+    assert!(js.ops.active.borrow().is_none());
+    js.context.with(|ctx| {
+        let promise: Promise = ctx.globals().get("cancelledStat").unwrap();
+        assert!(matches!(
+            promise.result::<()>(),
+            Some(Err(JsError::Exception))
+        ));
+        let reason = ctx.catch().into_object().unwrap();
+        assert_eq!(reason.get::<_, String>("code").unwrap(), "FS_CANCELLED");
+    });
+    assert!(js.run("1").unwrap_err().contains("NEO_MODULE_ABORTED"));
+    drop(js);
 }

@@ -1,5 +1,6 @@
 import process, { ElevationError, isElevated, stdout } from "neo:process";
-import { readFile, readFileSync, writeFile, writeFileSync } from "neo:fs";
+import { readFile, readFileSync, writeFile, writeFileSync, stat, statSync, lstat, lstatSync } from "neo:fs";
+import type { FileInfo } from "neo:fs";
 
 const elevated: boolean = isElevated();
 const alsoElevated: boolean = process.isElevated();
@@ -23,6 +24,22 @@ const pendingWrite: Promise<void> = writeFile("data.bin", new Uint8Array());
 const syncedWrite: void = writeFileSync("data.bin", new Uint8Array());
 const globalPendingWrite: Promise<void> = fs.writeFile("data.bin", new Uint8Array());
 const globalSyncedWrite: void = fs.writeFileSync("data.bin", new Uint8Array());
+
+const pendingInfo: Promise<FileInfo> = stat("data.bin");
+const syncedInfo: FileInfo = statSync("data.bin");
+const pendingLink: Promise<FileInfo> = lstat("data.bin");
+const syncedLink: FileInfo = lstatSync("data.bin");
+const globalPendingInfo: Promise<FileInfo> = fs.stat("data.bin");
+const globalSyncedInfo: FileInfo = fs.statSync("data.bin");
+const globalPendingLink: Promise<FileInfo> = fs.lstat("data.bin");
+const globalSyncedLink: FileInfo = fs.lstatSync("data.bin");
+
+// @ts-expect-error The unsuffixed method no longer returns metadata synchronously.
+const notMetadata: FileInfo = stat("data.bin");
+// @ts-expect-error The unsuffixed global method returns metadata asynchronously.
+const notGlobalMetadata: FileInfo = fs.stat("data.bin");
+// @ts-expect-error The unsuffixed lstat no longer returns metadata synchronously.
+const notLinkMetadata: FileInfo = lstat("data.bin");
 
 // @ts-expect-error The unsuffixed method no longer returns bytes synchronously.
 const notBytes: Uint8Array = readFile("data.bin");

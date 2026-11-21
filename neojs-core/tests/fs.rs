@@ -71,6 +71,24 @@ fn permission_and_allowlist_gate_the_global_and_the_module() {
          if (module.readFileSync !== fs.readFileSync) throw Error('sync module and global differ');
          if (module.writeFile !== fs.writeFile) throw Error('async writes differ');
          if (module.writeFileSync !== fs.writeFileSync) throw Error('sync writes differ');
+         if (typeof fs.stat !== 'function' || typeof module.stat !== 'function') {
+           throw Error('missing async stat');
+         }
+         if (typeof fs.statSync !== 'function' || typeof module.statSync !== 'function') {
+           throw Error('missing sync stat');
+         }
+         if (typeof fs.lstat !== 'function' || typeof module.lstat !== 'function') {
+           throw Error('missing async lstat');
+         }
+         if (typeof fs.lstatSync !== 'function' || typeof module.lstatSync !== 'function') {
+           throw Error('missing sync lstat');
+         }
+         if (module.stat !== fs.stat || module.statSync !== fs.statSync) {
+           throw Error('stat module and global differ');
+         }
+         if (module.lstat !== fs.lstat || module.lstatSync !== fs.lstatSync) {
+           throw Error('lstat module and global differ');
+         }
          if (typeof module.rename !== 'function' || module.rename !== fs.rename) {
            throw Error('missing or mismatched rename');
          }
@@ -176,6 +194,209 @@ fn binary_write_is_asynchronous_and_sync_write_still_throws() {
          catch (error) { if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }",
     )
     .unwrap();
+}
+
+#[test]
+fn metadata_reads_are_asynchronous_and_sync_forms_still_throw() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("fixture");
+    fs::write(&file, b"abc").unwrap();
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{stat, statSync, lstat, lstatSync, FsError, MAX_PATH_BYTES}} from 'neo:fs';
+            const file = {file};
+            const missing = {missing};
+
+            const pending = stat(file);
+            if (!(pending instanceof Promise)) throw Error('stat did not return a Promise');
+            const info = await pending;
+            if (!info.isFile || info.isDirectory || info.isSymlink) throw Error('stat type');
+            if (info.size !== '3') throw Error('stat size is not a decimal string');
+            if (typeof info.mtimeMs !== 'string') throw Error('mtime is not a decimal string');
+
+            const nofollow = lstat(file);
+            if (!(nofollow instanceof Promise)) throw Error('lstat did not return a Promise');
+            const regular = await nofollow;
+            if (!regular.isFile || regular.isSymlink) throw Error('lstat type');
+
+            try {{ await stat(missing); throw Error('async stat fulfilled'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
+                if (error.message.includes(missing)) throw Error('async stat leaked the path');
+            }}
+            try {{ await lstat(missing); throw Error('async lstat fulfilled'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
+            }}
+            try {{ statSync(missing); throw Error('sync stat fulfilled'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
+            }}
+            try {{ lstatSync(missing); throw Error('sync lstat fulfilled'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
+            }}
+            if (statSync(file).size !== '3' || lstatSync(file).isFile !== true) {{
+                throw Error('sync metadata changed');
+            }}
+
+            for (const [action, code] of [
+                [() => stat(''), 'FS_PATH'],
+                [() => lstat('a\0b'), 'FS_PATH'],
+                [() => stat('x'.repeat(MAX_PATH_BYTES + 1)), 'FS_LIMIT'],
+            ]) {{
+                try {{ await action(); throw Error('expected rejection'); }}
+                catch (error) {{
+                    if (!(error instanceof FsError) || error.code !== code) throw error;
+                }}
+            }}
+            try {{ await stat(null); throw Error('expected type rejection'); }}
+            catch (error) {{ if (!(error instanceof TypeError)) throw error; }}
+            try {{ statSync({{}}); throw Error('expected type throw'); }}
+            catch (error) {{ if (!(error instanceof TypeError)) throw error; }}"#,
+            file = literal(&file),
+            missing = literal(&dir.path().join("not-here")),
+        ),
+    );
+    js.run(
+        "for (const action of [() => fs.stat('fixture'), () => fs.lstat('fixture')]) {
+           try { action(); throw Error('dispatched outside managed turn'); }
+           catch (error) { if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }
+         }",
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn async_metadata_follows_or_keeps_a_final_symlink_like_the_sync_forms() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target.txt");
+    let link = dir.path().join("link.txt");
+    let dangling = dir.path().join("dangling.txt");
+    fs::write(&target, b"abc").unwrap();
+    symlink(&target, &link).unwrap();
+    symlink(dir.path().join("missing"), &dangling).unwrap();
+
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{stat, statSync, lstat, lstatSync, FsError}} from 'neo:fs';
+            const link = {link};
+            const dangling = {dangling};
+
+            const followed = await stat(link);
+            if (!followed.isFile || followed.isDirectory || followed.isSymlink) {{
+                throw Error('async stat did not follow');
+            }}
+            if (followed.size !== '3') throw Error('stat size is not a decimal string');
+
+            const linkInfo = await lstat(link);
+            if (linkInfo.isFile || linkInfo.isDirectory || !linkInfo.isSymlink) {{
+                throw Error('async lstat followed');
+            }}
+            if (!(await lstat(dangling)).isSymlink) throw Error('async lstat dangling');
+            try {{ await stat(dangling); throw Error('dangling stat fulfilled'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
+            }}
+
+            if (statSync(link).isSymlink || !statSync(link).isFile) {{
+                throw Error('sync stat did not follow');
+            }}
+            if (!lstatSync(link).isSymlink || lstatSync(dangling).isFile) {{
+                throw Error('sync lstat followed');
+            }}"#,
+            link = literal(&link),
+            dangling = literal(&dangling),
+        ),
+    );
+}
+
+#[test]
+fn metadata_reads_use_the_cwd_captured_at_call_time() {
+    let old = tempfile::tempdir().unwrap();
+    let new = tempfile::tempdir().unwrap();
+    fs::write(old.path().join("entry"), b"ab").unwrap();
+    fs::write(new.path().join("entry"), b"abcde").unwrap();
+    let js = chunked_runtime();
+    js.run_module(
+        "stat-cwd.js",
+        &format!(
+            r#"import {{chdir}} from 'neo:process';
+            import {{stat, statSync}} from 'neo:fs';
+            chdir({old});
+            const pending = stat('entry');
+            if (statSync('entry').size !== '2') throw Error('sync size before chdir');
+            chdir({new});
+            if ((await pending).size !== '2') throw Error('async stat did not keep the old cwd');
+            if (statSync('entry').size !== '5') throw Error('sync stat did not use the new cwd');"#,
+            old = literal(old.path()),
+            new = literal(new.path()),
+        ),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn metadata_reads_report_denied_without_leaking_the_path() {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+
+    // Traversal needs the execute bit, so denying the parent directory denies
+    // metadata for the entry even when the entry itself is readable.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("metadata denial test skipped: running as root");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked");
+    let inner = locked.join("inner.txt");
+    fs::create_dir(&locked).unwrap();
+    fs::write(&inner, b"secret").unwrap();
+    struct Restore(std::path::PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, Permissions::from_mode(0o755));
+        }
+    }
+    let _restore = Restore(locked.clone());
+    fs::set_permissions(&locked, Permissions::from_mode(0o000)).unwrap();
+
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{stat, statSync, lstat, FsError}} from 'neo:fs';
+            const inner = {inner};
+            function expectFsError(code, action) {{
+                try {{ action(); }}
+                catch (error) {{
+                    if (!(error instanceof FsError) || error.code !== code) throw error;
+                    if (error.message.includes(inner)) throw Error('denial leaked the path');
+                    return;
+                }}
+                throw Error('did not throw ' + code);
+            }}
+            try {{ await stat(inner); throw Error('async stat succeeded'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_DENIED') throw error;
+                if (error.message.includes(inner)) throw Error('async denial leaked the path');
+            }}
+            try {{ await lstat(inner); throw Error('async lstat succeeded'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_DENIED') throw error;
+            }}
+            expectFsError('FS_DENIED', () => statSync(inner));"#,
+            inner = literal(&inner),
+        ),
+    );
 }
 
 #[test]
@@ -446,7 +667,7 @@ fn stable_errors_never_include_the_supplied_path() {
     fs::write(dir.path().join("existing.txt"), "still usable").unwrap();
     let js = runtime();
     let source = r#"
-        import {readText, readFileSync, writeText, writeFile, writeFileSync, stat, exists, readDir, mkdir, remove, FsError} from 'neo:fs';
+        import {readText, readFileSync, writeText, writeFile, writeFileSync, statSync, exists, readDir, mkdir, remove, FsError} from 'neo:fs';
 
         function expectFsError(code, action) {
             try { action(); }
@@ -471,12 +692,12 @@ fn stable_errors_never_include_the_supplied_path() {
         const error = expectFsError('FS_NOT_FOUND', () => readText(missing));
         if (error.message.includes(missing)) throw Error('path leaked in message');
         expectFsError('FS_NOT_FOUND', () => readFileSync(missing));
-        expectFsError('FS_NOT_FOUND', () => stat(missing));
+        expectFsError('FS_NOT_FOUND', () => statSync(missing));
         expectFsError('FS_NOT_FOUND', () => remove(missing));
 
         expectFsError('FS_PATH', () => readText(''));
         expectFsError('FS_PATH', () => readText('a\u0000b'));
-        expectFsError('FS_PATH', () => stat(''));
+        expectFsError('FS_PATH', () => statSync(''));
         expectFsError('FS_PATH', () => exists(''));
         expectFsError('FS_PATH', () => readDir(''));
         expectFsError('FS_PATH', () => mkdir(''));
@@ -496,7 +717,7 @@ fn stable_errors_never_include_the_supplied_path() {
         expectTypeError(() => mkdir(missing, null));
         expectTypeError(() => mkdir(missing, {recursive: 'yes'}));
         expectTypeError(() => remove(missing, {recursive: 1}));
-        expectTypeError(() => stat({}));
+        expectTypeError(() => statSync({}));
         expectTypeError(() => readDir([]));
 
         let traps = 0;
@@ -775,7 +996,7 @@ fn symlink_semantics_are_explicit() {
 
     let js = runtime();
     let source = r#"
-        import {readText, readFileSync, stat, lstat, exists, readDir, remove, FsError} from 'neo:fs';
+        import {readText, readFileSync, statSync, lstatSync, exists, readDir, remove, FsError} from 'neo:fs';
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
@@ -792,18 +1013,18 @@ fn symlink_semantics_are_explicit() {
         const outside = __OUTSIDE__;
         const tree = __TREE__;
 
-        const followed = stat(link);
+        const followed = statSync(link);
         if (!followed.isFile || followed.isDirectory || followed.isSymlink) throw Error('stat did not follow');
         if (followed.size !== '3') throw Error('stat size is not a decimal string');
         if (typeof followed.mtimeMs !== 'string') throw Error('mtime is not a decimal string');
 
-        const linkInfo = lstat(link);
+        const linkInfo = lstatSync(link);
         if (linkInfo.isFile || linkInfo.isDirectory || !linkInfo.isSymlink) throw Error('lstat followed');
 
         if (exists(link) !== true) throw Error('exists link');
         if (exists(dangling) !== false) throw Error('exists dangling');
-        if (lstat(dangling).isSymlink !== true) throw Error('lstat dangling');
-        expectFsError('FS_NOT_FOUND', () => stat(dangling));
+        if (lstatSync(dangling).isSymlink !== true) throw Error('lstat dangling');
+        expectFsError('FS_NOT_FOUND', () => statSync(dangling));
         if (readFileSync(link)[0] !== 97) throw Error('read did not follow link');
 
         const entries = readDir(dir);
@@ -1392,7 +1613,7 @@ fn reads_are_bounded_before_allocation_and_sizes_stay_decimal() {
     drop(handle);
 
     let source = r#"
-        import {readText, readFileSync, writeFile, writeFileSync, stat, exists, FsError} from 'neo:fs';
+        import {readText, readFileSync, writeFile, writeFileSync, statSync, exists, FsError} from 'neo:fs';
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
@@ -1413,7 +1634,7 @@ fn reads_are_bounded_before_allocation_and_sizes_stay_decimal() {
         } catch (error) {
             if (error.code !== 'FS_LIMIT') throw error;
         }
-        if (stat(big).size !== String(fs.MAX_READ_BYTES + 1)) throw Error('size rounding');
+        if (statSync(big).size !== String(fs.MAX_READ_BYTES + 1)) throw Error('size rounding');
 
         // Check the limit before resolving or opening: the output must not exist.
         const tooLarge = new Uint8Array(fs.MAX_WRITE_BYTES + 1);
@@ -1446,7 +1667,7 @@ fn utf8_limits_are_checked_in_bytes_before_native_string_conversion() {
 
     let js = runtime();
     let source = r#"
-        import {writeText, readText, stat, exists, FsError} from 'neo:fs';
+        import {writeText, readText, statSync, exists, FsError} from 'neo:fs';
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
@@ -1463,7 +1684,7 @@ fn utf8_limits_are_checked_in_bytes_before_native_string_conversion() {
 
         const atLimit = 'a'.repeat(size - 4) + '😀';
         writeText(exact, atLimit);
-        if (stat(exact).size !== String(size)) throw Error('exact UTF-8 byte boundary');
+        if (statSync(exact).size !== String(size)) throw Error('exact UTF-8 byte boundary');
         if (readText(exact) !== atLimit) throw Error('exact boundary roundtrip');
 
         const aboveLimit = 'a'.repeat(size - 3) + '😀';
@@ -1473,7 +1694,7 @@ fn utf8_limits_are_checked_in_bytes_before_native_string_conversion() {
 
         // UTF-16 length stays below the cap, but encoded bytes exceed it.
         expectFsError('FS_LIMIT', () =>
-            stat('😀'.repeat(fs.MAX_PATH_BYTES / 4) + 'a'));
+            statSync('😀'.repeat(fs.MAX_PATH_BYTES / 4) + 'a'));
     "#
     .replace("__EXACT__", &literal(&exact))
     .replace("__TOO_LARGE__", &literal(&too_large))
@@ -1547,7 +1768,7 @@ fn module_exports_survive_global_prototype_and_callback_replacement() {
 
     let js = runtime();
     let source = r#"
-        import {readText, readFileSync, stat, readDir, FsError} from 'neo:fs';
+        import {readText, readFileSync, statSync, readDir, FsError} from 'neo:fs';
         const oldError = Error;
         const oldParse = JSON.parse;
         try {
@@ -1569,7 +1790,7 @@ fn module_exports_survive_global_prototype_and_callback_replacement() {
 
             if (readText(__FILE__) !== 'payload') throw new oldError('readText broke');
             if (readFileSync(__FILE__).length !== 7) throw new oldError('readFileSync broke');
-            if (stat(__FILE__).size !== '7') throw new oldError('stat broke');
+            if (statSync(__FILE__).size !== '7') throw new oldError('stat broke');
             const oldArrayProto = Array.prototype;
             Object.defineProperty(oldArrayProto, '0', {
                 __proto__: null,
@@ -1638,10 +1859,10 @@ fn windows_basic_round_trip_is_gated_and_unverified() {
     let file = dir.path().join("windows.txt");
     let js = runtime();
     let source = r#"
-        import {writeText, readText, stat, FsError} from 'neo:fs';
+        import {writeText, readText, statSync, FsError} from 'neo:fs';
         writeText(__FILE__, 'windows');
         if (readText(__FILE__) !== 'windows') throw Error('round trip');
-        if (stat(__FILE__).isFile !== true) throw Error('stat');
+        if (statSync(__FILE__).isFile !== true) throw Error('stat');
     "#
     .replace("__FILE__", &literal(&file));
     run(&js, &source);

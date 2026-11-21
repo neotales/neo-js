@@ -18,8 +18,10 @@ functions and `FsError` class.
 | `writeFile(path, data, options?)`     | Write a `Uint8Array` on a worker. Returns `Promise<void>`.             |
 | `writeFileSync(path, data, options?)` | Write a `Uint8Array`, blocking the JavaScript thread.                  |
 | `copyFile(source, destination)`       | Stream a regular file into a new file; never overwrite.                |
-| `stat(path)`                          | Metadata, following a final symlink.                                   |
-| `lstat(path)`                         | Metadata without following a final symlink.                            |
+| `stat(path)`                          | Metadata on a worker, following a final symlink. `Promise<FileInfo>`.  |
+| `statSync(path)`                      | Metadata, following a final symlink, blocking the JavaScript thread.   |
+| `lstat(path)`                         | Metadata on a worker without following a final symlink.                |
+| `lstatSync(path)`                     | Metadata without following a final symlink, blocking the thread.       |
 | `exists(path)`                        | Existence check, following a final symlink.                            |
 | `readDir(path)`                       | Non-recursive, sorted directory listing.                               |
 | `mkdir(path, options?)`               | Create a directory; `{recursive: true}` creates parents.               |
@@ -33,7 +35,7 @@ import { readDir, stat } from "neo:fs";
 // entry only if present. It does not create, overwrite, or delete user files.
 const entries = readDir(".");
 if (entries.some((entry) => entry.name === "README.md")) {
-	console.log(stat("./README.md").size);
+	console.log((await stat("./README.md")).size);
 }
 ```
 
@@ -41,45 +43,49 @@ if (entries.some((entry) => entry.name === "README.md")) {
 
 Relative paths use the runtime's working directory, not the host process's
 mutable directory. `neo:process.chdir` changes only that runtime. If the
-runtime directory is unavailable, `readFile` and `writeFile` reject with
-`FS_CWD` during a managed turn, and synchronous operations such as
-`readFileSync` and `writeFileSync` throw `FS_CWD`. None falls back to the host
-directory. Absolute paths and `..` components still reach everything the host
+runtime directory is unavailable, `readFile`, `writeFile`, `stat`, and
+`lstat` reject with `FS_CWD` during a managed turn, and synchronous
+operations such as `readFileSync`, `writeFileSync`, and `statSync` throw
+`FS_CWD`. None falls back to the host directory. Absolute paths and `..` components still reach everything the host
 user can reach; the working directory is coordination, not confinement.
 
-## Migrate binary reads and writes
+## Migrate asynchronous reads, writes, and metadata
 
-`readFile` returns a Promise on both `fs` and `neo:fs`; `writeFile` does too.
-Rename an existing blocking call to its `Sync` counterpart, or await the
-asynchronous form in a module. `readText`, `writeText`, and the remaining
+`readFile`, `writeFile`, `stat`, and `lstat` return Promises on both `fs` and
+`neo:fs`. Rename an existing blocking call to its `Sync` counterpart, or await
+the asynchronous form in a module. `readText`, `writeText`, and the remaining
 filesystem methods are still synchronous. During managed module evaluation,
-invalid arguments and filesystem errors reject the Promise. `readFileSync` and
-`writeFileSync` still throw. Outside a managed turn, `readFile` and
-`writeFile` throw `FS_ASYNC_OUTSIDE_TURN` before any I/O. This includes calls
-from `NeoJs::eval`, `NeoJs::run`, and the CLI's automatic `neo:test` runner
-after the module returns.
+invalid arguments and filesystem errors reject the Promise. The `Sync` forms
+still throw. Outside a managed turn, the asynchronous forms throw
+`FS_ASYNC_OUTSIDE_TURN` before any I/O. This includes calls from `NeoJs::eval`,
+`NeoJs::run`, and the CLI's automatic `neo:test` runner after the module
+returns.
 
 ```js
-import { readFile, writeFile } from "neo:fs";
+import { readFile, stat, writeFile } from "neo:fs";
 
 const bytes = await readFile("input.bin");
 await writeFile("output.bin", bytes);
+const info = await stat("output.bin");
+console.log(info.size);
 ```
 
-Each managed turn accepts at most four outstanding reads and writes combined,
+Each managed turn accepts at most four outstanding filesystem operations,
 including undelivered results. At most two run on workers. Each outstanding
 read charges `MAX_READ_BYTES` plus the encoded byte length of its resolved
-path; each write charges its copied byte length plus that path length. The
-shared budget is `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
+path; each write charges its copied byte length plus that path length; each
+metadata read charges a small result bound plus its resolved path length. The shared
+budget is `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
 Exceeding the count or byte budget rejects the operation with `FS_LIMIT`.
 This accounts for outstanding worker work, not total memory use. A large
 asynchronous write can briefly hold the caller's input, the JavaScript
 snapshot, and the worker-owned copy. The budget does not cover buffers that
 JavaScript retains after delivery.
 
-Both asynchronous forms capture the working directory at the call. A read
+The asynchronous forms capture the working directory at the call. A read
 Promise resolves to a new `Uint8Array`; a write Promise resolves to
-`undefined` after the file operation completes. Concurrent operations have no
+`undefined` after the file operation completes; a metadata Promise resolves
+to a `FileInfo` snapshot. Concurrent operations have no
 guaranteed completion order. There is no caller cancellation API. On a failed
 turn with outstanding work, the driver cancels queued work and stops running
 reads between chunks where possible. Pending operations reject with
@@ -96,8 +102,8 @@ runtime failure and quiescence rules.
 An open may occur before a non-regular object is rejected. An identified
 directory reports `FS_IS_DIRECTORY`; other identified non-regular objects
 report `FS_TYPE`. If opening fails before the type can be identified, the
-underlying open error determines the code. `stat` and `lstat` inspect any
-path the operating system exposes.
+underlying open error determines the code. `stat`, `statSync`, `lstat`, and
+`lstatSync` inspect any path the operating system exposes.
 
 `writeFile`, `writeFileSync`, and `writeText` do not create parent
 directories. They verify the opened descriptor is a regular file before
@@ -120,15 +126,17 @@ JavaScript number. A value above `Number.MAX_SAFE_INTEGER` therefore keeps
 every digit. `mtimeMs` is whole milliseconds since the Unix epoch as a decimal
 string rounded toward zero (so a pre-epoch timestamp less than one millisecond
 from 1970 is `"0"`), or `null` when the host cannot report it. For a symlink
-reported by `lstat`, `size` is the host's symlink size, not the target size.
+reported by `lstat` or `lstatSync`, `size` is the host's symlink size, not the
+target size.
 
 ## Symlinks
 
 The rules are explicit:
 
-- `stat`, `readFile`, `readFileSync`, `readText`, `writeFile`, `writeFileSync`,
-  `writeText`, `exists`, and `readDir` follow a symlink at the final path component.
-- `lstat` does not follow it and reports `isSymlink: true`.
+- `stat`, `statSync`, `readFile`, `readFileSync`, `readText`, `writeFile`,
+  `writeFileSync`, `writeText`, `exists`, and `readDir` follow a symlink at the
+  final path component.
+- `lstat` and `lstatSync` do not follow it and report `isSymlink: true`.
 - `readDir` follows a symlink to a directory but does not follow entries; an
   entry that is a link is reported with `isSymlink: true`.
 - `remove` does not follow a symlink at the target; it removes the link
@@ -140,8 +148,8 @@ The rules are explicit:
   destination symlink, even a dangling one, is an existing entry and is not
   followed.
 
-A dangling symlink is reported by `lstat` but `exists` follows it and returns
-`false`. On Windows, `remove` rejects directory symlinks named directly as
+A dangling symlink is reported by `lstat` and `lstatSync` but `exists` follows
+it and returns `false`. On Windows, `remove` rejects directory symlinks named directly as
 targets with `FS_UNSUPPORTED`, even if dangling. Windows reparse-point and
 junction behavior has not been verified by running on Windows.
 
@@ -296,8 +304,8 @@ option proxy traps can propagate or reject likewise.
 | `FS_CWD`                | A relative operation needs an unavailable runtime working directory.                                                                                                                                                 |
 | `FS_TYPE`               | The path is not a regular file.                                                                                                                                                                                      |
 | `FS_UNSUPPORTED`        | The operation or input is unsupported, e.g. direct removal of a Windows directory symlink or writing from a `SharedArrayBuffer` view.                                                                                |
-| `FS_ASYNC_OUTSIDE_TURN` | `readFile` or `writeFile` was called outside managed module evaluation.                                                                                                                                              |
-| `FS_CANCELLED`          | An outstanding `readFile` or `writeFile` was cancelled after module evaluation failed.                                                                                                                               |
+| `FS_ASYNC_OUTSIDE_TURN` | An asynchronous filesystem operation was called outside managed module evaluation.                                                                                                                                   |
+| `FS_CANCELLED`          | An outstanding asynchronous filesystem operation was cancelled after module evaluation failed.                                                                                                                       |
 | `FS_IO`                 | Any other filesystem failure.                                                                                                                                                                                        |
 
 ## Authority and races
@@ -308,7 +316,8 @@ provided. The module does not start a shell, a child process, or a network
 request. Operating-system filesystem activity can still produce network
 traffic when a path refers to a network mount or a special filesystem.
 
-`exists` and `stat` are snapshots and are time-of-check/time-of-use race prone.
+`exists`, `stat`, `statSync`, and `lstatSync` are snapshots and are
+time-of-check/time-of-use race prone.
 A path can be replaced between resolution and open, delete, or rename, so no operation
 is atomic with a prior check. Reads and writes validate the opened descriptor.
 After some failed opens, a separate metadata lookup may refine the error code;

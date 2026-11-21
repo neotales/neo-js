@@ -14,20 +14,27 @@ use rquickjs::{
 };
 
 use super::{
-    Code, FsError, JsError, JsResult, JsString, MAX_PATH_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES,
-    WorkingDirectory, bounded_copy, checked_js_path, open_regular_source, read_bounded_until,
-    resolve, validate_path, worker, write_bytes_at,
+    Code, FileInfo, FsError, JsError, JsResult, JsString, MAX_PATH_BYTES, MAX_READ_BYTES,
+    MAX_WRITE_BYTES, WorkingDirectory, bounded_copy, checked_js_path, file_info_at,
+    file_info_value, open_regular_source, read_bounded_until, resolve, validate_path, worker,
+    write_bytes_at,
 };
 
-/// Maximum outstanding reads and writes, including undelivered completions.
+/// Maximum outstanding filesystem operations, including undelivered
+/// completions.
 const MAX_PENDING: usize = 4;
 const WORKERS: usize = 2;
-/// One job may hold either a bounded read result or a bounded write input.
+/// Largest owned payload one job may hold: a bounded read result or a
+/// bounded write input.
 const MAX_OPERATION_BYTES: usize = if MAX_READ_BYTES > MAX_WRITE_BYTES {
     MAX_READ_BYTES
 } else {
     MAX_WRITE_BYTES
 };
+/// Admission charge for the owned metadata snapshot. The three flags, a
+/// 20-digit size, and a 20-digit time fit comfortably; this is an accounting
+/// bound, not a separate allocation.
+const STAT_RESULT_BYTES: usize = 128;
 const LIMITS: worker::Limits = worker::Limits {
     workers: NonZeroUsize::new(WORKERS).unwrap(),
     queued: NonZeroUsize::new(MAX_PENDING).unwrap(),
@@ -52,12 +59,17 @@ enum JobKind {
         data: Vec<u8>,
         overwrite: bool,
     },
+    Stat {
+        path: PathBuf,
+        follow: bool,
+    },
 }
 
 /// A worker result that still needs an owner-side settlement.
 enum Output {
     Read(Vec<u8>),
     Write,
+    Stat(FileInfo),
 }
 
 type OperationResult = Result<Output, FsError>;
@@ -87,15 +99,17 @@ fn execute(job: Job, cancellation: &worker::Cancellation) -> OperationResult {
             write_bytes_at(&path, &data, overwrite, MAX_WRITE_BYTES)?;
             Ok(Output::Write)
         }
+        JobKind::Stat { path, follow } => file_info_at(&path, follow).map(Output::Stat),
     }
 }
 
 /// Which value a completion resolves with. The owner records this before the
-/// job is submitted, so a write never needs to carry a JavaScript value back.
+/// job is submitted, so no result type needs to carry a JavaScript value back.
 #[derive(Clone, Copy)]
 enum SettlementKind {
     Read,
     Write,
+    Stat,
 }
 
 struct Settlement {
@@ -127,6 +141,7 @@ impl Settlement {
         match (self.kind, output) {
             (SettlementKind::Read, Output::Read(bytes)) => self.finish_read(ctx, bytes),
             (SettlementKind::Write, Output::Write) => self.finish_write(ctx),
+            (SettlementKind::Stat, Output::Stat(info)) => self.finish_stat(ctx, info),
             // A mismatched completion is an internal failure. Reject instead
             // of resolving a promise with a value the caller did not request.
             _ => self.reject(ctx, Code::Io),
@@ -159,6 +174,18 @@ impl Settlement {
 
     fn finish_write(self, ctx: &Ctx<'_>) -> JsResult<()> {
         self.resolve.restore(ctx)?.call::<_, ()>((Undefined,))
+    }
+
+    /// Settle with an owned metadata snapshot. The value has no prototype, so
+    /// promise resolution cannot invoke a script-defined `then`.
+    fn finish_stat(self, ctx: &Ctx<'_>, info: FileInfo) -> JsResult<()> {
+        let resolve = self.resolve.clone().restore(ctx)?;
+        let value = match file_info_value(ctx, &info) {
+            Ok(value) => value,
+            Err(JsError::Exception) => return self.reject.restore(ctx)?.call((ctx.catch(),)),
+            Err(error) => return Err(error),
+        };
+        resolve.call::<_, ()>((value,))
     }
 }
 
@@ -240,6 +267,19 @@ impl FsDriver {
                 data,
                 overwrite,
             })
+        })
+    }
+
+    fn submit_stat<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        path: PathBuf,
+        follow: bool,
+        make_error: Function<'js>,
+    ) -> JsResult<Promise<'js>> {
+        let bytes = STAT_RESULT_BYTES + path.as_os_str().as_encoded_bytes().len();
+        self.submit(ctx, bytes, SettlementKind::Stat, make_error, move || {
+            Ok(JobKind::Stat { path, follow })
         })
     }
 
@@ -398,7 +438,8 @@ pub(super) fn install<'js>(
         )?,
     )?;
 
-    let write_driver = driver;
+    let write_driver = driver.clone();
+    let stat_base_cwd = Rc::clone(&cwd);
     native.set(
         "writeFile",
         Function::new(
@@ -427,6 +468,23 @@ pub(super) fn install<'js>(
             },
         )?,
     )?;
+
+    for (name, follow) in [("stat", true), ("lstat", false)] {
+        let stat_driver = driver.clone();
+        let stat_cwd = Rc::clone(&stat_base_cwd);
+        native.set(
+            name,
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>, path: JsString<'js>, make_error: Function<'js>| {
+                    match snapshot_absolute_path(&stat_cwd, path) {
+                        Ok(path) => stat_driver.submit_stat(&ctx, path, follow, make_error),
+                        Err(error) => throw_argument(&ctx, error, make_error),
+                    }
+                },
+            )?,
+        )?;
+    }
     Ok(())
 }
 

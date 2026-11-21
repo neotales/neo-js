@@ -3,10 +3,11 @@
 //! The module is available only when [`crate::Permissions::filesystem`] is
 //! granted and the runtime's module allowlist admits [`crate::RuntimeModule::Fs`].
 //! Both gates are checked before the `fs` global or any native callback is
-//! constructed. `readFile` and `writeFile` run on workers; `readFileSync`,
-//! `writeFileSync`, and all other operations block. Nothing here starts a
-//! shell, a child process, or a network request directly. The OS may still
-//! perform network I/O for network paths and filesystems.
+//! constructed. `readFile`, `writeFile`, `stat`, and `lstat` run on workers;
+//! `readFileSync`, `writeFileSync`, `statSync`, `lstatSync`, and all other
+//! operations block. Nothing here starts a shell, a child process, or a
+//! network request directly. The OS may still perform network I/O for network
+//! paths and filesystems.
 //!
 //! # Authority
 //!
@@ -64,11 +65,12 @@
 //!
 //! The behavior is deliberately explicit:
 //!
-//! * `stat`, `readFile`, `readFileSync`, `readText`, `writeFile`,
+//! * `stat`, `statSync`, `readFile`, `readFileSync`, `readText`, `writeFile`,
 //!   `writeFileSync`, `writeText`, `exists`, and `readDir` follow a symlink at
 //!   the final path component. `readDir` follows a symlink to a directory and
 //!   reports the entries inside it.
-//! * `lstat` does not follow the final component and reports `isSymlink: true`.
+//! * `lstat` and `lstatSync` do not follow the final component and report
+//!   `isSymlink: true`.
 //! * `readDir` does not follow entries; a symlink entry is reported with
 //!   `isSymlink: true` and `isFile`/`isDirectory` both `false`.
 //! * `remove` does not follow a symlink at the target path. It removes the
@@ -83,11 +85,11 @@
 //! * `mkdir` follows the operating system's rules for existing path
 //!   components; it does not add its own symlink policy.
 //!
-//! A dangling symlink is reported by `lstat` but `exists` follows the link and
-//! returns `false`, because there is no target. `writeFile` and
-//! `writeFileSync` with the default `overwrite: true` follow a dangling symlink
-//! and create its target; `overwrite: false` refuses the path if the link
-//! itself exists. Windows
+//! A dangling symlink is reported by `lstat` and `lstatSync` but `exists`
+//! follows the link and returns `false`, because there is no target.
+//! `writeFile` and `writeFileSync` with the default `overwrite: true` follow a
+//! dangling symlink and create its target; `overwrite: false` refuses the path
+//! if the link itself exists. Windows
 //! reparse-point and junction behavior is not verified by this build.
 //!
 //! # Listing
@@ -138,9 +140,9 @@
 //!
 //! The checks are advisory snapshots, not a security boundary:
 //!
-//! * `exists` and `stat` are time-of-check/time-of-use race prone. Do not use
-//!   them to decide whether a later operation is safe. Perform the operation
-//!   and handle the error instead.
+//! * `exists`, `stat`, `statSync`, and `lstatSync` are time-of-check/time-of-use
+//!   race prone. Do not use them to decide whether a later operation is safe.
+//!   Perform the operation and handle the error instead.
 //! * A path can be replaced between resolution and open or delete. Unix data
 //!   opens use nonblocking mode and `O_NOCTTY`. The opened descriptor is
 //!   inspected before truncation, but path-based deletion and OS/network
@@ -203,7 +205,7 @@ pub(crate) const MAX_LIST_NAME_BYTES: usize = 1024;
 /// Largest sum of directory-entry names `readDir` returns, in UTF-8 bytes.
 pub(crate) const MAX_LIST_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
-const EXPORTS: [&str; 21] = [
+const EXPORTS: [&str; 23] = [
     "readText",
     "writeText",
     "readFile",
@@ -211,7 +213,9 @@ const EXPORTS: [&str; 21] = [
     "writeFile",
     "writeFileSync",
     "stat",
+    "statSync",
     "lstat",
+    "lstatSync",
     "exists",
     "readDir",
     "mkdir",
@@ -1247,6 +1251,22 @@ fn bytes_outcome<'js>(ctx: &Ctx<'js>, result: Result<Vec<u8>, FsError>) -> JsRes
     }
 }
 
+/// Build the null-prototype `FileInfo` value shared by the synchronous and
+/// worker-backed forms. Resolving a Promise with it is safe from a polluted
+/// `Object.prototype`: the object has no prototype to inherit a `then` from.
+fn file_info_value<'js>(ctx: &Ctx<'js>, info: &FileInfo) -> JsResult<Object<'js>> {
+    let value = Object::new_proto(ctx.clone(), None)?;
+    value.set("isFile", info.is_file)?;
+    value.set("isDirectory", info.is_directory)?;
+    value.set("isSymlink", info.is_symlink)?;
+    value.set("size", info.size.as_str())?;
+    match info.mtime_ms {
+        Some(ref text) => value.set("mtimeMs", text.as_str())?,
+        None => value.set("mtimeMs", Value::new_null(ctx.clone()))?,
+    }
+    Ok(value)
+}
+
 fn file_info_outcome<'js>(
     ctx: &Ctx<'js>,
     result: Result<FileInfo, FsError>,
@@ -1254,16 +1274,7 @@ fn file_info_outcome<'js>(
     match result {
         Ok(info) => {
             let object = ok_object(ctx)?;
-            let value = Object::new_proto(ctx.clone(), None)?;
-            value.set("isFile", info.is_file)?;
-            value.set("isDirectory", info.is_directory)?;
-            value.set("isSymlink", info.is_symlink)?;
-            value.set("size", info.size)?;
-            match info.mtime_ms {
-                Some(text) => value.set("mtimeMs", text)?,
-                None => value.set("mtimeMs", Value::new_null(ctx.clone()))?,
-            }
-            object.set("value", value)?;
+            object.set("value", file_info_value(ctx, &info)?)?;
             Ok(object)
         }
         Err(error) => error_object(ctx, error),
@@ -1416,7 +1427,7 @@ fn build_native<'js>(
 
     let stat_cwd = Rc::clone(&cwd);
     native.set(
-        "stat",
+        "statSync",
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'js>, path: String| -> JsResult<Object<'js>> {
@@ -1427,7 +1438,7 @@ fn build_native<'js>(
 
     let lstat_cwd = Rc::clone(&cwd);
     native.set(
-        "lstat",
+        "lstatSync",
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'js>, path: String| -> JsResult<Object<'js>> {

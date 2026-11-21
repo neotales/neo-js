@@ -243,15 +243,35 @@
     }
 
     function stat(path) {
+      // Outside a managed turn there is no owner to deliver a rejection.
+      if (!native.canAsync()) throw makeError('FS_ASYNC_OUTSIDE_TURN');
+      try {
+        return native.stat(requirePath(path, makeError), makeError);
+      } catch (error) {
+        return rejectPromise(error);
+      }
+    }
+
+    function statSync(path) {
       requirePath(path);
       const snapshot = unwrap(native.snapshotPath(path));
-      return unwrap(native.stat(snapshot));
+      return unwrap(native.statSync(snapshot));
     }
 
     function lstat(path) {
+      // Outside a managed turn there is no owner to deliver a rejection.
+      if (!native.canAsync()) throw makeError('FS_ASYNC_OUTSIDE_TURN');
+      try {
+        return native.lstat(requirePath(path, makeError), makeError);
+      } catch (error) {
+        return rejectPromise(error);
+      }
+    }
+
+    function lstatSync(path) {
       requirePath(path);
       const snapshot = unwrap(native.snapshotPath(path));
-      return unwrap(native.lstat(snapshot));
+      return unwrap(native.lstatSync(snapshot));
     }
 
     function exists(path) {
@@ -316,7 +336,9 @@
     defineValue(api, 'writeFile', writeFile);
     defineValue(api, 'writeFileSync', writeFileSync);
     defineValue(api, 'stat', stat);
+    defineValue(api, 'statSync', statSync);
     defineValue(api, 'lstat', lstat);
+    defineValue(api, 'lstatSync', lstatSync);
     defineValue(api, 'exists', exists);
     defineValue(api, 'readDir', readDir);
     defineValue(api, 'mkdir', mkdir);

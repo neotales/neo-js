@@ -52,8 +52,9 @@ declare const env: {
 /**
  * The `neo:fs` API. Available only with `--allow-fs` and when the runtime's
  * module allowlist admits `neo:fs`. Relative paths use the runtime's working
- * directory, not the host process's. `readFile` and `writeFile` are
- * asynchronous; their `Sync` counterparts and every other operation block.
+ * directory, not the host process's. `readFile`, `writeFile`, `stat`, and
+ * `lstat` are asynchronous; their `Sync` counterparts and every other
+ * operation block.
  *
  * This is not a sandbox: a script with this object has the host user's
  * filesystem authority. Reads and writes are bounded; see the `neo:fs`
@@ -96,8 +97,23 @@ declare const fs: {
     data: Uint8Array,
     options?: import("neo:fs").WriteFileOptions,
   ): void;
-  stat(path: string): import("neo:fs").FileInfo;
-  lstat(path: string): import("neo:fs").FileInfo;
+  /**
+   * Read metadata during managed module evaluation. Outside it, this throws
+   * `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. It uses the same
+   * outstanding-operation and worker limits as `readFile`. See
+   * `neo:fs.stat` for the failure and result rules.
+   */
+  stat(path: string): Promise<import("neo:fs").FileInfo>;
+  /** Same snapshot and error rules as `neo:fs.statSync`. */
+  statSync(path: string): import("neo:fs").FileInfo;
+  /**
+   * Read metadata without following a final symlink during managed module
+   * evaluation. Outside it, this throws `FS_ASYNC_OUTSIDE_TURN`
+   * synchronously before I/O. See `neo:fs.lstat`.
+   */
+  lstat(path: string): Promise<import("neo:fs").FileInfo>;
+  /** Same snapshot and error rules as `neo:fs.lstatSync`. */
+  lstatSync(path: string): import("neo:fs").FileInfo;
   exists(path: string): boolean;
   readDir(path: string): import("neo:fs").DirEntry[];
   mkdir(path: string, options?: import("neo:fs").MkdirOptions): void;

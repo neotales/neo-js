@@ -10,14 +10,14 @@ Declarations for `neo:fs`. See [host permissions and module access](/runtime/per
 Bounded filesystem access. Requires `--allow-fs` and a runtime
 allowlist that admits `neo:fs`.
 
-During managed module evaluation, `readFile` reads and `writeFile` writes
-on a worker. `readFile` returns a `Promise<Uint8Array>`; `writeFile`
-returns a `Promise<void>`. `readFileSync`, `writeFileSync`, and the other
-operations block the JavaScript thread. Relative paths resolve against the
-runtime's working directory, with no fallback to the host directory. If
-that directory is unavailable, the asynchronous forms reject with `FS_CWD`
-during a managed turn and synchronous operations throw `FS_CWD`. Outside a
-managed turn, both asynchronous forms instead throw
+During managed module evaluation, `readFile` reads, `writeFile` writes,
+and `stat` and `lstat` read metadata on a worker. Those four return
+Promises. `readFileSync`, `writeFileSync`, `statSync`, `lstatSync`, and the
+other operations block the JavaScript thread. Relative paths resolve
+against the runtime's working directory, with no fallback to the host
+directory. If that directory is unavailable, the asynchronous forms reject
+with `FS_CWD` during a managed turn and synchronous operations throw
+`FS_CWD`. Outside a managed turn, the asynchronous forms instead throw
 `FS_ASYNC_OUTSIDE_TURN` before I/O. Absolute paths and `..` components still
 reach everything the host user can reach. This is not a sandbox.
 
@@ -32,8 +32,9 @@ bounded at `MAX_PATH_BYTES`. `FS_LIMIT` also covers quota, storage-full,
 and fallible allocation failures; this cannot catch every failure inside
 QuickJS or the process allocator.
 
-`stat`, `readFile`, `readFileSync`, `readText`, `writeFile`, `writeFileSync`,
-`writeText`, `exists`, and `readDir` follow a symlink at the final path component. `lstat` does not.
+`stat`, `statSync`, `readFile`, `readFileSync`, `readText`, `writeFile`,
+`writeFileSync`, `writeText`, `exists`, and `readDir` follow a symlink at the
+final path component. `lstat` and `lstatSync` do not.
 `readDir` does not follow entries and reports a symlink entry with
 `isSymlink: true`. `remove` never follows a symlink at the target, and
 recursive deletion does not follow symlinks inside the tree.
@@ -51,7 +52,8 @@ input bytes are snapshotted before those traps run, so a trap that changes
 may still reenter the API or run arbitrary script code.
 
 `readDir` is not an atomic snapshot, and recursive deletion can be partial
-if an OS error interrupts traversal. `exists` and `stat` are
+if an OS error interrupts traversal. `exists`, `stat`, `statSync`, and
+`lstatSync` are
 time-of-check/time-of-use snapshots. Do not use them
 for access-control or race-free decisions. `writeFile`, `writeFileSync`,
 and `writeText` truncate before writing and are not atomic; a failure can
@@ -115,7 +117,7 @@ export class FsError extends Error {
 
 ```ts
 /**
- * A metadata snapshot from `stat` or `lstat`.
+ * A metadata snapshot from `stat`, `statSync`, `lstat`, or `lstatSync`.
  *
  * `size` is a decimal string of the exact byte size, never a JavaScript
  * number, so a `u64` value above `Number.MAX_SAFE_INTEGER` keeps every
@@ -125,8 +127,9 @@ export class FsError extends Error {
  * less than one millisecond from 1970 is `"0"`), or `null` when the host
  * cannot report the modification time.
  *
- * `stat` follows a final symlink, so its result has `isSymlink: false`.
- * `lstat` does not, so a link reports `isSymlink: true` with `isFile` and
+ * `stat` and `statSync` follow a final symlink, so their result has
+ * `isSymlink: false`. `lstat` and `lstatSync` do not, so a link reports
+ * `isSymlink: true` with `isFile` and
  * `isDirectory` both `false`. A non-regular path that is neither a file, a
  * directory, nor a symlink has all three flags `false`.
  */
@@ -276,10 +279,12 @@ export function writeText(path: string, data: string): void;
  * at the call. Only available during managed module evaluation; otherwise
  * throws `FS_ASYNC_OUTSIDE_TURN` before I/O. In a managed turn, invalid
  * arguments and I/O errors reject the Promise. A module turn accepts up
- * to four outstanding reads and writes (including undelivered results) and
- * runs up to two on workers. Each outstanding read charges `MAX_READ_BYTES`
- * plus the encoded byte length of its resolved path against a shared turn
- * budget of `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
+ * to four outstanding filesystem operations (including undelivered
+ * results) and runs up to two on workers. Metadata reads share this bound
+ * but charge only their path plus a small result bound. Each outstanding
+ * read charges `MAX_READ_BYTES` plus the encoded byte length of its
+ * resolved path against a shared turn budget of
+ * `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
  * Excess work rejects with `FS_LIMIT`. This budget does not cover buffers
  * JavaScript retains after delivery. There is no caller cancellation API. Turn teardown cancels
  * cooperatively and may wait for an OS call to return. Use `readFileSync`
@@ -354,8 +359,8 @@ export function copyFile(source: string, destination: string): void;
  * final contents depend on their interleaving at the OS and filesystem
  * level.
  *
- * A module turn accepts up to four outstanding reads and writes (including
- * undelivered results) and runs up to two on workers. Each write charges its
+ * A module turn accepts up to four outstanding filesystem operations
+ * (including undelivered results) and runs up to two on workers. Each write charges its
  * copied byte length plus the encoded byte length of its resolved path
  * against a shared turn budget of
  * `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`; reads
@@ -403,22 +408,49 @@ export function writeFileSync(
 
 ```ts
 /**
- * Metadata for a path, following a final symlink.
- *
- * See `FileInfo` for the decimal-string size and time representation.
+ * Read metadata for a path on a worker, following a final symlink. Only
+ * available during managed module evaluation; otherwise this throws
+ * `FS_ASYNC_OUTSIDE_TURN` before I/O. In a managed turn, invalid arguments
+ * and filesystem errors reject the Promise. Metadata work shares the
+ * four-operation outstanding bound and two-worker pool with `readFile` and
+ * `writeFile`, and charges its path plus a small result bound against the
+ * same turn budget. Excess work rejects with `FS_LIMIT`. There is no caller
+ * cancellation API; turn teardown cancels cooperatively and may wait for an
+ * OS call. See `FileInfo` for the result representation.
  */
-export function stat(path: string): FileInfo;
+export function stat(path: string): Promise<FileInfo>;
+```
+
+## statSync
+
+```ts
+/**
+ * Read metadata for a path, following a final symlink, blocking the
+ * JavaScript thread. The same snapshot rules as `stat` apply, except that
+ * failures throw instead of rejecting.
+ */
+export function statSync(path: string): FileInfo;
 ```
 
 ## lstat
 
 ```ts
 /**
- * Metadata for a path without following a final symlink.
- *
- * A symlink is reported with `isSymlink: true`.
+ * Read metadata for a path on a worker without following a final symlink.
+ * The asynchronous contract is the same as `stat`; a symlink result is
+ * reported with `isSymlink: true`.
  */
-export function lstat(path: string): FileInfo;
+export function lstat(path: string): Promise<FileInfo>;
+```
+
+## lstatSync
+
+```ts
+/**
+ * Read metadata for a path without following a final symlink, blocking the
+ * JavaScript thread. A symlink is reported with `isSymlink: true`.
+ */
+export function lstatSync(path: string): FileInfo;
 ```
 
 ## exists
