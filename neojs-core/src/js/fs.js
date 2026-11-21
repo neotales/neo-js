@@ -281,9 +281,19 @@
     }
 
     function readDir(path) {
+      // Outside a managed turn there is no owner to deliver a rejection.
+      if (!native.canAsync()) throw makeError('FS_ASYNC_OUTSIDE_TURN');
+      try {
+        return native.readDir(requirePath(path, makeError), makeError);
+      } catch (error) {
+        return rejectPromise(error);
+      }
+    }
+
+    function readDirSync(path) {
       requirePath(path);
       const snapshot = unwrap(native.snapshotPath(path));
-      return parseJson(unwrap(native.readDir(snapshot)));
+      return parseJson(unwrap(native.readDirSync(snapshot)));
     }
 
     function mkdir(path, options) {
@@ -341,6 +351,7 @@
     defineValue(api, 'lstatSync', lstatSync);
     defineValue(api, 'exists', exists);
     defineValue(api, 'readDir', readDir);
+    defineValue(api, 'readDirSync', readDirSync);
     defineValue(api, 'mkdir', mkdir);
     defineValue(api, 'remove', remove);
     defineValue(api, 'rename', rename);

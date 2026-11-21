@@ -799,3 +799,397 @@ fn failing_turn_cancels_pending_metadata_reads() {
     assert!(js.run("1").unwrap_err().contains("NEO_MODULE_ABORTED"));
     drop(js);
 }
+
+#[test]
+fn a_directory_read_completes_while_first_worker_is_blocked() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    fs::write(dir.path().join("b.txt"), b"b").unwrap();
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    js.ops.gates.borrow_mut().push_back(Gate(Box::new(move |_| {
+        started_tx.send(()).unwrap();
+        release_rx.recv_timeout(TIMEOUT).unwrap();
+        Ok(())
+    })));
+    let (progress, progress_rx) = mpsc::channel();
+    js.context.with(|ctx| {
+        let progress = Function::new(ctx.clone(), move |phase: u8| {
+            progress.send(phase).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("progress", progress).unwrap();
+    });
+    let controller = thread::spawn(move || {
+        started.recv_timeout(TIMEOUT).unwrap();
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 1);
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 2);
+        release.send(()).unwrap();
+    });
+    let result = js.run_module(
+        "read-dir-progress.js",
+        &format!(
+            r#"import {{readDir}} from 'neo:fs';
+            const dir = {dir};
+            let done = false;
+            const first = readDir(dir).then((entries) => {{
+                done = true;
+                if (entries.length !== 2 || entries[0].name !== 'a.txt') {{
+                    throw Error('first listing wrong');
+                }}
+            }});
+            await Promise.resolve();
+            if (done) throw Error('first directory read finished before release');
+            progress(1);
+            const second = await readDir(dir);
+            if (done) throw Error('first finished before its worker was released');
+            if (second.length !== 2 || second[1].name !== 'b.txt') {{
+                throw Error('second listing did not finish independently');
+            }}
+            progress(2);
+            await first;"#,
+            dir = literal(dir.path()),
+        ),
+    );
+    controller.join().unwrap();
+    result.unwrap();
+}
+
+#[test]
+fn outstanding_directory_reads_share_the_operation_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    fs::write(dir.path().join("b.txt"), b"b").unwrap();
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (progress, progress_rx) = std::sync::mpsc::channel();
+    js.context.with(|ctx| {
+        let progress = Function::new(ctx.clone(), move |phase: u8| {
+            progress.send(phase).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("progress", progress).unwrap();
+    });
+    let (release_first_tx, release_first) = mpsc::channel::<()>();
+    let (release_second_tx, release_second) = mpsc::channel::<()>();
+    {
+        let mut gates = js.ops.gates.borrow_mut();
+        for wait in [release_first, release_second] {
+            let started_tx = started_tx.clone();
+            gates.push_back(Gate(Box::new(move |_| {
+                started_tx.send(()).unwrap();
+                wait.recv_timeout(TIMEOUT).unwrap();
+                Ok(())
+            })));
+        }
+    }
+    drop(started_tx);
+    let controller = thread::spawn(move || {
+        started.recv_timeout(TIMEOUT).unwrap();
+        started.recv_timeout(TIMEOUT).unwrap();
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 1);
+        release_first_tx.send(()).unwrap();
+        release_second_tx.send(()).unwrap();
+    });
+    let result = js.run_module(
+        "read-dir-saturation.js",
+        &format!(
+            r#"import {{readDir, FsError}} from 'neo:fs';
+            const dir = {dir};
+            const reads = [];
+            for (let i = 0; i < {limit}; i++) reads.push(readDir(dir));
+            try {{
+                await readDir(dir);
+                throw Error('admitted one directory read beyond the bound');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_LIMIT') throw error;
+            }}
+            progress(1);
+            for (const entries of await Promise.all(reads)) {{
+                if (entries.length !== 2 || entries[1].name !== 'b.txt') {{
+                    throw Error('missing directory entries');
+                }}
+            }}
+            if ((await readDir(dir)).length !== 2) throw Error('slot did not recover');"#,
+            dir = literal(dir.path()),
+            limit = MAX_PENDING,
+        ),
+    );
+    controller.join().unwrap();
+    result.unwrap();
+}
+
+#[test]
+fn directory_reads_share_the_bound_with_reads_and_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.bin");
+    let written = dir.path().join("written.bin");
+    let listing = dir.path().join("listing");
+    fs::create_dir(&listing).unwrap();
+    fs::write(&file, [42, 7]).unwrap();
+    fs::write(listing.join("a.txt"), b"a").unwrap();
+    fs::write(listing.join("b.txt"), b"b").unwrap();
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (progress, progress_rx) = std::sync::mpsc::channel();
+    js.context.with(|ctx| {
+        let progress = Function::new(ctx.clone(), move |phase: u8| {
+            progress.send(phase).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("progress", progress).unwrap();
+    });
+    let (release_read_tx, release_read) = mpsc::channel::<()>();
+    let (release_dir_tx, release_dir) = mpsc::channel::<()>();
+    {
+        let mut gates = js.ops.gates.borrow_mut();
+        gates.push_back(Gate(Box::new({
+            let started_tx = started_tx.clone();
+            move |_| {
+                started_tx.send(()).unwrap();
+                release_read.recv_timeout(TIMEOUT).unwrap();
+                Ok(())
+            }
+        })));
+        gates.push_back(Gate(Box::new(move |_| {
+            started_tx.send(()).unwrap();
+            release_dir.recv_timeout(TIMEOUT).unwrap();
+            Ok(())
+        })));
+    }
+    let controller = thread::spawn(move || {
+        started.recv_timeout(TIMEOUT).unwrap();
+        started.recv_timeout(TIMEOUT).unwrap();
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 1);
+        release_read_tx.send(()).unwrap();
+        release_dir_tx.send(()).unwrap();
+    });
+    let result = js.run_module(
+        "read-dir-mixed-saturation.js",
+        &format!(
+            r#"import {{readFile, writeFile, readDir, readFileSync, FsError}} from 'neo:fs';
+            const listing = {listing};
+            const file = {file};
+            const written = {written};
+            const read = readFile(file);
+            const firstListing = readDir(listing);
+            const write = writeFile(written, new Uint8Array([5]));
+            const secondListing = readDir(listing);
+            try {{
+                await readDir(listing);
+                throw Error('admitted work beyond the shared bound');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_LIMIT') throw error;
+            }}
+            progress(1);
+            const settled = await Promise.all([read, firstListing, write, secondListing]);
+            if (settled[0][0] !== 42 || settled[1].length !== 2 || settled[3].length !== 2) {{
+                throw Error('accepted work did not finish');
+            }}
+            if (settled[2] !== undefined) throw Error('write resolved with a value');
+            if (readFileSync(written)[0] !== 5) throw Error('accepted write did not land');
+            if ((await readDir(listing)).length !== 2) throw Error('directory admission did not recover');"#,
+            listing = literal(&listing),
+            file = literal(&file),
+            written = literal(&written),
+        ),
+    );
+    controller.join().unwrap();
+    result.unwrap();
+    assert_eq!(fs::read(&written).unwrap(), [5]);
+}
+
+#[test]
+fn a_panicking_directory_read_is_reported_as_io_and_leaves_the_worker_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    let js = runtime();
+    js.ops.gates.borrow_mut().push_back(Gate(Box::new(|_| {
+        panic!("injected worker panic");
+    })));
+    js.run_module(
+        "panic-read-dir.js",
+        &format!(
+            r#"import {{readDir, FsError}} from 'neo:fs';
+            try {{
+                await readDir({dir});
+                throw Error('panicking directory read fulfilled');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_IO') throw error;
+            }}
+            if ((await readDir({dir})).length !== 1) throw Error('worker did not recover');"#,
+            dir = literal(dir.path()),
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn failing_turn_cancels_pending_directory_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (joined_tx, joined) = mpsc::channel();
+    let (third_tx, third_started) = mpsc::channel();
+    let mut release = Vec::new();
+    {
+        let mut gates = js.ops.gates.borrow_mut();
+        for _ in 0..2 {
+            let (send, wait) = mpsc::channel::<()>();
+            release.push(send);
+            let started_tx = started_tx.clone();
+            let joined_tx = joined_tx.clone();
+            gates.push_back(Gate(Box::new(move |cancel| {
+                started_tx.send(()).unwrap();
+                assert_eq!(
+                    wait.recv_timeout(TIMEOUT),
+                    Err(mpsc::RecvTimeoutError::Disconnected)
+                );
+                joined_tx.send(cancel.requested()).unwrap();
+                Ok(())
+            })));
+        }
+        gates.push_back(Gate(Box::new(move |_| {
+            drop(release);
+            third_tx.send(()).unwrap();
+            Ok(())
+        })));
+    }
+    js.context.with(|ctx| {
+        let wait = Function::new(ctx.clone(), move || {
+            started.recv_timeout(TIMEOUT).unwrap();
+            started.recv_timeout(TIMEOUT).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("finishListings", wait).unwrap();
+    });
+    let result = js.run_module(
+        "cancel-read-dir.js",
+        &format!(
+            "globalThis.cancelledListing = fs.readDir({dir});
+             fs.readDir({dir}); fs.readDir({dir});
+             finishListings(); throw Error('entry failed');",
+            dir = literal(dir.path()),
+        ),
+    );
+    assert!(result.unwrap_err().contains("entry failed"));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(
+        third_started.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    );
+    assert!(js.ops.active.borrow().is_none());
+    js.context.with(|ctx| {
+        let promise: Promise = ctx.globals().get("cancelledListing").unwrap();
+        assert!(matches!(
+            promise.result::<()>(),
+            Some(Err(JsError::Exception))
+        ));
+        let reason = ctx.catch().into_object().unwrap();
+        assert_eq!(reason.get::<_, String>("code").unwrap(), "FS_CANCELLED");
+    });
+    assert!(js.run("1").unwrap_err().contains("NEO_MODULE_ABORTED"));
+    drop(js);
+}
+
+#[test]
+fn cancellation_stops_started_directory_enumeration_before_the_next_entry() {
+    use std::sync::{Arc, Mutex};
+
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["gate.txt", "marker-1.txt", "marker-2.txt"] {
+        fs::write(dir.path().join(name), b"x").unwrap();
+    }
+    let js = runtime();
+    let visited = Arc::new(Mutex::new(Vec::new()));
+    let (started_tx, started) = mpsc::channel();
+    let (release_entry, wait_entry) = mpsc::channel::<()>();
+    let (release_second, wait_second) = mpsc::channel::<()>();
+    let (again_tx, again) = mpsc::channel::<String>();
+    let (third_tx, third_started) = mpsc::channel();
+    {
+        let visited = Arc::clone(&visited);
+        let mut wait_entry = Some(wait_entry);
+        let mut first = true;
+        js.ops
+            .read_dir_gates
+            .borrow_mut()
+            .push_back(ReadDirGate(Box::new(move |entry, cancel| {
+                visited.lock().unwrap().push(entry.name.clone());
+                if first {
+                    first = false;
+                    started_tx.send(()).unwrap();
+                    // The senders live in the queued third job. They are
+                    // dropped only after shutdown sets cancellation and
+                    // discards the queue, so this is a cancellation barrier,
+                    // not a delay.
+                    assert_eq!(
+                        wait_entry.take().unwrap().recv_timeout(TIMEOUT),
+                        Err(mpsc::RecvTimeoutError::Disconnected)
+                    );
+                    assert!(cancel.requested());
+                } else {
+                    let _ = again_tx.send(entry.name.clone());
+                }
+                Ok(())
+            })));
+        let release = vec![release_entry, release_second];
+        let mut gates = js.ops.gates.borrow_mut();
+        gates.push_back(Gate(Box::new(|_| Ok(()))));
+        gates.push_back(Gate(Box::new(move |cancel| {
+            assert_eq!(
+                wait_second.recv_timeout(TIMEOUT),
+                Err(mpsc::RecvTimeoutError::Disconnected)
+            );
+            assert!(cancel.requested());
+            Ok(())
+        })));
+        gates.push_back(Gate(Box::new(move |_| {
+            drop(release);
+            third_tx.send(()).unwrap();
+            Ok(())
+        })));
+    }
+    js.context.with(|ctx| {
+        let wait = Function::new(ctx.clone(), move || {
+            started.recv_timeout(TIMEOUT).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("finishListing", wait).unwrap();
+    });
+    let result = js.run_module(
+        "cancel-started-read-dir.js",
+        &format!(
+            "globalThis.cancelledListing = fs.readDir({dir});
+             fs.readDir({dir}); fs.readDir({dir});
+             finishListing(); throw Error('entry failed');",
+            dir = literal(dir.path()),
+        ),
+    );
+    assert!(result.unwrap_err().contains("entry failed"));
+    assert_eq!(visited.lock().unwrap().len(), 1);
+    assert_eq!(
+        again.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected),
+        "enumeration visited another entry after cancellation"
+    );
+    assert_eq!(
+        third_started.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    );
+    assert!(js.ops.active.borrow().is_none());
+    js.context.with(|ctx| {
+        let promise: Promise = ctx.globals().get("cancelledListing").unwrap();
+        assert!(matches!(
+            promise.result::<()>(),
+            Some(Err(JsError::Exception))
+        ));
+        let reason = ctx.catch().into_object().unwrap();
+        assert_eq!(reason.get::<_, String>("code").unwrap(), "FS_CANCELLED");
+    });
+    assert!(js.run("1").unwrap_err().contains("NEO_MODULE_ABORTED"));
+    drop(js);
+}

@@ -23,7 +23,8 @@ functions and `FsError` class.
 | `lstat(path)`                         | Metadata on a worker without following a final symlink.                |
 | `lstatSync(path)`                     | Metadata without following a final symlink, blocking the thread.       |
 | `exists(path)`                        | Existence check, following a final symlink.                            |
-| `readDir(path)`                       | Non-recursive, sorted directory listing.                               |
+| `readDir(path)`                       | List a directory on a worker. Returns `Promise<DirEntry[]>`.           |
+| `readDirSync(path)`                   | Non-recursive, sorted listing, blocking the JavaScript thread.         |
 | `mkdir(path, options?)`               | Create a directory; `{recursive: true}` creates parents.               |
 | `remove(path, options?)`              | Remove a file, link, or directory; `{recursive: true}` removes a tree. |
 | `rename(source, destination)`         | Rename a file, directory, or symlink entry using the host OS.          |
@@ -33,7 +34,7 @@ import { readDir, stat } from "neo:fs";
 
 // Read-only example: it lists the current directory and inspects a known
 // entry only if present. It does not create, overwrite, or delete user files.
-const entries = readDir(".");
+const entries = await readDir(".");
 if (entries.some((entry) => entry.name === "README.md")) {
 	console.log((await stat("./README.md")).size);
 }
@@ -43,39 +44,50 @@ if (entries.some((entry) => entry.name === "README.md")) {
 
 Relative paths use the runtime's working directory, not the host process's
 mutable directory. `neo:process.chdir` changes only that runtime. If the
-runtime directory is unavailable, `readFile`, `writeFile`, `stat`, and
-`lstat` reject with `FS_CWD` during a managed turn, and synchronous
-operations such as `readFileSync`, `writeFileSync`, and `statSync` throw
-`FS_CWD`. None falls back to the host directory. Absolute paths and `..` components still reach everything the host
-user can reach; the working directory is coordination, not confinement.
+runtime directory is unavailable, `readFile`, `writeFile`, `stat`, `lstat`,
+and `readDir` reject with `FS_CWD` during a managed turn, and synchronous
+operations such as `readFileSync`, `writeFileSync`, `statSync`, and
+`readDirSync` throw `FS_CWD`. None falls back to the host directory. Absolute
+paths and `..` components still reach everything the host user can reach; the
+working directory is coordination, not confinement.
 
-## Migrate asynchronous reads, writes, and metadata
+## Migrate asynchronous operations
 
-`readFile`, `writeFile`, `stat`, and `lstat` return Promises on both `fs` and
-`neo:fs`. Rename an existing blocking call to its `Sync` counterpart, or await
-the asynchronous form in a module. `readText`, `writeText`, and the remaining
-filesystem methods are still synchronous. During managed module evaluation,
-invalid arguments and filesystem errors reject the Promise. The `Sync` forms
-still throw. Outside a managed turn, the asynchronous forms throw
+`readFile`, `writeFile`, `stat`, `lstat`, and `readDir` return Promises on
+both `fs` and `neo:fs`. Rename an existing blocking call to its `Sync`
+counterpart, or await the asynchronous form in a module. `readText`,
+`writeText`, and the remaining filesystem methods are still synchronous.
+During managed module evaluation, invalid arguments and filesystem errors
+reject the Promise. The `Sync` forms still throw. Outside a managed turn, the asynchronous forms throw
 `FS_ASYNC_OUTSIDE_TURN` before any I/O. This includes calls from `NeoJs::eval`,
 `NeoJs::run`, and the CLI's automatic `neo:test` runner after the module
 returns.
 
+### Breaking change: readDir
+
+`readDir(path)` used to return `DirEntry[]` synchronously. It now runs on a
+worker and returns `Promise<DirEntry[]>`. In a managed module, write
+`await readDir(path)`; in synchronous code use `readDirSync(path)`. Calling
+`readDir` outside a managed turn throws `FS_ASYNC_OUTSIDE_TURN` before any
+I/O. This is the same migration shape as `readFile` and `writeFile`.
+
 ```js
-import { readFile, stat, writeFile } from "neo:fs";
+import { readDir, readFile, stat, writeFile } from "neo:fs";
 
 const bytes = await readFile("input.bin");
 await writeFile("output.bin", bytes);
 const info = await stat("output.bin");
 console.log(info.size);
+for (const entry of await readDir(".")) console.log(entry.name);
 ```
 
 Each managed turn accepts at most four outstanding filesystem operations,
 including undelivered results. At most two run on workers. Each outstanding
 read charges `MAX_READ_BYTES` plus the encoded byte length of its resolved
 path; each write charges its copied byte length plus that path length; each
-metadata read charges a small result bound plus its resolved path length. The shared
-budget is `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
+metadata read charges a small result bound plus its resolved path length; a
+directory read charges a bounded listing result plus that path length. The
+shared budget is `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
 Exceeding the count or byte budget rejects the operation with `FS_LIMIT`.
 This accounts for outstanding worker work, not total memory use. A large
 asynchronous write can briefly hold the caller's input, the JavaScript
@@ -85,11 +97,15 @@ JavaScript retains after delivery.
 The asynchronous forms capture the working directory at the call. A read
 Promise resolves to a new `Uint8Array`; a write Promise resolves to
 `undefined` after the file operation completes; a metadata Promise resolves
-to a `FileInfo` snapshot. Concurrent operations have no
+to a `FileInfo` snapshot; a directory Promise resolves to a sorted
+`DirEntry[]`. Concurrent operations have no
 guaranteed completion order. There is no caller cancellation API. On a failed
 turn with outstanding work, the driver cancels queued work and stops running
-reads between chunks where possible. Pending operations reject with
-`FS_CANCELLED`. Teardown cannot interrupt an OS call that has already started:
+reads between chunks and directory listings between entries where possible.
+A started listing checks cancellation between entries, before its explicit
+no-follow metadata fallback, and before sorting; it rejects with
+`FS_CANCELLED` rather than resolving a partial array. Pending operations reject with `FS_CANCELLED`.
+Teardown cannot interrupt an OS call that has already started:
 a write may still create, truncate, or fully write the file after a failed
 turn or abandoned Promise, and cancellation does not roll back those side
 effects. An OS call can delay teardown. See
@@ -103,7 +119,8 @@ An open may occur before a non-regular object is rejected. An identified
 directory reports `FS_IS_DIRECTORY`; other identified non-regular objects
 report `FS_TYPE`. If opening fails before the type can be identified, the
 underlying open error determines the code. `stat`, `statSync`, `lstat`, and
-`lstatSync` inspect any path the operating system exposes.
+`lstatSync` inspect any path the operating system exposes. `readDir` and
+`readDirSync` require a directory.
 
 `writeFile`, `writeFileSync`, and `writeText` do not create parent
 directories. They verify the opened descriptor is a regular file before
@@ -134,11 +151,11 @@ target size.
 The rules are explicit:
 
 - `stat`, `statSync`, `readFile`, `readFileSync`, `readText`, `writeFile`,
-  `writeFileSync`, `writeText`, `exists`, and `readDir` follow a symlink at the
-  final path component.
+  `writeFileSync`, `writeText`, `exists`, `readDir`, and `readDirSync` follow a
+  symlink at the final path component.
 - `lstat` and `lstatSync` do not follow it and report `isSymlink: true`.
-- `readDir` follows a symlink to a directory but does not follow entries; an
-  entry that is a link is reported with `isSymlink: true`.
+- `readDir` and `readDirSync` follow a symlink to a directory but do not follow
+  entries; an entry that is a link is reported with `isSymlink: true`.
 - `remove` does not follow a symlink at the target; it removes the link
   except for Windows directory symlinks (see below). Recursive deletion also
   does not follow symlinks inside the tree.
@@ -155,12 +172,16 @@ junction behavior has not been verified by running on Windows.
 
 ## Listing
 
-`readDir` is non-recursive and returns entries sorted by name in UTF-8 byte
-order, which is also Unicode code-point order. A name that is not valid UTF-8
-throws `FS_ENCODING`; the module never substitutes a lossy name. The listing is
-bounded before it can grow without limit; exceeding a bound throws `FS_LIMIT`.
+`readDir` lists on a worker; `readDirSync` blocks. Both are non-recursive and
+return entries sorted by name in UTF-8 byte order, which is also Unicode
+code-point order. A name that is not valid UTF-8 rejects `readDir` and throws
+`readDirSync` with `FS_ENCODING`; the module never substitutes a lossy name.
+The listing is bounded before it can grow without limit; exceeding a bound
+likewise reports `FS_LIMIT`.
 The listing is not an atomic snapshot: entries can change while the host reads
 the directory, and type flags may reflect a different instant from the names.
+An asynchronous listing that hits a cancellation check rejects with
+`FS_CANCELLED` instead of returning the entries gathered so far.
 
 ## Deletion
 
@@ -259,9 +280,9 @@ that guarantee or make the result of an error uncertain.
 | `MAX_PATH_BYTES`       |  32 KiB | Every path argument.                                    |
 | `MAX_READ_BYTES`       |  64 MiB | `readText`, `readFile`, `readFileSync`, and `copyFile`. |
 | `MAX_WRITE_BYTES`      |  64 MiB | `writeText`, `writeFile`, and `writeFileSync`.          |
-| `MAX_LIST_ENTRIES`     | 100,000 | Entries returned by `readDir`.                          |
+| `MAX_LIST_ENTRIES`     | 100,000 | Entries returned by `readDir` or `readDirSync`.         |
 | `MAX_LIST_NAME_BYTES`  |   1 KiB | One directory-entry name.                               |
-| `MAX_LIST_TOTAL_BYTES` |  16 MiB | Sum of all names returned by `readDir`.                 |
+| `MAX_LIST_TOTAL_BYTES` |  16 MiB | Sum of all names a listing returns.                     |
 
 Reads inspect the opened descriptor and its metadata before allocating, then
 read in bounded chunks with fallible reservation. A separate one-byte probe
@@ -324,8 +345,8 @@ After some failed opens, a separate metadata lookup may refine the error code;
 this lookup is not used to authorize reading, writing, or truncating. Deletion
 remains pathname based and is not race-free. Do not use `exists` to decide whether a later
 operation is safe; perform the operation and handle `FsError` instead.
-`readDir` and recursive deletion are non-atomic; recursive deletion may be
-partial on failure. Writes can leave partial files, and no file locking is
+`readDir`, `readDirSync`, and recursive deletion are non-atomic; recursive
+deletion may be partial on failure. Writes can leave partial files, and no file locking is
 performed.
 
 ## Migration from the original `neo:fs`

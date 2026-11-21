@@ -14,9 +14,10 @@ use rquickjs::{
 };
 
 use super::{
-    Code, FileInfo, FsError, JsError, JsResult, JsString, MAX_PATH_BYTES, MAX_READ_BYTES,
-    MAX_WRITE_BYTES, WorkingDirectory, bounded_copy, checked_js_path, file_info_at,
-    file_info_value, open_regular_source, read_bounded_until, resolve, validate_path, worker,
+    Code, DirEntryInfo, FileInfo, FsError, JsError, JsResult, JsString, MAX_LIST_ENTRIES,
+    MAX_LIST_NAME_BYTES, MAX_LIST_TOTAL_BYTES, MAX_PATH_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES,
+    WorkingDirectory, bounded_copy, checked_js_path, entries_json, file_info_at, file_info_value,
+    open_regular_source, read_bounded_until, read_dir_at_until, resolve, validate_path, worker,
     write_bytes_at,
 };
 
@@ -35,6 +36,12 @@ const MAX_OPERATION_BYTES: usize = if MAX_READ_BYTES > MAX_WRITE_BYTES {
 /// 20-digit size, and a 20-digit time fit comfortably; this is an accounting
 /// bound, not a separate allocation.
 const STAT_RESULT_BYTES: usize = 128;
+/// Admission charge for the owned listing a worker can return. Entry names are
+/// already capped by `MAX_LIST_TOTAL_BYTES`; 128 bytes per entry covers the
+/// `String` header, flags, padding, vector slack, and allocator overhead. The
+/// owner-side parsed array is neither part of this charge nor covered by a
+/// memory bound.
+const MAX_LIST_OPERATION_BYTES: usize = MAX_LIST_TOTAL_BYTES + MAX_LIST_ENTRIES * 128;
 const LIMITS: worker::Limits = worker::Limits {
     workers: NonZeroUsize::new(WORKERS).unwrap(),
     queued: NonZeroUsize::new(MAX_PENDING).unwrap(),
@@ -48,6 +55,8 @@ struct Job {
     kind: JobKind,
     #[cfg(test)]
     gate: Option<Gate>,
+    #[cfg(test)]
+    read_dir_gate: Option<ReadDirGate>,
 }
 
 enum JobKind {
@@ -63,6 +72,9 @@ enum JobKind {
         path: PathBuf,
         follow: bool,
     },
+    ReadDir {
+        path: PathBuf,
+    },
 }
 
 /// A worker result that still needs an owner-side settlement.
@@ -70,6 +82,7 @@ enum Output {
     Read(Vec<u8>),
     Write,
     Stat(FileInfo),
+    ReadDir(Vec<DirEntryInfo>),
 }
 
 type OperationResult = Result<Output, FsError>;
@@ -100,6 +113,23 @@ fn execute(job: Job, cancellation: &worker::Cancellation) -> OperationResult {
             Ok(Output::Write)
         }
         JobKind::Stat { path, follow } => file_info_at(&path, follow).map(Output::Stat),
+        JobKind::ReadDir { path } => {
+            #[cfg(test)]
+            let mut read_dir_gate = job.read_dir_gate;
+            read_dir_at_until(
+                &path,
+                MAX_LIST_ENTRIES,
+                MAX_LIST_NAME_BYTES,
+                MAX_LIST_TOTAL_BYTES,
+                || cancellation.requested(),
+                #[cfg(test)]
+                |entry| match read_dir_gate.as_mut() {
+                    Some(ReadDirGate(gate)) => gate(entry, cancellation),
+                    None => Ok(()),
+                },
+            )
+            .map(Output::ReadDir)
+        }
     }
 }
 
@@ -110,6 +140,7 @@ enum SettlementKind {
     Read,
     Write,
     Stat,
+    ReadDir,
 }
 
 struct Settlement {
@@ -142,6 +173,9 @@ impl Settlement {
             (SettlementKind::Read, Output::Read(bytes)) => self.finish_read(ctx, bytes),
             (SettlementKind::Write, Output::Write) => self.finish_write(ctx),
             (SettlementKind::Stat, Output::Stat(info)) => self.finish_stat(ctx, info),
+            (SettlementKind::ReadDir, Output::ReadDir(entries)) => {
+                self.finish_read_dir(ctx, entries)
+            }
             // A mismatched completion is an internal failure. Reject instead
             // of resolving a promise with a value the caller did not request.
             _ => self.reject(ctx, Code::Io),
@@ -187,6 +221,32 @@ impl Settlement {
         };
         resolve.call::<_, ()>((value,))
     }
+
+    /// Settle with a directory listing parsed on the owner. QuickJS's JSON
+    /// parser creates own array indices without running script. The own `then`
+    /// guards only this initial Promise resolution; it is removed immediately
+    /// after and is not general thenable assimilation, so later `.then` calls
+    /// observe the normal `Array.prototype`.
+    fn finish_read_dir(self, ctx: &Ctx<'_>, entries: Vec<DirEntryInfo>) -> JsResult<()> {
+        let resolve = self.resolve.clone().restore(ctx)?;
+        let value = match ctx.json_parse(entries_json(entries)) {
+            Ok(value) => value,
+            Err(JsError::Exception) => return self.reject.restore(ctx)?.call((ctx.catch(),)),
+            Err(error) => return Err(error),
+        };
+        let Some(object) = value.as_object().cloned() else {
+            return self.reject(ctx, Code::Io);
+        };
+        if let Err(error) = object.prop("then", Property::from(Undefined).configurable()) {
+            return if matches!(error, JsError::Exception) {
+                self.reject.restore(ctx)?.call((ctx.catch(),))
+            } else {
+                Err(error)
+            };
+        }
+        resolve.call::<_, ()>((value,))?;
+        object.remove("then")
+    }
 }
 
 #[derive(Default)]
@@ -203,6 +263,8 @@ pub(crate) struct FsDriver {
     active: Rc<RefCell<Option<Active>>>,
     #[cfg(test)]
     gates: Rc<RefCell<std::collections::VecDeque<Gate>>>,
+    #[cfg(test)]
+    read_dir_gates: Rc<RefCell<std::collections::VecDeque<ReadDirGate>>>,
 }
 
 impl FsDriver {
@@ -283,6 +345,18 @@ impl FsDriver {
         })
     }
 
+    fn submit_read_dir<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        path: PathBuf,
+        make_error: Function<'js>,
+    ) -> JsResult<Promise<'js>> {
+        let bytes = MAX_LIST_OPERATION_BYTES + path.as_os_str().as_encoded_bytes().len();
+        self.submit(ctx, bytes, SettlementKind::ReadDir, make_error, move || {
+            Ok(JobKind::ReadDir { path })
+        })
+    }
+
     fn dispatch(
         &self,
         bytes: usize,
@@ -316,12 +390,20 @@ impl FsDriver {
         };
         active.next = next;
         active.pending.insert(id, settlement);
+        #[cfg(test)]
+        let read_dir_gate = if matches!(kind, JobKind::ReadDir { .. }) {
+            self.read_dir_gates.borrow_mut().pop_front()
+        } else {
+            None
+        };
         admission.send(
             id,
             Job {
                 kind,
                 #[cfg(test)]
                 gate: self.gates.borrow_mut().pop_front(),
+                #[cfg(test)]
+                read_dir_gate,
             },
         );
         Ok(())
@@ -485,6 +567,21 @@ pub(super) fn install<'js>(
             )?,
         )?;
     }
+
+    let read_dir_driver = driver;
+    let read_dir_cwd = stat_base_cwd;
+    native.set(
+        "readDir",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, path: JsString<'js>, make_error: Function<'js>| {
+                match snapshot_absolute_path(&read_dir_cwd, path) {
+                    Ok(path) => read_dir_driver.submit_read_dir(&ctx, path, make_error),
+                    Err(error) => throw_argument(&ctx, error, make_error),
+                }
+            },
+        )?,
+    )?;
     Ok(())
 }
 
@@ -493,6 +590,14 @@ struct Gate(Box<GateFn>);
 
 #[cfg(test)]
 type GateFn = dyn FnOnce(&worker::Cancellation) -> Result<(), FsError> + Send;
+
+/// Test-only pause after one enumerated entry, so cancellation is observed at
+/// a known mid-traversal point rather than only before dispatch.
+#[cfg(test)]
+struct ReadDirGate(Box<ReadDirGateFn>);
+
+#[cfg(test)]
+type ReadDirGateFn = dyn FnMut(&DirEntryInfo, &worker::Cancellation) -> Result<(), FsError> + Send;
 
 #[cfg(test)]
 mod tests;

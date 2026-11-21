@@ -806,14 +806,14 @@ fn fetch_callback_error_is_preserved_if_temporary_cleanup_cannot_finish() {
     let js = runtime(true, true);
     let script = format!(
         "import {{ download }} from 'neo:fetch';
-         import {{ readDir, writeText }} from 'neo:fs';
+         import {{ readDirSync, writeText }} from 'neo:fs';
          import {{ posix, win32 }} from 'neo:path';
          const pathApi = {path_api};
          try {{
              download({url}, {path}, {{
                  overwrite: true,
                  progress() {{
-                     const temp = readDir({dir}).find(entry => entry.name.startsWith('.neo-download-'));
+                     const temp = readDirSync({dir}).find(entry => entry.name.startsWith('.neo-download-'));
                      writeText(pathApi.join({dir}, temp.name, 'keep'), 'not owned by the download');
                      return Promise.resolve();
                  }},
@@ -859,7 +859,7 @@ fn fetch_checks_progress_returns_without_running_getters_or_traps() {
     let js = runtime(true, true);
     let script = format!(
         "import {{ download }} from 'neo:fetch';
-         import {{ readText, readDir }} from 'neo:fs';
+         import {{ readText, readDirSync }} from 'neo:fs';
          const url = {url}, path = {path}, dir = {dir};
          let inspections = 0;
          const trap = () => {{ ++inspections; throw Error('must not run'); }};
@@ -898,7 +898,7 @@ fn fetch_checks_progress_returns_without_running_getters_or_traps() {
                  failure.message !== 'the progress callback must be synchronous' ||
                  Object.hasOwn(failure, 'status') || calls !== 2) throw Error('wrong failure');
              if (readText(path) !== 'original' ||
-                 readDir(dir).some(entry => entry.name.startsWith('.neo-download-'))) {{
+                 readDirSync(dir).some(entry => entry.name.startsWith('.neo-download-'))) {{
                  throw Error('unfinished cancellation');
              }}
          }}
@@ -915,7 +915,7 @@ fn fetch_checks_progress_returns_without_running_getters_or_traps() {
          if (pendingFailure?.code !== 'FETCH_CALLBACK_ASYNC' || ranJob) {{
              throw Error('did not reject synchronously');
          }}
-         if (readDir(dir).some(entry => entry.name !== 'progress.bin')) {{
+         if (readDirSync(dir).some(entry => entry.name !== 'progress.bin')) {{
              throw Error('published new destination or left temporary output');
          }}
          await Promise.resolve();

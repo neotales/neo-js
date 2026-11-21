@@ -115,7 +115,14 @@ declare const fs: {
   /** Same snapshot and error rules as `neo:fs.lstatSync`. */
   lstatSync(path: string): import("neo:fs").FileInfo;
   exists(path: string): boolean;
-  readDir(path: string): import("neo:fs").DirEntry[];
+  /**
+   * List a directory during managed module evaluation. Outside it, this throws
+   * `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. It uses the same
+   * outstanding-operation and worker limits as `readFile`. See `neo:fs.readDir`.
+   */
+  readDir(path: string): Promise<import("neo:fs").DirEntry[]>;
+  /** Same sorted, bounded listing and error rules as `neo:fs.readDirSync`. */
+  readDirSync(path: string): import("neo:fs").DirEntry[];
   mkdir(path: string, options?: import("neo:fs").MkdirOptions): void;
   remove(path: string, options?: import("neo:fs").RemoveOptions): void;
   /** Same entry, replacement, and error semantics as `neo:fs.rename`. */

@@ -3,11 +3,11 @@
 //! The module is available only when [`crate::Permissions::filesystem`] is
 //! granted and the runtime's module allowlist admits [`crate::RuntimeModule::Fs`].
 //! Both gates are checked before the `fs` global or any native callback is
-//! constructed. `readFile`, `writeFile`, `stat`, and `lstat` run on workers;
-//! `readFileSync`, `writeFileSync`, `statSync`, `lstatSync`, and all other
-//! operations block. Nothing here starts a shell, a child process, or a
-//! network request directly. The OS may still perform network I/O for network
-//! paths and filesystems.
+//! constructed. `readFile`, `writeFile`, `stat`, `lstat`, and `readDir` run on
+//! workers; `readFileSync`, `writeFileSync`, `statSync`, `lstatSync`,
+//! `readDirSync`, and all other operations block. Nothing here starts a shell,
+//! a child process, or a network request directly. The OS may still perform
+//! network I/O for network paths and filesystems.
 //!
 //! # Authority
 //!
@@ -66,13 +66,13 @@
 //! The behavior is deliberately explicit:
 //!
 //! * `stat`, `statSync`, `readFile`, `readFileSync`, `readText`, `writeFile`,
-//!   `writeFileSync`, `writeText`, `exists`, and `readDir` follow a symlink at
-//!   the final path component. `readDir` follows a symlink to a directory and
-//!   reports the entries inside it.
+//!   `writeFileSync`, `writeText`, `exists`, `readDir`, and `readDirSync`
+//!   follow a symlink at the final path component. `readDir` and `readDirSync`
+//!   follow a symlink to a directory and report the entries inside it.
 //! * `lstat` and `lstatSync` do not follow the final component and report
 //!   `isSymlink: true`.
-//! * `readDir` does not follow entries; a symlink entry is reported with
-//!   `isSymlink: true` and `isFile`/`isDirectory` both `false`.
+//! * `readDir` and `readDirSync` do not follow entries; a symlink entry is
+//!   reported with `isSymlink: true` and `isFile`/`isDirectory` both `false`.
 //! * `remove` does not follow a symlink at the target path. It removes the
 //!   link itself, except a Windows directory symlink at the target path is
 //!   rejected with `FS_UNSUPPORTED`, even if dangling. Recursive deletion
@@ -94,11 +94,20 @@
 //!
 //! # Listing
 //!
-//! `readDir` is non-recursive. It returns entries sorted by name in UTF-8 byte
-//! order, which is also Unicode code-point order. The listing is bounded by
-//! [`MAX_LIST_ENTRIES`], [`MAX_LIST_NAME_BYTES`] per entry name, and
-//! [`MAX_LIST_TOTAL_BYTES`] for the sum of names. A name that is not valid
-//! UTF-8 reports `FS_ENCODING`; the module never substitutes a lossy name.
+//! `readDir` and `readDirSync` are non-recursive. They return entries sorted by
+//! name in UTF-8 byte order, which is also Unicode code-point order. The
+//! listing is bounded by [`MAX_LIST_ENTRIES`], [`MAX_LIST_NAME_BYTES`] per
+//! entry name, and [`MAX_LIST_TOTAL_BYTES`] for the sum of names. A name that
+//! is not valid UTF-8 reports `FS_ENCODING`; the module never substitutes a
+//! lossy name.
+//!
+//! During a failed turn, an asynchronous listing checks cancellation between
+//! directory entries, before its explicit no-follow metadata fallback, and
+//! before sorting. A cancelled listing reports `FS_CANCELLED` and never
+//! returns a partial array. The initial `read_dir` call and an individual
+//! metadata call are not interruptible once started; teardown waits for them
+//! to return. The
+//! synchronous forms take no cancellation token.
 //!
 //! # Deletion
 //!
@@ -154,8 +163,8 @@
 //!   guarantee. A started asynchronous write cannot be interrupted by
 //!   teardown and may still create, truncate, or fully write the file after a
 //!   failed turn; cancellation does not roll back those side effects.
-//! * `readDir` is not an atomic snapshot. Recursive deletion can remove some
-//!   entries before an OS error stops it; there is no rollback.
+//! * `readDir` and `readDirSync` are not atomic snapshots. Recursive deletion
+//!   can remove some entries before an OS error stops it; there is no rollback.
 //! * `FS_LIMIT` also reports quota, storage-full, and fallible allocation
 //!   failures. This is best effort: allocator/runtime failures outside the
 //!   explicitly fallible reservations may still abort or raise an engine error.
@@ -205,7 +214,7 @@ pub(crate) const MAX_LIST_NAME_BYTES: usize = 1024;
 /// Largest sum of directory-entry names `readDir` returns, in UTF-8 bytes.
 pub(crate) const MAX_LIST_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
-const EXPORTS: [&str; 23] = [
+const EXPORTS: [&str; 24] = [
     "readText",
     "writeText",
     "readFile",
@@ -218,6 +227,7 @@ const EXPORTS: [&str; 23] = [
     "lstatSync",
     "exists",
     "readDir",
+    "readDirSync",
     "mkdir",
     "remove",
     "rename",
@@ -867,10 +877,39 @@ fn read_dir_at(
     max_name_bytes: usize,
     max_total_bytes: usize,
 ) -> Result<Vec<DirEntryInfo>, FsError> {
-    let iterator = fs::read_dir(path).map_err(FsError::from)?;
+    read_dir_at_until(
+        path,
+        max_entries,
+        max_name_bytes,
+        max_total_bytes,
+        || false,
+        #[cfg(test)]
+        |_| Ok(()),
+    )
+}
+
+/// Enumerate a directory with a cancellation check between entries, before
+/// the explicit no-follow metadata fallback, and before sorting. A cancelled listing returns
+/// `FS_CANCELLED` and no partial result. The initial `read_dir` call and any
+/// individual metadata call are not interruptible once started.
+fn read_dir_at_until(
+    path: &Path,
+    max_entries: usize,
+    max_name_bytes: usize,
+    max_total_bytes: usize,
+    cancelled: impl Fn() -> bool,
+    #[cfg(test)] mut on_entry: impl FnMut(&DirEntryInfo) -> Result<(), FsError>,
+) -> Result<Vec<DirEntryInfo>, FsError> {
+    let mut iterator = fs::read_dir(path).map_err(FsError::from)?;
     let mut entries = Vec::new();
     let mut total_bytes = 0usize;
-    for entry in iterator {
+    loop {
+        if cancelled() {
+            return Err(FsError::new(Code::Cancelled));
+        }
+        let Some(entry) = iterator.next() else {
+            break;
+        };
         let entry = entry.map_err(FsError::from)?;
         let name = entry.file_name();
         let name = name.to_str().ok_or(FsError::new(Code::Encoding))?;
@@ -891,9 +930,14 @@ fn read_dir_at(
             Ok(file_type) => file_type,
             // Some filesystems do not provide a directory-entry type. Fall back
             // to a no-follow metadata query rather than reporting a wrong type.
-            Err(_) => fs::symlink_metadata(entry.path())
-                .map_err(FsError::from)?
-                .file_type(),
+            Err(_) => {
+                if cancelled() {
+                    return Err(FsError::new(Code::Cancelled));
+                }
+                fs::symlink_metadata(entry.path())
+                    .map_err(FsError::from)?
+                    .file_type()
+            }
         };
 
         let mut owned = String::new();
@@ -910,6 +954,11 @@ fn read_dir_at(
             is_directory: file_type.is_dir(),
             is_symlink: file_type.is_symlink(),
         });
+        #[cfg(test)]
+        on_entry(entries.last().unwrap())?;
+    }
+    if cancelled() {
+        return Err(FsError::new(Code::Cancelled));
     }
     // `read_dir` yields an unspecified order. Sorting makes the JavaScript
     // result deterministic without following entries.
@@ -1281,6 +1330,24 @@ fn file_info_outcome<'js>(
     }
 }
 
+/// Serialize a bounded listing. The wrapper parses the result with the
+/// realm's captured `JSON.parse`; JSON parsing creates own array index
+/// properties and cannot invoke a polluted `Array.prototype` numeric setter.
+fn entries_json(entries: Vec<DirEntryInfo>) -> String {
+    let values: Vec<serde_json::Value> = entries
+        .into_iter()
+        .map(|entry| {
+            serde_json::json!({
+                "name": entry.name,
+                "isFile": entry.is_file,
+                "isDirectory": entry.is_directory,
+                "isSymlink": entry.is_symlink,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(values).to_string()
+}
+
 fn entries_outcome<'js>(
     ctx: &Ctx<'js>,
     result: Result<Vec<DirEntryInfo>, FsError>,
@@ -1288,21 +1355,7 @@ fn entries_outcome<'js>(
     match result {
         Ok(entries) => {
             let object = ok_object(ctx)?;
-            let values: Vec<serde_json::Value> = entries
-                .into_iter()
-                .map(|entry| {
-                    serde_json::json!({
-                        "name": entry.name,
-                        "isFile": entry.is_file,
-                        "isDirectory": entry.is_directory,
-                        "isSymlink": entry.is_symlink,
-                    })
-                })
-                .collect();
-            // The wrapper parses the bounded JSON with the realm's captured
-            // JSON.parse. JSON parsing creates own array index properties and
-            // cannot invoke a polluted Array.prototype numeric setter.
-            object.set("value", serde_json::Value::Array(values).to_string())?;
+            object.set("value", entries_json(entries))?;
             Ok(object)
         }
         Err(error) => error_object(ctx, error),
@@ -1460,7 +1513,7 @@ fn build_native<'js>(
 
     let read_dir_cwd = Rc::clone(&cwd);
     native.set(
-        "readDir",
+        "readDirSync",
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'js>, path: String| -> JsResult<Object<'js>> {

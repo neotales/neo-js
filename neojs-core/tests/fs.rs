@@ -89,6 +89,15 @@ fn permission_and_allowlist_gate_the_global_and_the_module() {
          if (module.lstat !== fs.lstat || module.lstatSync !== fs.lstatSync) {
            throw Error('lstat module and global differ');
          }
+         if (typeof fs.readDir !== 'function' || typeof module.readDir !== 'function') {
+           throw Error('missing async readDir');
+         }
+         if (typeof fs.readDirSync !== 'function' || typeof module.readDirSync !== 'function') {
+           throw Error('missing sync readDir');
+         }
+         if (module.readDir !== fs.readDir || module.readDirSync !== fs.readDirSync) {
+           throw Error('readDir module and global differ');
+         }
          if (typeof module.rename !== 'function' || module.rename !== fs.rename) {
            throw Error('missing or mismatched rename');
          }
@@ -343,16 +352,204 @@ fn metadata_reads_use_the_cwd_captured_at_call_time() {
     .unwrap();
 }
 
+#[test]
+fn directory_reads_are_asynchronous_and_sync_forms_still_throw() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    fs::write(dir.path().join("b.txt"), b"bb").unwrap();
+    fs::create_dir(dir.path().join("child")).unwrap();
+    let missing = dir.path().join("not-here");
+    let file = dir.path().join("a.txt");
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{readDir, readDirSync, FsError, MAX_PATH_BYTES}} from 'neo:fs';
+            const dir = {dir};
+            const missing = {missing};
+            const file = {file};
+
+            const pending = readDir(dir);
+            if (!(pending instanceof Promise)) throw Error('readDir did not return a Promise');
+            const entries = await pending;
+            if (!Array.isArray(entries)) throw Error('readDir result is not an array');
+            const names = entries.map((entry) => entry.name).join(',');
+            if (names !== 'a.txt,b.txt,child') throw Error('listing order or names: ' + names);
+            const fileEntry = entries[0];
+            if (!fileEntry.isFile || fileEntry.isDirectory || fileEntry.isSymlink) {{
+                throw Error('async entry type');
+            }}
+            const directoryEntry = entries[2];
+            if (!directoryEntry.isDirectory || directoryEntry.isFile) {{
+                throw Error('async directory entry type');
+            }}
+            if (Object.hasOwn(entries, 'then')) throw Error('result kept the then guard');
+
+            const syncEntries = readDirSync(dir);
+            if (syncEntries.map((entry) => entry.name).join(',') !== names) {{
+                throw Error('sync listing differs');
+            }}
+
+            try {{ await readDir(missing); throw Error('async readDir fulfilled'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
+                if (error.message.includes(missing)) throw Error('async readDir leaked the path');
+            }}
+            try {{ await readDir(file); throw Error('async readDir accepted a file'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_DIRECTORY') throw error;
+            }}
+            try {{ readDirSync(missing); throw Error('sync readDir fulfilled'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
+            }}
+            try {{ readDirSync(file); throw Error('sync readDir accepted a file'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_DIRECTORY') throw error;
+            }}
+
+            for (const [action, code] of [
+                [() => readDir(''), 'FS_PATH'],
+                [() => readDirSync(''), 'FS_PATH'],
+                [() => readDir('x'.repeat(MAX_PATH_BYTES + 1)), 'FS_LIMIT'],
+            ]) {{
+                try {{ await action(); throw Error('expected rejection'); }}
+                catch (error) {{
+                    if (!(error instanceof FsError) || error.code !== code) throw error;
+                }}
+            }}
+            try {{ await readDir(null); throw Error('expected type rejection'); }}
+            catch (error) {{ if (!(error instanceof TypeError)) throw error; }}
+            try {{ readDirSync({{}}); throw Error('expected type throw'); }}
+            catch (error) {{ if (!(error instanceof TypeError)) throw error; }}"#,
+            dir = literal(dir.path()),
+            missing = literal(&missing),
+            file = literal(&file),
+        ),
+    );
+    js.run(
+        "try { fs.readDir('.'); throw Error('dispatched outside managed turn'); }
+         catch (error) { if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn directory_read_result_resists_polluted_array_prototypes() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("only.txt"), b"x").unwrap();
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{readDir}} from 'neo:fs';
+            let setterRan = false;
+            let thenRan = false;
+            Object.defineProperty(Array.prototype, '0', {{
+                set() {{ setterRan = true; throw Error('numeric setter ran'); }},
+                configurable: true,
+            }});
+            Object.defineProperty(Array.prototype, 'then', {{
+                get() {{ thenRan = true; throw Error('then getter ran'); }},
+                configurable: true,
+            }});
+            try {{
+                const entries = await readDir({dir});
+                if (setterRan) throw Error('numeric setter intercepted the listing');
+                if (thenRan) throw Error('then getter intercepted resolution');
+                if (entries.length !== 1 || entries[0].name !== 'only.txt') {{
+                    throw Error('listing changed');
+                }}
+                if (Object.hasOwn(entries, 'then')) throw Error('then guard leaked');
+            }} finally {{
+                delete Array.prototype[0];
+                delete Array.prototype.then;
+            }}"#,
+            dir = literal(dir.path()),
+        ),
+    );
+}
+
 #[cfg(unix)]
 #[test]
-fn metadata_reads_report_denied_without_leaking_the_path() {
+fn async_directory_reads_use_the_sync_symlink_rules() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    fs::create_dir(&tree).unwrap();
+    fs::write(dir.path().join("target.txt"), b"x").unwrap();
+    fs::write(tree.join("inside.txt"), b"y").unwrap();
+    symlink(dir.path().join("target.txt"), dir.path().join("link.txt")).unwrap();
+
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{readDir, readDirSync}} from 'neo:fs';
+            const dir = {dir};
+            const tree = {tree};
+
+            const entries = await readDir(dir);
+            const names = entries.map((entry) => entry.name).join(',');
+            if (names !== 'link.txt,target.txt,tree') throw Error('names: ' + names);
+            const link = entries.find((entry) => entry.name === 'link.txt');
+            if (!link.isSymlink || link.isFile || link.isDirectory) {{
+                throw Error('async listing followed a symlink entry');
+            }}
+
+            const followed = await readDir(dir + '/tree');
+            if (followed.length !== 1 || followed[0].name !== 'inside.txt') {{
+                throw Error('async readDir did not follow a directory symlink path');
+            }}
+            const syncNames = readDirSync(tree).map((entry) => entry.name).join(',');
+            if (syncNames !== 'inside.txt') throw Error('sync listing differs');"#,
+            dir = literal(dir.path()),
+            tree = literal(&tree),
+        ),
+    );
+}
+
+#[test]
+fn directory_reads_use_the_cwd_captured_at_call_time() {
+    let old = tempfile::tempdir().unwrap();
+    let new = tempfile::tempdir().unwrap();
+    fs::write(old.path().join("old-entry"), b"a").unwrap();
+    fs::write(new.path().join("new-entry"), b"b").unwrap();
+    let js = chunked_runtime();
+    js.run_module(
+        "read-dir-cwd.js",
+        &format!(
+            r#"import {{chdir}} from 'neo:process';
+            import {{readDir, readDirSync}} from 'neo:fs';
+            chdir({old});
+            const pending = readDir('.');
+            const before = readDirSync('.').map((entry) => entry.name).join(',');
+            chdir({new});
+            if (before !== 'old-entry') throw Error('sync listing before chdir');
+            if ((await pending).map((entry) => entry.name).join(',') !== 'old-entry') {{
+                throw Error('async readDir did not keep the old cwd');
+            }}
+            if (readDirSync('.').map((entry) => entry.name).join(',') !== 'new-entry') {{
+                throw Error('sync readDir did not use the new cwd');
+            }}"#,
+            old = literal(old.path()),
+            new = literal(new.path()),
+        ),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn reads_report_denied_without_leaking_the_path() {
     use std::fs::Permissions;
     use std::os::unix::fs::PermissionsExt;
 
     // Traversal needs the execute bit, so denying the parent directory denies
     // metadata for the entry even when the entry itself is readable.
     if unsafe { libc::geteuid() } == 0 {
-        eprintln!("metadata denial test skipped: running as root");
+        eprintln!("denial test skipped: running as root");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -373,7 +570,7 @@ fn metadata_reads_report_denied_without_leaking_the_path() {
     run(
         &js,
         &format!(
-            r#"import {{stat, statSync, lstat, FsError}} from 'neo:fs';
+            r#"import {{stat, statSync, lstat, readDir, readDirSync, FsError}} from 'neo:fs';
             const inner = {inner};
             function expectFsError(code, action) {{
                 try {{ action(); }}
@@ -393,7 +590,13 @@ fn metadata_reads_report_denied_without_leaking_the_path() {
             catch (error) {{
                 if (!(error instanceof FsError) || error.code !== 'FS_DENIED') throw error;
             }}
-            expectFsError('FS_DENIED', () => statSync(inner));"#,
+            try {{ await readDir(inner); throw Error('async readDir succeeded'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_DENIED') throw error;
+                if (error.message.includes(inner)) throw Error('readDir denial leaked the path');
+            }}
+            expectFsError('FS_DENIED', () => statSync(inner));
+            expectFsError('FS_DENIED', () => readDirSync(inner));"#,
             inner = literal(&inner),
         ),
     );
@@ -667,7 +870,7 @@ fn stable_errors_never_include_the_supplied_path() {
     fs::write(dir.path().join("existing.txt"), "still usable").unwrap();
     let js = runtime();
     let source = r#"
-        import {readText, readFileSync, writeText, writeFile, writeFileSync, statSync, exists, readDir, mkdir, remove, FsError} from 'neo:fs';
+        import {readText, readFileSync, writeText, writeFile, writeFileSync, statSync, exists, readDirSync, mkdir, remove, FsError} from 'neo:fs';
 
         function expectFsError(code, action) {
             try { action(); }
@@ -699,7 +902,7 @@ fn stable_errors_never_include_the_supplied_path() {
         expectFsError('FS_PATH', () => readText('a\u0000b'));
         expectFsError('FS_PATH', () => statSync(''));
         expectFsError('FS_PATH', () => exists(''));
-        expectFsError('FS_PATH', () => readDir(''));
+        expectFsError('FS_PATH', () => readDirSync(''));
         expectFsError('FS_PATH', () => mkdir(''));
         expectFsError('FS_PATH', () => remove(''));
         expectFsError('FS_LIMIT', () => readText('x'.repeat(fs.MAX_PATH_BYTES + 1)));
@@ -718,7 +921,7 @@ fn stable_errors_never_include_the_supplied_path() {
         expectTypeError(() => mkdir(missing, {recursive: 'yes'}));
         expectTypeError(() => remove(missing, {recursive: 1}));
         expectTypeError(() => statSync({}));
-        expectTypeError(() => readDir([]));
+        expectTypeError(() => readDirSync([]));
 
         let traps = 0;
         const proxy = new Proxy(new Uint8Array([1]), {
@@ -996,7 +1199,7 @@ fn symlink_semantics_are_explicit() {
 
     let js = runtime();
     let source = r#"
-        import {readText, readFileSync, statSync, lstatSync, exists, readDir, remove, FsError} from 'neo:fs';
+        import {readText, readFileSync, statSync, lstatSync, exists, readDirSync, remove, FsError} from 'neo:fs';
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
@@ -1027,7 +1230,7 @@ fn symlink_semantics_are_explicit() {
         expectFsError('FS_NOT_FOUND', () => statSync(dangling));
         if (readFileSync(link)[0] !== 97) throw Error('read did not follow link');
 
-        const entries = readDir(dir);
+        const entries = readDirSync(dir);
         const names = entries.map((entry) => entry.name);
         if (names.join(',') !== 'dangling.txt,link.txt,outside.txt,target.txt,tree') {
             throw Error('listing order or names: ' + names.join(','));
@@ -1768,7 +1971,7 @@ fn module_exports_survive_global_prototype_and_callback_replacement() {
 
     let js = runtime();
     let source = r#"
-        import {readText, readFileSync, statSync, readDir, FsError} from 'neo:fs';
+        import {readText, readFileSync, statSync, readDirSync, FsError} from 'neo:fs';
         const oldError = Error;
         const oldParse = JSON.parse;
         try {
@@ -1798,7 +2001,7 @@ fn module_exports_survive_global_prototype_and_callback_replacement() {
                 configurable: true,
             });
             try {
-                const entries = readDir(__DIR__);
+                const entries = readDirSync(__DIR__);
                 if (entries.length !== 1 || entries[0].name !== 'payload.txt') {
                     throw new oldError('readDir entries changed');
                 }
@@ -1839,9 +2042,9 @@ fn listing_rejects_names_that_are_not_utf8() {
 
     let js = runtime();
     let source = r#"
-        import {readDir, FsError} from 'neo:fs';
+        import {readDirSync, FsError} from 'neo:fs';
         let failure;
-        try { readDir(__DIR__); }
+        try { readDirSync(__DIR__); }
         catch (error) { failure = error; }
         if (!(failure instanceof FsError) || failure.code !== 'FS_ENCODING') {
             throw Error('invalid UTF-8 name: expected FS_ENCODING, got ' + failure?.code);

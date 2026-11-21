@@ -1,6 +1,6 @@
 import process, { ElevationError, isElevated, stdout } from "neo:process";
-import { readFile, readFileSync, writeFile, writeFileSync, stat, statSync, lstat, lstatSync } from "neo:fs";
-import type { FileInfo } from "neo:fs";
+import { readFile, readFileSync, writeFile, writeFileSync, stat, statSync, lstat, lstatSync, readDir, readDirSync } from "neo:fs";
+import type { DirEntry, FileInfo } from "neo:fs";
 
 const elevated: boolean = isElevated();
 const alsoElevated: boolean = process.isElevated();
@@ -34,12 +34,19 @@ const globalSyncedInfo: FileInfo = fs.statSync("data.bin");
 const globalPendingLink: Promise<FileInfo> = fs.lstat("data.bin");
 const globalSyncedLink: FileInfo = fs.lstatSync("data.bin");
 
+const pendingEntries: Promise<DirEntry[]> = readDir(".");
+const syncedEntries: DirEntry[] = readDirSync(".");
+const globalPendingEntries: Promise<DirEntry[]> = fs.readDir(".");
+const globalSyncedEntries: DirEntry[] = fs.readDirSync(".");
+
 // @ts-expect-error The unsuffixed method no longer returns metadata synchronously.
 const notMetadata: FileInfo = stat("data.bin");
 // @ts-expect-error The unsuffixed global method returns metadata asynchronously.
 const notGlobalMetadata: FileInfo = fs.stat("data.bin");
 // @ts-expect-error The unsuffixed lstat no longer returns metadata synchronously.
 const notLinkMetadata: FileInfo = lstat("data.bin");
+// @ts-expect-error The unsuffixed readDir no longer returns entries synchronously.
+const notEntries: DirEntry[] = readDir(".");
 
 // @ts-expect-error The unsuffixed method no longer returns bytes synchronously.
 const notBytes: Uint8Array = readFile("data.bin");
