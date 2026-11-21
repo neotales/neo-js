@@ -44,13 +44,18 @@ tag or branch it was resolved from.
 | `dtolnay/rust-toolchain` | `1.87.0`  | `4b54d2ecfeb0fc349341b7929a580d09d9e2479b` | `git ls-remote https://github.com/dtolnay/rust-toolchain.git refs/heads/1.87.0` |
 | `Swatinem/rust-cache`    | `v2.9.3`  | `d1527c8f67ef9af357290475d4af4b0fab8f12e0` | `git ls-remote https://github.com/Swatinem/rust-cache.git 'refs/tags/v2.9.3*'` (peeled tag) |
 
-`dtolnay/rust-toolchain`'s `1.87.0` ref is a branch that contains an
-`action.yml` with `toolchain: 1.87.0`; pinning the commit makes the workflow
-independent of later branch movement. `Swatinem/rust-cache`'s `v2.9.3` tag is
-annotated: the tag object is `2201cc584a476d1b508be977bbe4b7d1c7a52e9c` and it
-points at the commit in the table. `actions/checkout`'s `v7.0.1` ref points
-directly at its commit. These were checked on 2026-11-20 with `git ls-remote`
-and the GitHub API.
+`dtolnay/rust-toolchain`'s `1.87.0` ref is a branch whose `action.yml`
+hardcodes `toolchain: 1.87.0` and declares `targets`, `target`, and `components`
+inputs. Only `toolchain` is unsupported. The workflow intentionally passes no
+`with:` block at all because the pinned ref already selects 1.87.0 and this gate
+needs no other inputs. The static guard enforces that workflow policy by failing
+closed on block, inline, or quoted `with:` forms; it is not claiming that
+`targets`, `target`, or `components` are invalid. Pinning the commit also makes
+the workflow independent of later branch movement.
+`Swatinem/rust-cache`'s `v2.9.3` tag is annotated: the tag object is
+`2201cc584a476d1b508be977bbe4b7d1c7a52e9c` and it points at the commit in the
+table. `actions/checkout`'s `v7.0.1` ref points directly at its commit. These
+were checked on 2026-11-20 with `git ls-remote` and the GitHub API.
 
 Rust is pinned to `1.87.0`, the workspace MSRV in `Cargo.toml`. The script
 invokes `cargo +1.87.0` and `rustc +1.87.0`, so rustup must have that toolchain
@@ -129,6 +134,11 @@ checks:
 - that all three action references are 40-hex commit SHAs matching the table
   above;
 - that the workflow does not reference `secrets.*`;
+- that the pinned `dtolnay/rust-toolchain` step defines no `with:` at all,
+  whether block, inline, quoted key, or nested quoted `toolchain`. The action
+  supports `targets`, `target`, and `components`, but this workflow needs none
+  of them and the pinned ref selects 1.87.0; the guard rejects any `with:` by
+  policy, not because those inputs are unsupported;
 - the PowerShell AST of `windows-native.ps1`: it enumerates command
   invocations, not lines. It normalizes Windows `\` and Unix `/` separators and
   compares the executable basename case-insensitively. Exactly one literal
@@ -185,6 +195,11 @@ dependency. Rejected mutations:
 - a removed `--target`;
 - a cargo alias;
 - a floating action ref;
+- a policy-rejected block `with: toolchain: 1.87.0` on
+  `dtolnay/rust-toolchain` (the `toolchain` input itself is also unsupported);
+- a policy-rejected block `with:` containing quoted `"toolchain": "1.87.0"`;
+- a policy-rejected inline `with: { "toolchain": "1.87.0" }`;
+- a policy-rejected quoted `"with": { "toolchain": "1.87.0" }`;
 - a `release` trigger;
 - a `workflow_call` trigger;
 - a column-zero comment hiding a following `release` trigger;
