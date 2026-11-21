@@ -3,12 +3,12 @@
 //! The module is available only when [`crate::Permissions::filesystem`] is
 //! granted and the runtime's module allowlist admits [`crate::RuntimeModule::Fs`].
 //! Both gates are checked before the `fs` global or any native callback is
-//! constructed. `readFile`, `writeFile`, `stat`, `lstat`, `readDir`, `mkdir`,
-//! and `remove` run on workers; `readFileSync`, `writeFileSync`, `statSync`,
-//! `lstatSync`, `readDirSync`, `mkdirSync`, `removeSync`, and all other
-//! operations block. Nothing here starts a shell, a child process, or a
-//! network request directly. The OS may still perform network I/O for network
-//! paths and filesystems.
+//! constructed. `readFile`, `writeFile`, `writeText`, `stat`, `lstat`,
+//! `readDir`, `mkdir`, and `remove` run on workers; `readFileSync`,
+//! `writeFileSync`, `writeTextSync`, `statSync`, `lstatSync`, `readDirSync`,
+//! `mkdirSync`, `removeSync`, and all other operations block. Nothing here
+//! starts a shell, a child process, or a network request directly. The OS may
+//! still perform network I/O for network paths and filesystems.
 //!
 //! # Authority
 //!
@@ -29,8 +29,8 @@
 //!
 //! # Files and sizes
 //!
-//! `readFile`, `readFileSync`, `readText`, `writeFile`, `writeFileSync`, and
-//! `writeText` require a regular file.
+//! `readFile`, `readFileSync`, `readText`, `writeFile`, `writeFileSync`,
+//! `writeText`, and `writeTextSync` require a regular file.
 //! An open may occur before a non-regular object is rejected. If the type is
 //! identified, the error is `FS_IS_DIRECTORY` or `FS_TYPE`; if the open fails
 //! first, the OS error may take precedence. Unix data opens avoid waiting for
@@ -67,9 +67,10 @@
 //! The behavior is deliberately explicit:
 //!
 //! * `stat`, `statSync`, `readFile`, `readFileSync`, `readText`, `writeFile`,
-//!   `writeFileSync`, `writeText`, `exists`, `readDir`, and `readDirSync`
-//!   follow a symlink at the final path component. `readDir` and `readDirSync`
-//!   follow a symlink to a directory and report the entries inside it.
+//!   `writeFileSync`, `writeText`, `writeTextSync`, `exists`, `readDir`, and
+//!   `readDirSync` follow a symlink at the final path component. `readDir` and
+//!   `readDirSync` follow a symlink to a directory and report the entries
+//!   inside it.
 //! * `lstat` and `lstatSync` do not follow the final component and report
 //!   `isSymlink: true`.
 //! * `readDir` and `readDirSync` do not follow entries; a symlink entry is
@@ -90,9 +91,10 @@
 //!
 //! A dangling symlink is reported by `lstat` and `lstatSync` but `exists`
 //! follows the link and returns `false`, because there is no target.
-//! `writeFile` and `writeFileSync` with the default `overwrite: true` follow a
-//! dangling symlink and create its target; `overwrite: false` refuses the path
-//! if the link itself exists. Windows
+//! `writeFile` and `writeFileSync` with the default `overwrite: true`, and
+//! `writeText` and `writeTextSync`, follow a dangling symlink and create its
+//! target; `writeFile` with `overwrite: false` refuses the path if the link
+//! itself exists. Windows
 //! reparse-point and junction behavior is not verified by this build.
 //!
 //! # Listing
@@ -196,13 +198,14 @@
 //!   opens use nonblocking mode and `O_NOCTTY`. The opened descriptor is
 //!   inspected before truncation, but path-based deletion and OS/network
 //!   filesystem behavior are not race-free.
-//! * `writeFile`, `writeFileSync`, and `writeText` truncate before writing and
-//!   are not atomic. An I/O failure can leave an empty or partially written
-//!   file. There is no temporary file, rename step, rollback, or cleanup. No
-//!   write is durable on return, and concurrent writes have no ordering
-//!   guarantee. A started asynchronous write cannot be interrupted by
-//!   teardown and may still create, truncate, or fully write the file after a
-//!   failed turn; cancellation does not roll back those side effects.
+//! * `writeFile`, `writeFileSync`, `writeText`, and `writeTextSync` truncate
+//!   before writing and are not atomic. An I/O failure can leave an empty or
+//!   partially written file. There is no temporary file, rename step,
+//!   rollback, or cleanup. No write is durable on return, and concurrent
+//!   writes have no ordering guarantee. A started asynchronous write cannot be
+//!   interrupted by teardown and may still create, truncate, or fully write
+//!   the file after a failed turn; cancellation does not roll back those side
+//!   effects.
 //! * `readDir` and `readDirSync` are not atomic snapshots. Recursive deletion
 //!   can remove some entries before an OS error stops it; there is no rollback.
 //! * `FS_LIMIT` also reports quota, storage-full, and fallible allocation
@@ -254,9 +257,10 @@ pub(crate) const MAX_LIST_NAME_BYTES: usize = 1024;
 /// Largest sum of directory-entry names `readDir` returns, in UTF-8 bytes.
 pub(crate) const MAX_LIST_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
-const EXPORTS: [&str; 26] = [
+const EXPORTS: [&str; 27] = [
     "readText",
     "writeText",
+    "writeTextSync",
     "readFile",
     "readFileSync",
     "writeFile",
@@ -1462,9 +1466,9 @@ fn build_native<'js>(
         )?,
     )?;
 
-    let write_text_cwd = Rc::clone(&cwd);
+    let write_text_sync_cwd = Rc::clone(&cwd);
     native.set(
-        "writeText",
+        "writeTextSync",
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'js>,
@@ -1475,8 +1479,8 @@ fn build_native<'js>(
                     // Keep the same absolute, UTF-8 path snapshot and checks
                     // as the old wrapper, but only after the text is owned.
                     let path = checked_js_path(path, MAX_PATH_BYTES)?;
-                    let path = resolve_text(&write_text_cwd, &path)?;
-                    write_text(&write_text_cwd, &path, &data)
+                    let path = resolve_text(&write_text_sync_cwd, &path)?;
+                    write_text(&write_text_sync_cwd, &path, &data)
                 });
                 void_outcome(&ctx, result)
             },

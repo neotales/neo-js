@@ -568,6 +568,187 @@ fn a_write_uses_the_cwd_captured_before_option_reflection() {
 }
 
 #[test]
+fn a_text_write_uses_the_cwd_captured_at_the_call() {
+    let old = tempfile::tempdir().unwrap();
+    let new = tempfile::tempdir().unwrap();
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    js.ops.gates.borrow_mut().push_back(Gate(Box::new(move |_| {
+        started_tx.send(()).unwrap();
+        release_rx.recv_timeout(TIMEOUT).unwrap();
+        Ok(())
+    })));
+    let controller = thread::spawn(move || {
+        started.recv_timeout(TIMEOUT).unwrap();
+        release.send(()).unwrap();
+    });
+    let result = js.run_module(
+        "write-text-cwd.js",
+        &format!(
+            r#"import {{chdir}} from 'neo:process';
+            import {{writeText, readText}} from 'neo:fs';
+            chdir({old});
+            const pending = writeText('out.txt', 'old directory');
+            chdir({new});
+            await pending;
+            chdir({old});
+            if (readText('out.txt') !== 'old directory')
+                throw Error('text write did not use the captured cwd');"#,
+            old = literal(old.path()),
+            new = literal(new.path()),
+        ),
+    );
+    controller.join().unwrap();
+    result.unwrap();
+    assert_eq!(
+        fs::read_to_string(old.path().join("out.txt")).unwrap(),
+        "old directory"
+    );
+    assert!(!new.path().join("out.txt").exists());
+}
+
+#[test]
+fn outstanding_text_writes_share_the_operation_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<_> = (0..=MAX_PENDING)
+        .map(|index| dir.path().join(format!("out-{index}.txt")))
+        .collect();
+    let literals: Vec<_> = paths.iter().map(|path| literal(path)).collect();
+    let path_array = format!("[{}]", literals.join(","));
+    let js = runtime();
+    js.run_module(
+        "write-text-saturation.js",
+        &format!(
+            r#"import {{writeText, FsError}} from 'neo:fs';
+            const paths = {paths};
+            const writes = [];
+            for (let i = 0; i < {limit}; i++) writes.push(writeText(paths[i], 'text-' + i));
+            try {{
+                await writeText(paths[{limit}], 'overflow');
+                throw Error('admitted one text write beyond the bound');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_LIMIT') throw error;
+            }}
+            for (const result of await Promise.all(writes)) {{
+                if (result !== undefined) throw Error('writeText resolved with a value');
+            }}
+            await writeText(paths[{limit}], 'recovered');
+            if (fs.readText(paths[{limit}]) !== 'recovered') throw Error('slot did not recover');"#,
+            paths = path_array,
+            limit = MAX_PENDING,
+        ),
+    )
+    .unwrap();
+    for (index, path) in paths.iter().take(MAX_PENDING).enumerate() {
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            format!("text-{index}"),
+            "{}",
+            path.display()
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&paths[MAX_PENDING]).unwrap(),
+        "recovered"
+    );
+}
+
+#[test]
+fn failing_turn_cancels_a_text_write_after_its_file_effect() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first.txt");
+    let second = dir.path().join("second.txt");
+    let queued = dir.path().join("queued.txt");
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (joined_tx, joined) = mpsc::channel();
+    let (queued_tx, queued_started) = mpsc::channel();
+    let mut release = Vec::new();
+    {
+        // Each of the two running workers pauses only after `write_bytes_at`
+        // returned, so the file already contains the new text when the wait
+        // begins.
+        let mut write_text_gates = js.ops.write_text_gates.borrow_mut();
+        for (target, expected) in [(first.clone(), "first"), (second.clone(), "second")] {
+            let (send, wait) = mpsc::channel::<()>();
+            release.push(send);
+            let started_tx = started_tx.clone();
+            let joined_tx = joined_tx.clone();
+            write_text_gates.push_back(WriteTextGate(Box::new(move |cancel| {
+                assert_eq!(
+                    fs::read_to_string(&target).unwrap(),
+                    expected,
+                    "gate ran before the text write effect"
+                );
+                started_tx.send(()).unwrap();
+                assert_eq!(
+                    wait.recv_timeout(TIMEOUT),
+                    Err(mpsc::RecvTimeoutError::Disconnected)
+                );
+                joined_tx.send(cancel.requested()).unwrap();
+                Ok(())
+            })));
+        }
+        // A no-op pre-execute gate occupies each running job. The third gate
+        // owns the senders and is attached to the queued job; discarding that
+        // request during shutdown disconnects both post-effect waits.
+        let mut gates = js.ops.gates.borrow_mut();
+        for _ in 0..2 {
+            gates.push_back(Gate(Box::new(|_| Ok(()))));
+        }
+        gates.push_back(Gate(Box::new(move |_| {
+            drop(release);
+            queued_tx.send(()).unwrap();
+            Ok(())
+        })));
+    }
+    js.context.with(|ctx| {
+        let wait = Function::new(ctx.clone(), move || {
+            started.recv_timeout(TIMEOUT).unwrap();
+            started.recv_timeout(TIMEOUT).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("finishTextWrites", wait).unwrap();
+    });
+    let result = js.run_module(
+        "cancel-write-text-effect.js",
+        &format!(
+            "globalThis.cancelledTextWrite = fs.writeText({first}, 'first');
+             fs.writeText({second}, 'second'); fs.writeText({queued}, 'queued');
+             finishTextWrites(); throw Error('entry failed');",
+            first = literal(&first),
+            second = literal(&second),
+            queued = literal(&queued),
+        ),
+    );
+    assert!(result.unwrap_err().contains("entry failed"));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(
+        queued_started.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    );
+    // The two started text writes are real side effects and were not rolled
+    // back. The queued write was never dispatched.
+    assert_eq!(fs::read_to_string(&first).unwrap(), "first");
+    assert_eq!(fs::read_to_string(&second).unwrap(), "second");
+    assert!(!queued.exists());
+    assert!(js.ops.active.borrow().is_none());
+    js.context.with(|ctx| {
+        let promise: Promise = ctx.globals().get("cancelledTextWrite").unwrap();
+        assert!(matches!(
+            promise.result::<()>(),
+            Some(Err(JsError::Exception))
+        ));
+        let reason = ctx.catch().into_object().unwrap();
+        assert_eq!(reason.get::<_, String>("code").unwrap(), "FS_CANCELLED");
+    });
+    assert!(js.run("1").unwrap_err().contains("NEO_MODULE_ABORTED"));
+    drop(js);
+}
+
+#[test]
 fn outstanding_metadata_reads_share_the_operation_bound() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("fixture");

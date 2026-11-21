@@ -10,12 +10,13 @@ Declarations for `neo:fs`. See [host permissions and module access](/runtime/per
 Bounded filesystem access. Requires `--allow-fs` and a runtime
 allowlist that admits `neo:fs`.
 
-During managed module evaluation, `readFile` reads, `writeFile` writes,
-`stat` and `lstat` read metadata, `readDir` lists a directory, `mkdir`
-creates a directory, and `remove` deletes an entry on a worker. Those seven
-return Promises. `readFileSync`, `writeFileSync`, `statSync`, `lstatSync`,
-`readDirSync`, `mkdirSync`, `removeSync`, and the other operations block
-the JavaScript thread. Relative paths resolve
+During managed module evaluation, `readFile` reads, `writeFile` and
+`writeText` write, `stat` and `lstat` read metadata, `readDir` lists a
+directory, `mkdir` creates a directory, and `remove` deletes an entry on a
+worker. Those eight return Promises. `readFileSync`, `writeFileSync`,
+`writeTextSync`, `statSync`, `lstatSync`, `readDirSync`, `mkdirSync`,
+`removeSync`, and the other operations block the JavaScript thread. Relative
+paths resolve
 against the runtime's working directory, with no fallback to the host
 directory. If that directory is unavailable, the asynchronous forms reject
 with `FS_CWD` during a managed turn and synchronous operations throw
@@ -23,8 +24,8 @@ with `FS_CWD` during a managed turn and synchronous operations throw
 `FS_ASYNC_OUTSIDE_TURN` before I/O. Absolute paths and `..` components still
 reach everything the host user can reach. This is not a sandbox.
 
-`readFile`, `readFileSync`, `readText`, `writeFile`, `writeFileSync`, and
-`writeText` require a regular file.
+`readFile`, `readFileSync`, `readText`, `writeFile`, `writeFileSync`,
+`writeText`, and `writeTextSync` require a regular file.
 An open may occur before a non-regular object is rejected. If the type is
 identified, the error is `FS_IS_DIRECTORY` or `FS_TYPE`; an open failure
 can take precedence. Device-open side effects and latency are not bounded.
@@ -35,8 +36,9 @@ and fallible allocation failures; this cannot catch every failure inside
 QuickJS or the process allocator.
 
 `stat`, `statSync`, `readFile`, `readFileSync`, `readText`, `writeFile`,
-`writeFileSync`, `writeText`, `exists`, `readDir`, and `readDirSync` follow a
-symlink at the final path component. `lstat` and `lstatSync` do not.
+`writeFileSync`, `writeText`, `writeTextSync`, `exists`, `readDir`, and
+`readDirSync` follow a symlink at the final path component. `lstat` and
+`lstatSync` do not.
 `readDir` and `readDirSync` do not follow entries and report a symlink entry
 with `isSymlink: true`. `remove` and `removeSync` never follow a symlink at
 the target, and recursive deletion does not follow symlinks inside the tree.
@@ -52,16 +54,17 @@ Accessors, non-enumerable properties, and unknown keys throw `TypeError`;
 inherited properties are ignored. A Proxy can run traps during reflective
 validation. The runtime-local absolute path and, for binary writes, the
 input bytes are snapshotted before those traps run, so a trap that changes
-`neo:process.chdir()` or the input buffer cannot redirect that call. A trap
-may still reenter the API or run arbitrary script code.
+`neo:process.chdir()` or the input buffer cannot redirect that call. A text
+write also snapshots its text before resolving the path. A trap may still
+reenter the API or run arbitrary script code.
 
 `readDir` and `readDirSync` are not atomic snapshots, and recursive deletion
 can be partial if an OS error interrupts traversal. `exists`, `stat`, `statSync`, and
 `lstatSync` are
 time-of-check/time-of-use snapshots. Do not use them
 for access-control or race-free decisions. `writeFile`, `writeFileSync`,
-and `writeText` truncate before writing and are not atomic; a failure can
-leave a partial file. No write is durable on return, and concurrent writes
+`writeText`, and `writeTextSync` truncate before writing and are not atomic;
+a failure can leave a partial file. No write is durable on return, and concurrent writes
 have no ordering guarantee. A started asynchronous write may complete its
 side effects after a failed turn; cancellation does not roll back. No file
 locking is performed. The opened descriptor is verified
@@ -264,16 +267,55 @@ export function readText(path: string): string;
 
 ```ts
 /**
- * Write UTF-8 text, creating the file or truncating an existing one.
+ * Write UTF-8 text on a worker, creating the file or truncating an existing
+ * one, using the runtime directory captured at the call.
+ *
+ * **Breaking change:** this function was synchronous. Use
+ * `await writeText(path, data)` during managed module evaluation, or
+ * `writeTextSync(path, data)` in synchronous code. Outside a managed turn
+ * this throws `FS_ASYNC_OUTSIDE_TURN` before I/O. A non-string `data`
+ * rejects the Promise with `TypeError`.
+ *
+ * Text exceeding `MAX_WRITE_BYTES` in UTF-16 code units is rejected with
+ * `FS_LIMIT` before export. Otherwise any unpaired surrogate rejects with
+ * `FS_ENCODING`, even if the text also exceeds the UTF-8 byte limit.
+ * Well-formed text exceeding `MAX_WRITE_BYTES` in UTF-8 bytes then rejects
+ * with `FS_LIMIT`. The text snapshot is taken before the path is resolved.
  *
  * Parent directories are not created. A final symlink is followed, so a
- * dangling link can create its target. Writing is not atomic.
- * Text exceeding `MAX_WRITE_BYTES` in UTF-16 code units first throws
- * `FS_LIMIT`. Otherwise any unpaired surrogate throws `FS_ENCODING`,
- * even if the text also exceeds the UTF-8 byte limit. Well-formed text
- * exceeding `MAX_WRITE_BYTES` in UTF-8 bytes then throws `FS_LIMIT`.
+ * dangling link can create its target. Writing is not atomic. An I/O
+ * failure can leave the destination empty or partially written; there is
+ * no temporary file, rename, rollback, or cleanup. There is no durability
+ * guarantee. Concurrent writes have no ordering guarantee.
+ *
+ * A text write shares the four-operation outstanding bound and two-worker
+ * pool with the other asynchronous filesystem operations, and charges its
+ * UTF-8 byte length plus the encoded byte length of its resolved path
+ * against the same turn budget. Excess work rejects with `FS_LIMIT`. The
+ * owned UTF-8 snapshot can briefly coexist with the caller's string and the
+ * worker-owned buffer.
+ *
+ * If the turn fails, teardown requests cancellation, but an OS call that
+ * has already started cannot be interrupted. A started text write may
+ * therefore still create, truncate, or fully write the file after the turn
+ * has failed or its Promise has been abandoned; those side effects are not
+ * rolled back. There is no caller cancellation API. Turn teardown cancels
+ * cooperatively and may wait for an OS call to return.
  */
-export function writeText(path: string, data: string): void;
+export function writeText(path: string, data: string): Promise<void>;
+```
+
+## writeTextSync
+
+```ts
+/**
+ * Write UTF-8 text, blocking the JavaScript thread.
+ *
+ * The same text validation, error precedence, path, symlink, truncation,
+ * side-effect, and concurrency rules as `writeText` apply, except that
+ * failures throw instead of rejecting and the call returns `undefined`.
+ */
+export function writeTextSync(path: string, data: string): void;
 ```
 
 ## readFile

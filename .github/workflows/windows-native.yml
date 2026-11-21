@@ -7,8 +7,8 @@ name: Windows native
 # FS_ALREADY_EXISTS for the async recursive mkdir below an intermediate regular
 # file; non-recursive cases stayed within FS_NOT_FOUND/FS_NOT_DIRECTORY, and the
 # sync recursive case was computed but not logged. This workflow now also runs
-# the neojs-core filesystem suite (40 Windows-selected integration tests) and
-# one pure validation unit test (99 selected in total), including Windows-only
+# the neojs-core filesystem suite (41 Windows-selected integration tests) and
+# one pure validation unit test (100 selected in total), including Windows-only
 # metadata/directory, fail-closed reparse, and mkdir coverage; this revised
 # extension has not run on Windows yet. The mkdir diagnostic logs sanitized
 # missing-parent and intermediate-file codes before asserting them, with fixed

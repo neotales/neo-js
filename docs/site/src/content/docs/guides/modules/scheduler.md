@@ -34,8 +34,8 @@ const { service, timer } = systemdUnits({
 
 // Writing these strings is a separate decision:
 // import { writeText } from "neo:fs"; // requires --allow-fs
-// writeText("/etc/systemd/system/backup.service", service);
-// writeText("/etc/systemd/system/backup.timer", timer);
+// await writeText("/etc/systemd/system/backup.service", service);
+// await writeText("/etc/systemd/system/backup.timer", timer);
 ```
 
 The service is a `Type=oneshot` unit. The timer activates `<name>.service` and

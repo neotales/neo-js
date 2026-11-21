@@ -18,7 +18,7 @@ use super::{
     MAX_LIST_NAME_BYTES, MAX_LIST_TOTAL_BYTES, MAX_PATH_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES,
     WorkingDirectory, bounded_copy, checked_js_path, entries_json, file_info_at, file_info_value,
     mkdir_at, open_regular_source, read_bounded_until, read_dir_at_until, remove_at, resolve,
-    resolve_path, validate_entry_path, validate_path, worker, write_bytes_at,
+    resolve_path, snapshot_write_text, validate_entry_path, validate_path, worker, write_bytes_at,
 };
 
 /// Maximum outstanding filesystem operations, including undelivered
@@ -59,6 +59,8 @@ struct Job {
     read_dir_gate: Option<ReadDirGate>,
     #[cfg(test)]
     remove_gate: Option<RemoveGate>,
+    #[cfg(test)]
+    write_text_gate: Option<WriteTextGate>,
 }
 
 enum JobKind {
@@ -69,6 +71,10 @@ enum JobKind {
         path: PathBuf,
         data: Vec<u8>,
         overwrite: bool,
+    },
+    WriteText {
+        path: PathBuf,
+        data: Vec<u8>,
     },
     Stat {
         path: PathBuf,
@@ -122,6 +128,17 @@ fn execute(job: Job, cancellation: &worker::Cancellation) -> OperationResult {
             overwrite,
         } => {
             write_bytes_at(&path, &data, overwrite, MAX_WRITE_BYTES)?;
+            Ok(Output::Write)
+        }
+        JobKind::WriteText { path, data } => {
+            write_bytes_at(&path, &data, true, MAX_WRITE_BYTES)?;
+            // Test-only point after the text write effect. A turn failure
+            // here proves teardown joins a worker that has already created,
+            // truncated, or written the file, so nothing is rolled back.
+            #[cfg(test)]
+            if let Some(WriteTextGate(gate)) = job.write_text_gate {
+                gate(cancellation)?;
+            }
             Ok(Output::Write)
         }
         JobKind::Stat { path, follow } => file_info_at(&path, follow).map(Output::Stat),
@@ -300,6 +317,8 @@ pub(crate) struct FsDriver {
     read_dir_gates: Rc<RefCell<std::collections::VecDeque<ReadDirGate>>>,
     #[cfg(test)]
     remove_gates: Rc<RefCell<std::collections::VecDeque<RemoveGate>>>,
+    #[cfg(test)]
+    write_text_gates: Rc<RefCell<std::collections::VecDeque<WriteTextGate>>>,
 }
 
 impl FsDriver {
@@ -363,6 +382,24 @@ impl FsDriver {
                 path,
                 data,
                 overwrite,
+            })
+        })
+    }
+
+    fn submit_write_text<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        path: PathBuf,
+        data: String,
+        make_error: Function<'js>,
+    ) -> JsResult<Promise<'js>> {
+        let bytes = data.len() + path.as_os_str().as_encoded_bytes().len();
+        self.submit(ctx, bytes, SettlementKind::Write, make_error, move || {
+            // The snapshot already owns the bounded UTF-8 bytes, so admission
+            // failure drops it without reserving a second write-sized buffer.
+            Ok(JobKind::WriteText {
+                path,
+                data: data.into_bytes(),
             })
         })
     }
@@ -463,6 +500,12 @@ impl FsDriver {
         } else {
             None
         };
+        #[cfg(test)]
+        let write_text_gate = if matches!(kind, JobKind::WriteText { .. }) {
+            self.write_text_gates.borrow_mut().pop_front()
+        } else {
+            None
+        };
         admission.send(
             id,
             Job {
@@ -473,6 +516,8 @@ impl FsDriver {
                 read_dir_gate,
                 #[cfg(test)]
                 remove_gate,
+                #[cfg(test)]
+                write_text_gate,
             },
         );
         Ok(())
@@ -591,6 +636,33 @@ pub(super) fn install<'js>(
     native.set(
         "canAsync",
         Function::new(ctx.clone(), move || check.active.borrow().is_some())?,
+    )?;
+
+    let write_text_driver = driver.clone();
+    let write_text_cwd = Rc::clone(&cwd);
+    native.set(
+        "writeText",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  path: JsString<'js>,
+                  data: JsString<'js>,
+                  make_error: Function<'js>| {
+                // Snapshot and validate the text before resolving the path,
+                // preserving the synchronous form's error precedence. Both
+                // owned values are captured before dispatch.
+                let result = snapshot_write_text(&data, MAX_WRITE_BYTES).and_then(|data| {
+                    let path = snapshot_absolute_path(&write_text_cwd, path)?;
+                    Ok((path, data))
+                });
+                match result {
+                    Ok((path, data)) => {
+                        write_text_driver.submit_write_text(&ctx, path, data, make_error)
+                    }
+                    Err(error) => throw_argument(&ctx, error, make_error),
+                }
+            },
+        )?,
     )?;
 
     let read_driver = driver.clone();
@@ -730,6 +802,15 @@ struct RemoveGate(Box<RemoveGateFn>);
 
 #[cfg(test)]
 type RemoveGateFn = dyn FnOnce(&worker::Cancellation) -> Result<(), FsError> + Send;
+
+/// Test-only pause after `write_bytes_at` has returned for a text write, so
+/// the file effect is real before the gate blocks. Production builds have no
+/// such field or call.
+#[cfg(test)]
+struct WriteTextGate(Box<WriteTextGateFn>);
+
+#[cfg(test)]
+type WriteTextGateFn = dyn FnOnce(&worker::Cancellation) -> Result<(), FsError> + Send;
 
 #[cfg(test)]
 mod tests;

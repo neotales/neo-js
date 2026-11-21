@@ -12,7 +12,8 @@ functions and `FsError` class.
 | Function                              | Description                                                             |
 | ------------------------------------- | ----------------------------------------------------------------------- |
 | `readText(path)`                      | Read a regular file as UTF-8 text.                                      |
-| `writeText(path, data)`               | Write text, creating or truncating the file.                            |
+| `writeText(path, data)`               | Write text on a worker. Returns `Promise<void>`.                        |
+| `writeTextSync(path, data)`           | Write text, blocking the JavaScript thread.                             |
 | `readFile(path)`                      | Read a regular file on a worker. Returns `Promise<Uint8Array>`.         |
 | `readFileSync(path)`                  | Read a regular file as a `Uint8Array`, blocking the JavaScript thread.  |
 | `writeFile(path, data, options?)`     | Write a `Uint8Array` on a worker. Returns `Promise<void>`.              |
@@ -46,25 +47,35 @@ if (entries.some((entry) => entry.name === "README.md")) {
 
 Relative paths use the runtime's working directory, not the host process's
 mutable directory. `neo:process.chdir` changes only that runtime. If the
-runtime directory is unavailable, `readFile`, `writeFile`, `stat`, `lstat`,
-`readDir`, `mkdir`, and `remove` reject with `FS_CWD` during a managed turn,
-and synchronous operations such as `readFileSync`, `writeFileSync`, `statSync`,
-`readDirSync`, `mkdirSync`, and `removeSync` throw `FS_CWD`. None falls back to
+runtime directory is unavailable, `readFile`, `writeFile`, `writeText`, `stat`,
+`lstat`, `readDir`, `mkdir`, and `remove` reject with `FS_CWD` during a managed
+turn, and synchronous operations such as `readFileSync`, `writeFileSync`,
+`writeTextSync`, `statSync`, `readDirSync`, `mkdirSync`, and `removeSync` throw
+`FS_CWD`. None falls back to
 the host directory. Absolute paths and `..` components still reach everything
 the host user can reach; the working directory is coordination, not
 confinement.
 
 ## Migrate asynchronous operations
 
-`readFile`, `writeFile`, `stat`, `lstat`, `readDir`, `mkdir`, and `remove`
-return Promises on both `fs` and `neo:fs`. Rename an existing blocking call to
-its `Sync` counterpart, or await the asynchronous form in a module. `readText`,
-`writeText`, and the remaining filesystem methods are still synchronous.
+`readFile`, `writeFile`, `writeText`, `stat`, `lstat`, `readDir`, `mkdir`, and
+`remove` return Promises on both `fs` and `neo:fs`. Rename an existing blocking
+call to its `Sync` counterpart, or await the asynchronous form in a module.
+`readText` and the remaining filesystem methods are still synchronous.
 During managed module evaluation, invalid arguments and filesystem errors
 reject the Promise. The `Sync` forms still throw. Outside a managed turn, the
 asynchronous forms throw `FS_ASYNC_OUTSIDE_TURN` before any I/O. This includes
 calls from `NeoJs::eval`, `NeoJs::run`, and the CLI's automatic `neo:test`
 runner after the module returns.
+
+### Breaking change: writeText
+
+`writeText(path, data)` used to return `void` synchronously. It now runs on a
+worker and returns `Promise<void>`. In a managed module, write
+`await writeText(path, data)`; in synchronous code use
+`writeTextSync(path, data)`. Calling `writeText` outside a managed turn throws
+`FS_ASYNC_OUTSIDE_TURN` before any I/O. The text snapshot is taken before the
+path is resolved. A non-string `data` rejects the Promise with `TypeError`.
 
 ### Breaking change: readDir
 
@@ -91,10 +102,11 @@ worker and returns `Promise<void>`. In a managed module, write
 `FS_ASYNC_OUTSIDE_TURN` before any I/O.
 
 ```js
-import { mkdir, readDir, readFile, remove, stat, writeFile } from "neo:fs";
+import { mkdir, readDir, readFile, remove, stat, writeFile, writeText } from "neo:fs";
 
 const bytes = await readFile("input.bin");
 await writeFile("output.bin", bytes);
+await writeText("output.txt", "done");
 const info = await stat("output.bin");
 console.log(info.size);
 for (const entry of await readDir(".")) console.log(entry.name);
@@ -105,20 +117,22 @@ await remove("cache", { recursive: true });
 Each managed turn accepts at most four outstanding filesystem operations,
 including undelivered results. At most two run on workers. Each outstanding
 read charges `MAX_READ_BYTES` plus the encoded byte length of its resolved
-path; each write charges its copied byte length plus that path length; each
+path; each binary write charges its copied byte length plus that path length;
+each text write charges its UTF-8 byte length plus that path length; each
 metadata read charges a small result bound plus its resolved path length; a
 directory read charges a bounded listing result plus that path length; a
 directory creation or deletion charges its resolved path length. The shared
 budget is `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
 Exceeding the count or byte budget rejects the operation with `FS_LIMIT`.
 This accounts for outstanding worker work, not total memory use. A large
-asynchronous write can briefly hold the caller's input, the JavaScript
-snapshot, and the worker-owned copy. The budget does not cover buffers that
-JavaScript retains after delivery.
+asynchronous binary write can briefly hold the caller's input, the JavaScript
+snapshot, and the worker-owned copy. A large text write can briefly hold the
+caller's string, its UTF-16 export, and the owned UTF-8 snapshot. The budget
+does not cover buffers that JavaScript retains after delivery.
 
 The asynchronous forms capture the working directory at the call. A read
-Promise resolves to a new `Uint8Array`; a write Promise resolves to
-`undefined` after the file operation completes; a metadata Promise resolves
+Promise resolves to a new `Uint8Array`; a binary or text write Promise resolves
+to `undefined` after the file operation completes; a metadata Promise resolves
 to a `FileInfo` snapshot; a directory listing Promise resolves to a sorted
 `DirEntry[]`; a directory creation or deletion Promise resolves to
 `undefined`. Concurrent operations have no guaranteed completion order. There
@@ -129,8 +143,8 @@ A started listing checks cancellation between entries, before its explicit
 no-follow metadata fallback, and before sorting; it rejects with
 `FS_CANCELLED` rather than resolving a partial array. Pending operations
 reject with `FS_CANCELLED`. Teardown cannot interrupt an OS call that has
-already started: a write may still create, truncate, or fully write the file
-after a failed turn or abandoned Promise; a started `mkdir` may still create
+already started: a binary or text write may still create, truncate, or fully
+write the file after a failed turn or abandoned Promise; a started `mkdir` may still create
 some or all directories, including a partial recursive tree, and cancellation
 never removes a directory; a started `remove` may still delete some or all
 entries, including part of a recursive tree, and cancellation restores
@@ -141,7 +155,8 @@ runtime failure and quiescence rules.
 
 ## Files and sizes
 
-`readFile`, `readFileSync`, `readText`, `writeFile`, `writeFileSync`, and `writeText` require a regular file.
+`readFile`, `readFileSync`, `readText`, `writeFile`, `writeFileSync`,
+`writeText`, and `writeTextSync` require a regular file.
 An open may occur before a non-regular object is rejected. An identified
 directory reports `FS_IS_DIRECTORY`; other identified non-regular objects
 report `FS_TYPE`. If opening fails before the type can be identified, the
@@ -149,8 +164,8 @@ underlying open error determines the code. `stat`, `statSync`, `lstat`, and
 `lstatSync` inspect any path the operating system exposes. `readDir` and
 `readDirSync` require a directory.
 
-`writeFile`, `writeFileSync`, and `writeText` do not create parent
-directories. They verify the opened descriptor is a regular file before
+`writeFile`, `writeFileSync`, `writeText`, and `writeTextSync` do not create
+parent directories. They verify the opened descriptor is a regular file before
 truncating that same descriptor; by default an existing file is truncated
 before the new bytes are written. On Unix, opens use `O_NONBLOCK` to avoid
 waiting for a FIFO peer and `O_NOCTTY` to avoid acquiring a controlling
@@ -178,8 +193,8 @@ target size.
 The rules are explicit:
 
 - `stat`, `statSync`, `readFile`, `readFileSync`, `readText`, `writeFile`,
-  `writeFileSync`, `writeText`, `exists`, `readDir`, and `readDirSync` follow a
-  symlink at the final path component.
+  `writeFileSync`, `writeText`, `writeTextSync`, `exists`, `readDir`, and
+  `readDirSync` follow a symlink at the final path component.
 - `lstat` and `lstatSync` do not follow it and report `isSymlink: true`.
 - `readDir` and `readDirSync` follow a symlink to a directory but do not follow
   entries; an entry that is a link is reported with `isSymlink: true`.
@@ -341,21 +356,22 @@ that guarantee or make the result of an error uncertain.
 
 ## Limits
 
-| Constant               |   Value | Applies to                                              |
-| ---------------------- | ------: | ------------------------------------------------------- |
-| `MAX_PATH_BYTES`       |  32 KiB | Every path argument.                                    |
-| `MAX_READ_BYTES`       |  64 MiB | `readText`, `readFile`, `readFileSync`, and `copyFile`. |
-| `MAX_WRITE_BYTES`      |  64 MiB | `writeText`, `writeFile`, and `writeFileSync`.          |
-| `MAX_LIST_ENTRIES`     | 100,000 | Entries returned by `readDir` or `readDirSync`.         |
-| `MAX_LIST_NAME_BYTES`  |   1 KiB | One directory-entry name.                               |
-| `MAX_LIST_TOTAL_BYTES` |  16 MiB | Sum of all names a listing returns.                     |
+| Constant               |   Value | Applies to                                                      |
+| ---------------------- | ------: | --------------------------------------------------------------- |
+| `MAX_PATH_BYTES`       |  32 KiB | Every path argument.                                            |
+| `MAX_READ_BYTES`       |  64 MiB | `readText`, `readFile`, `readFileSync`, and `copyFile`.         |
+| `MAX_WRITE_BYTES`      |  64 MiB | `writeText`, `writeTextSync`, `writeFile`, and `writeFileSync`. |
+| `MAX_LIST_ENTRIES`     | 100,000 | Entries returned by `readDir` or `readDirSync`.                 |
+| `MAX_LIST_NAME_BYTES`  |   1 KiB | One directory-entry name.                                       |
+| `MAX_LIST_TOTAL_BYTES` |  16 MiB | Sum of all names a listing returns.                             |
 
 Reads inspect the opened descriptor and its metadata before allocating, then
 read in bounded chunks with fallible reservation. A separate one-byte probe
 detects growth past the limit. A binary write copies the `Uint8Array` view's
 current bytes (including for a resizable `ArrayBuffer`) before reflecting on
-options. The asynchronous form copies that snapshot into worker-owned memory
-before dispatching it. `SharedArrayBuffer` views are unsupported. `writeText` checks the
+options. The asynchronous binary form copies that snapshot into worker-owned
+memory before dispatching it. `SharedArrayBuffer` views are unsupported.
+`writeText` and `writeTextSync` check the
 primitive string's code-unit length before exporting it from QuickJS as UTF-16.
 The UTF-16 export itself can allocate up to 128 MiB of string data. If QuickJS
 flattens a narrow string rope, the flattened string can use another 64 MiB
@@ -418,14 +434,16 @@ performed.
 ## Migration from the original `neo:fs`
 
 The original module exported only `readText` and `writeText` and read or wrote
-without a bound. Both signatures are unchanged, and ordinary successful calls
-behave the same. The differences are deliberate:
+without a bound. Ordinary successful `readText` calls behave the same. The
+differences are deliberate:
 
 - `readText` now rejects a file above `MAX_READ_BYTES` with `FS_LIMIT` and
   checks that the opened descriptor is a regular file instead of attempting
   an unbounded read.
-- `writeText` now rejects text above `MAX_WRITE_BYTES` with `FS_LIMIT` and
-  checks that the opened descriptor is a regular file before truncating.
+- `writeText` now runs on a worker and returns `Promise<void>`; use
+  `writeTextSync` for the old blocking signature. Both reject text above
+  `MAX_WRITE_BYTES` with `FS_LIMIT` and check that the opened descriptor is a
+  regular file before truncating.
 - Failures are now `FsError` with a stable `code`; messages no longer include
   OS error text. Invalid UTF-8 text reads report `FS_ENCODING`.
 - The `fs` object and the `neo:fs` API object have a null prototype and own

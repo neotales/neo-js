@@ -806,7 +806,7 @@ fn fetch_callback_error_is_preserved_if_temporary_cleanup_cannot_finish() {
     let js = runtime(true, true);
     let script = format!(
         "import {{ download }} from 'neo:fetch';
-         import {{ readDirSync, writeText }} from 'neo:fs';
+         import {{ readDirSync, writeTextSync }} from 'neo:fs';
          import {{ posix, win32 }} from 'neo:path';
          const pathApi = {path_api};
          try {{
@@ -814,7 +814,7 @@ fn fetch_callback_error_is_preserved_if_temporary_cleanup_cannot_finish() {
                  overwrite: true,
                  progress() {{
                      const temp = readDirSync({dir}).find(entry => entry.name.startsWith('.neo-download-'));
-                     writeText(pathApi.join({dir}, temp.name, 'keep'), 'not owned by the download');
+                     writeTextSync(pathApi.join({dir}, temp.name, 'keep'), 'not owned by the download');
                      return Promise.resolve();
                  }},
              }});

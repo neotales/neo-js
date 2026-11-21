@@ -52,9 +52,9 @@ declare const env: {
 /**
  * The `neo:fs` API. Available only with `--allow-fs` and when the runtime's
  * module allowlist admits `neo:fs`. Relative paths use the runtime's working
- * directory, not the host process's. `readFile`, `writeFile`, `stat`, and
- * `lstat` are asynchronous; their `Sync` counterparts and every other
- * operation block.
+ * directory, not the host process's. `readFile`, `writeFile`, `writeText`,
+ * `stat`, `lstat`, `readDir`, `mkdir`, and `remove` are asynchronous; their
+ * `Sync` counterparts and every other operation block.
  *
  * This is not a sandbox: a script with this object has the host user's
  * filesystem authority. Reads and writes are bounded; see the `neo:fs`
@@ -62,8 +62,18 @@ declare const env: {
  */
 declare const fs: {
   readText(path: string): string;
-  /** Same text validation and error precedence as `neo:fs.writeText`. */
-  writeText(path: string, data: string): void;
+  /**
+   * Write text during managed module evaluation. Outside it, this throws
+   * `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. Invalid arguments and
+   * I/O errors reject the Promise. A started write can outlive a failed turn
+   * and may truncate or complete the file after cancellation; an I/O failure
+   * can leave partial data. There is no durability or concurrent-ordering
+   * guarantee. The same outstanding-operation and worker limits as `readFile`
+   * apply. See `neo:fs.writeText`.
+   */
+  writeText(path: string, data: string): Promise<void>;
+  /** Same text validation and error precedence as `neo:fs.writeTextSync`. */
+  writeTextSync(path: string, data: string): void;
   /**
    * Read bytes during managed module evaluation. Outside it, this throws
    * `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. At most four filesystem

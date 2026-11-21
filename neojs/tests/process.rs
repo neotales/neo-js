@@ -572,12 +572,12 @@ fn spawn_reports_output_limit_failure_and_recovers_capacity() {
         "flood.js",
         &["--allow-stdio", "--allow-fs"],
         "import {stdout} from 'neo:process';\n\
-         import {writeText} from 'neo:fs';\n\
+         import {writeTextSync} from 'neo:fs';\n\
          const chunk = new Uint8Array(1024 * 1024);\n\
          for (let i = 0; i < 9; i++) stdout.write(chunk);\n\
          const alive = Date.now() + 600;\n\
          while (Date.now() < alive) {{}}\n\
-         writeText('survived.txt', 'yes');\n",
+         writeTextSync('survived.txt', 'yes');\n",
     );
     let (plain, plain_args) = self_child(dir.path(), "child.js", &[], "console.log('ok');");
     let source = format!(
@@ -628,11 +628,11 @@ fn runtime_drop_kills_a_live_spawned_child() {
         dir.path(),
         "slow.js",
         &["--allow-fs"],
-        "import {writeText} from 'neo:fs';\n\
-         writeText('started.txt', 'yes');\n\
+        "import {writeTextSync} from 'neo:fs';\n\
+         writeTextSync('started.txt', 'yes');\n\
          const end = Date.now() + 2000;\n\
          while (Date.now() < end) {}\n\
-         writeText('alive.txt', 'yes');\n",
+         writeTextSync('alive.txt', 'yes');\n",
     );
     let source = format!(
         "import {{spawn}} from 'neo:exec';\n\
@@ -683,7 +683,7 @@ fn spawn_child_uses_the_runtime_directory() {
         dir.path(),
         "marker.js",
         &["--allow-fs"],
-        "import {writeText} from 'neo:fs';\nwriteText('marker.txt', 'yes');\n",
+        "import {writeTextSync} from 'neo:fs';\nwriteTextSync('marker.txt', 'yes');\n",
     );
     let source = format!(
         "import {{chdir}} from 'neo:process';\n\

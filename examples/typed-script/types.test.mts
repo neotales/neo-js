@@ -1,5 +1,5 @@
 import process, { ElevationError, isElevated, stdout } from "neo:process";
-import { readFile, readFileSync, writeFile, writeFileSync, stat, statSync, lstat, lstatSync, readDir, readDirSync, mkdir, mkdirSync, remove, removeSync } from "neo:fs";
+import { readFile, readFileSync, writeFile, writeFileSync, writeText, writeTextSync, stat, statSync, lstat, lstatSync, readDir, readDirSync, mkdir, mkdirSync, remove, removeSync } from "neo:fs";
 import type { DirEntry, FileInfo } from "neo:fs";
 
 const elevated: boolean = isElevated();
@@ -24,6 +24,10 @@ const pendingWrite: Promise<void> = writeFile("data.bin", new Uint8Array());
 const syncedWrite: void = writeFileSync("data.bin", new Uint8Array());
 const globalPendingWrite: Promise<void> = fs.writeFile("data.bin", new Uint8Array());
 const globalSyncedWrite: void = fs.writeFileSync("data.bin", new Uint8Array());
+const pendingText: Promise<void> = writeText("data.txt", "text");
+const syncedText: void = writeTextSync("data.txt", "text");
+const globalPendingText: Promise<void> = fs.writeText("data.txt", "text");
+const globalSyncedText: void = fs.writeTextSync("data.txt", "text");
 
 const pendingInfo: Promise<FileInfo> = stat("data.bin");
 const syncedInfo: FileInfo = statSync("data.bin");
@@ -68,3 +72,7 @@ const notBytes: Uint8Array = readFile("data.bin");
 const notSynchronous: void = writeFile("data.bin", new Uint8Array());
 // @ts-expect-error The unsuffixed global write no longer completes synchronously.
 const notGlobalSynchronous: void = fs.writeFile("data.bin", new Uint8Array());
+// @ts-expect-error The unsuffixed text write no longer completes synchronously.
+const notTextSynchronous: void = writeText("data.txt", "text");
+// @ts-expect-error The unsuffixed global text write no longer completes synchronously.
+const notGlobalTextSynchronous: void = fs.writeText("data.txt", "text");

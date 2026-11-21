@@ -137,6 +137,15 @@ fn permission_and_allowlist_gate_the_global_and_the_module() {
          if (typeof fs.readFile !== 'function') throw Error('missing global readFile');
          if (typeof fs.readFileSync !== 'function') throw Error('missing global readFileSync');
          if (typeof fs.readText !== 'function') throw Error('missing global readText');
+         if (typeof fs.writeText !== 'function' || typeof module.writeText !== 'function') {
+           throw Error('missing async writeText');
+         }
+         if (typeof fs.writeTextSync !== 'function' || typeof module.writeTextSync !== 'function') {
+           throw Error('missing sync writeText');
+         }
+         if (module.writeText !== fs.writeText || module.writeTextSync !== fs.writeTextSync) {
+           throw Error('writeText module and global differ');
+         }
          if (typeof module.writeFile !== 'function') throw Error('missing module writeFile');
          if (typeof fs.writeFileSync !== 'function') throw Error('missing global writeFileSync');
          if (typeof module.writeFileSync !== 'function') throw Error('missing module writeFileSync');
@@ -296,6 +305,74 @@ fn binary_write_is_asynchronous_and_sync_write_still_throws() {
         file = literal(&file),
     ))
     .unwrap();
+}
+
+#[test]
+fn text_write_is_asynchronous_and_sync_write_still_throws() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = literal(&dir.path().join("missing-parent").join("file.txt"));
+    let file = dir.path().join("fixture.txt");
+    let rejected = dir.path().join("rejected.txt");
+    fs::write(&file, b"old").unwrap();
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{readText, writeText, writeTextSync, FsError, MAX_WRITE_BYTES}} from 'neo:fs';
+            const missing = {missing};
+            const file = {file};
+            const rejected = {rejected};
+
+            const pending = writeText(file, 'hello');
+            if (!(pending instanceof Promise)) throw Error('expected a native Promise');
+            if ((await pending) !== undefined) throw Error('text write should resolve undefined');
+            if (readText(file) !== 'hello') throw Error('async text write did not land');
+
+            try {{ await writeText(missing, 'x'); throw Error('expected rejection'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
+                if (error.message.includes(missing)) throw Error('path leaked');
+            }}
+            try {{ writeTextSync(missing, 'x'); throw Error('expected throw'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
+                if (error.message.includes(missing)) throw Error('path leaked');
+            }}
+
+            try {{ await writeText(rejected, 'bad\uD800'); throw Error('expected encoding rejection'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_ENCODING') throw error;
+            }}
+            try {{ await writeText(rejected, 'a'.repeat(MAX_WRITE_BYTES + 1)); throw Error('expected limit rejection'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_LIMIT') throw error;
+            }}
+            try {{ await writeText(rejected + '\0tail', '\uD800'); throw Error('expected encoding rejection'); }}
+            catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_ENCODING') throw error;
+            }}
+            if (fs.exists(rejected)) throw Error('rejected text write created a file');
+
+            try {{ await writeText(file, 42); throw Error('expected type rejection'); }}
+            catch (error) {{ if (!(error instanceof TypeError)) throw error; }}
+
+            writeTextSync(file, 'sync');
+            if (readText(file) !== 'sync') throw Error('sync text write did not land');"#,
+            missing = missing,
+            file = literal(&file),
+            rejected = literal(&rejected),
+        ),
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), "sync");
+    assert!(!rejected.exists());
+    js.run(&format!(
+        "try {{ fs.writeText({file}, 'outside'); throw Error('dispatched outside managed turn'); }}
+         catch (error) {{ if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }}
+         fs.writeTextSync({file}, 'outside');",
+        file = literal(&file),
+    ))
+    .unwrap();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "outside");
 }
 
 #[test]
@@ -1553,7 +1630,7 @@ fn text_and_binary_round_trip_with_unicode_names_and_content() {
         const textPath = __TEXT__;
         const binaryPath = __BINARY__;
         const text = '\uFEFFline 1\r\nhéllo 世界 😀\u0000tail';
-        writeText(textPath, text);
+        await writeText(textPath, text);
         if (readText(textPath) !== text) throw Error('readText text');
         if (fs.readText(textPath) !== text) throw Error('global readText text');
 
@@ -1595,7 +1672,7 @@ fn writing_empty_text_truncates_an_existing_file_to_zero_bytes() {
     let source = r#"
         import {readText, writeText} from 'neo:fs';
         const path = __PATH__;
-        writeText(path, '');
+        await writeText(path, '');
         if (readText(path) !== '') throw Error('empty text did not overwrite file');
     "#
     .replace("__PATH__", &literal(&path));
@@ -1613,7 +1690,7 @@ fn stable_errors_never_include_the_supplied_path() {
     let js = chunked_runtime();
     let source = r#"
         import {chdir} from 'neo:process';
-        import {readText, readFileSync, writeText, writeFile, writeFileSync, statSync, exists, readDirSync, mkdirSync, removeSync, FsError} from 'neo:fs';
+        import {readText, readFileSync, writeTextSync, writeFile, writeFileSync, statSync, exists, readDirSync, mkdirSync, removeSync, FsError} from 'neo:fs';
         chdir(__DIR__);
 
         function expectFsError(code, action) {
@@ -1651,7 +1728,7 @@ fn stable_errors_never_include_the_supplied_path() {
         expectFsError('FS_PATH', () => removeSync(''));
         expectFsError('FS_LIMIT', () => readText('x'.repeat(fs.MAX_PATH_BYTES + 1)));
         expectFsError('FS_ENCODING', () => readText('bad\uD800'));
-        expectFsError('FS_ENCODING', () => writeText(missing, 'bad\uD800'));
+        expectFsError('FS_ENCODING', () => writeTextSync(missing, 'bad\uD800'));
 
         expectTypeError(() => readText(123));
         expectTypeError(() => readFileSync(null));
@@ -1782,7 +1859,7 @@ fn overwrite_no_clobber_mkdir_and_remove_are_explicit() {
 
     let js = runtime();
     let source = r#"
-        import {readText, writeText, writeFileSync, mkdirSync, removeSync, exists, FsError} from 'neo:fs';
+        import {readText, writeTextSync, writeFileSync, mkdirSync, removeSync, exists, FsError} from 'neo:fs';
         __ERROR_HELPERS__
         function expectFsError(code, action) {
             try { action(); }
@@ -1801,14 +1878,14 @@ fn overwrite_no_clobber_mkdir_and_remove_are_explicit() {
         const dir = __DIR__;
         const missing = __MISSING__;
 
-        writeText(file, 'first');
+        writeTextSync(file, 'first');
         expectFsError('FS_ALREADY_EXISTS', () => writeFileSync(file, new Uint8Array([50]), {overwrite: false}));
         if (readText(file) !== 'first') throw Error('no-clobber changed the file');
 
         writeFileSync(file, new Uint8Array([0x73]));
         if (readText(file) !== 's') throw Error('default overwrite failed');
-        writeText(file, 'third');
-        if (readText(file) !== 'third') throw Error('writeText overwrite failed');
+        writeTextSync(file, 'third');
+        if (readText(file) !== 'third') throw Error('writeTextSync overwrite failed');
 
         writeFileSync(fresh, new Uint8Array([0x78]), {overwrite: false});
         if (readText(fresh) !== 'x') throw Error('create-new failed');
@@ -1829,7 +1906,7 @@ fn overwrite_no_clobber_mkdir_and_remove_are_explicit() {
 
         expectSyncSuccess('overwrite test: sync mkdir creates a tree root',
             () => mkdirSync(tree));
-        writeText(tree + '/inside.txt', 'inside');
+        writeTextSync(tree + '/inside.txt', 'inside');
         expectFsError('FS_NOT_EMPTY', () => removeSync(tree));
         removeSync(tree, {recursive: true});
         if (exists(tree)) throw Error('recursive remove failed');
@@ -2196,7 +2273,7 @@ fn relative_paths_use_each_runtime_working_directory() {
         import {chdir} from 'neo:process';
         import {readText, writeText} from 'neo:fs';
         chdir(__DIR__);
-        writeText('same.txt', 'first');
+        await writeText('same.txt', 'first');
         if (readText('same.txt') !== 'first') throw Error('relative read');
     "#
     .replace("__DIR__", &literal(first.path()));
@@ -2208,7 +2285,7 @@ fn relative_paths_use_each_runtime_working_directory() {
         import {readText, writeText} from 'neo:fs';
         chdir(__DIR__);
         if (fs.exists('same.txt') !== false) throw Error('second runtime saw the first cwd');
-        writeText('same.txt', 'second');
+        await writeText('same.txt', 'second');
         if (readText('same.txt') !== 'second') throw Error('relative read');
     "#
     .replace("__DIR__", &literal(second.path()));
@@ -2719,7 +2796,7 @@ fn utf8_limits_are_checked_in_bytes_before_native_string_conversion() {
     let js = chunked_runtime();
     let source = r#"
         import {chdir} from 'neo:process';
-        import {writeText, readText, statSync, exists, FsError} from 'neo:fs';
+        import {writeTextSync, readText, statSync, exists, FsError} from 'neo:fs';
         chdir(__DIR__);
         function expectFsError(code, action) {
             try { action(); }
@@ -2736,12 +2813,12 @@ fn utf8_limits_are_checked_in_bytes_before_native_string_conversion() {
         const size = fs.MAX_WRITE_BYTES;
 
         const atLimit = 'a'.repeat(size - 4) + '😀';
-        writeText(exact, atLimit);
+        writeTextSync(exact, atLimit);
         if (statSync(exact).size !== String(size)) throw Error('exact UTF-8 byte boundary');
         if (readText(exact) !== atLimit) throw Error('exact boundary roundtrip');
 
         const aboveLimit = 'a'.repeat(size - 3) + '😀';
-        expectFsError('FS_LIMIT', () => writeText(tooLarge, aboveLimit));
+        expectFsError('FS_LIMIT', () => writeTextSync(tooLarge, aboveLimit));
         if (exists(tooLarge)) throw Error('max+1 UTF-8 text created a file');
         expectFsError('FS_ENCODING', () => readText(invalid));
 
@@ -2763,11 +2840,11 @@ fn write_text_validates_content_before_resolving_or_opening_path() {
     let output = dir.path().join("write-text-rejected.txt");
     let js = runtime();
     let source = r#"
-        import {writeText, exists, FsError, MAX_WRITE_BYTES} from 'neo:fs';
+        import {writeTextSync, exists, FsError, MAX_WRITE_BYTES} from 'neo:fs';
         const output = __OUTPUT__;
         const secret = 'private-text-marker';
         function expectFsError(code, path, text) {
-            try { writeText(path, text); }
+            try { writeTextSync(path, text); }
             catch (error) {
                 if (!(error instanceof FsError) || error.code !== code) {
                     throw Error('wrong error: expected ' + code + ', got ' + error.code);
@@ -2799,7 +2876,7 @@ fn write_text_validates_content_before_resolving_or_opening_path() {
             getPrototypeOf() { hooks++; },
         });
         for (const value of [boxed, proxy]) {
-            try { writeText(output, value); }
+            try { writeTextSync(output, value); }
             catch (error) {
                 if (!(error instanceof TypeError)) throw error;
                 continue;
@@ -3258,7 +3335,7 @@ fn windows_basic_round_trip_is_gated_and_unverified() {
     let js = runtime();
     let source = r#"
         import {writeText, readText, statSync, FsError} from 'neo:fs';
-        writeText(__FILE__, 'windows');
+        await writeText(__FILE__, 'windows');
         if (readText(__FILE__) !== 'windows') throw Error('round trip');
         if (statSync(__FILE__).isFile !== true) throw Error('stat');
     "#

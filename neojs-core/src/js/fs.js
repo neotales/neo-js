@@ -165,10 +165,24 @@
     }
 
     function writeText(path, data) {
+      // Outside a managed turn there is no owner to deliver a rejection.
+      if (!native.canAsync()) throw makeError('FS_ASYNC_OUTSIDE_TURN');
+      try {
+        const checkedPath = requirePath(path, makeError);
+        requireString(data, 'data');
+        // Native code validates and snapshots text before resolving the path,
+        // then moves the UTF-8 result into worker-owned memory.
+        return native.writeText(checkedPath, data, makeError);
+      } catch (error) {
+        return rejectPromise(error);
+      }
+    }
+
+    function writeTextSync(path, data) {
       requirePath(path);
       requireString(data, 'data');
       // Native code validates and snapshots text before resolving the path.
-      unwrap(native.writeText(path, data));
+      unwrap(native.writeTextSync(path, data));
     }
 
     function readFileSync(path) {
@@ -383,6 +397,7 @@
     const api = createObject(null);
     defineValue(api, 'readText', readText);
     defineValue(api, 'writeText', writeText);
+    defineValue(api, 'writeTextSync', writeTextSync);
     defineValue(api, 'readFile', readFile);
     defineValue(api, 'readFileSync', readFileSync);
     defineValue(api, 'writeFile', writeFile);
