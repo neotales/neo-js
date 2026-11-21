@@ -8,7 +8,7 @@ is `.github/workflows/windows-native.yml`; the script it calls is
 Windows machine without GitHub Actions.
 
 > **Status: the 58-test targeted gate passed; the filesystem extension is
-> unverified.** Run
+> unverified and has no passing `mkdir` test.** Run
 > [44845110559](https://github.com/neotales/neo-js/actions/runs/44845110559) at
 > `51f3994` passed the targeted gate: the two registry suites (`8` and `9`
 > tests), `neojs-core --test process` (`9`), `neojs --test process` (`19`),
@@ -25,11 +25,29 @@ Windows machine without GitHub Actions.
 > `51f3994` corrected. Reaching a hosted runner does not establish organization
 > eligibility or billing beyond the runs recorded here.
 >
-> This branch adds the `neojs-core --test fs` suite to the targeted gate: `35`
-> Windows-selected integration tests, plus one filtered pure validation unit
-> test (`94` selected in total). That extension has not been dispatched, so it
-> is not evidence that the filesystem path passes on Windows. The previous
-> 58-test result remains the only native Windows evidence.
+> Run [44936430027](https://github.com/neotales/neo-js/actions/runs/44936430027)
+> at `2703526` reached a hosted Windows runner and failed in
+> `neojs-core --test fs`, in
+> `directory_creation_is_asynchronous_and_sync_forms_still_throw`, with an
+> escaped `Error: filesystem path does not exist` (`FS_NOT_FOUND`). The failure
+> output did not name the assertion. The old shared test required
+> `FS_NOT_DIRECTORY` only for the case where a regular file is an intermediate
+> component, which the module docs scope to Unix; the escaped code is consistent
+> with that case but this is not confirmed. **No `mkdir` test has passed on
+> native Windows.**
+>
+> This branch removes the Unix-only expectation from the shared test, labels
+> every `mkdir` case, and adds a Windows-only diagnostic for a missing parent
+> and an intermediate regular file (sync, async, and recursive). On a passing
+> run it records the validated missing-parent codes and the sanitized
+> intermediate-file codes with fixed labels and no path. The intermediate-file
+> result is restricted to `FS_NOT_FOUND` or `FS_NOT_DIRECTORY`; the test does
+> not claim which one Windows selects until a native run observes it. The
+> filesystem suite is now `38` Windows-selected integration tests,
+> plus one filtered pure validation unit test (`97` selected in total). This
+> revised suite has not been dispatched, so it is not evidence that the
+> filesystem path passes on Windows. The previous 58-test result remains the
+> only passing native Windows evidence.
 
 ## Runner environment
 
@@ -39,8 +57,8 @@ self-hosted or Linux runner label.
 
 The only trigger is `workflow_dispatch`. A `pull_request` trigger is
 deliberately not active yet: one manual dispatch has passed the 58-test gate,
-but this branch's filesystem extension has not run, so a PR trigger would queue
-the extended gate on every pull request before it has. Enable it after the
+but this branch's filesystem extension has not passed, so a PR trigger would
+queue the extended gate on every pull request before it has. Enable it after the
 extended gate has one successful manual dispatch, in a reviewed change.
 
 Public repositories are normally eligible for GitHub-hosted standard runners,
@@ -109,7 +127,7 @@ It then runs, in order. Every command includes the explicit target:
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test winregistry -- --test-threads=1`              | 8             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test winregistry_windows -- --test-threads=1`      | 9             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test process`                                      | 9             |
-| `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test fs`                                           | 35            |
+| `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test fs`                                           | 38            |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --lib -- fs::tests::windows_copy_paths_are_rejected_before_io --exact` | 1 selected    |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs --test process`                                           | 19            |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs --test process_stdio`                                     | 6             |
@@ -124,21 +142,32 @@ fails the gate.
 The counts are source-level counts after applying `cfg` gates; they are not a
 claim that those tests passed. `neojs/tests/process.rs` contains 22 tests, of
 which three are `#[cfg(unix)]`, so 19 run on Windows. `neojs-core/tests/fs.rs`
-contains 45 tests; ten are `#[cfg(unix)]`, so 35 are selected on Windows. The
-35 include two Windows-only integration tests added on this branch: one uses
-only owned `tempfile` fixtures to check `stat`, `lstat`, `readDir`, and their
-sync forms for regular files and directories; the other creates a final file
-symlink (a reparse point), verifies that `stat` follows it while `lstat` and
-`readDir` report the entry as a link, and fails closed if the process lacks
-`SeCreateSymbolicLinkPrivilege` or Developer Mode. The previous Windows-only
-integration test that passed root, namespace, UNC, device, and stream names to
-`copyFile` was removed; those cases now run in a pure validation unit test
+contains 50 tests; 12 are `#[cfg(unix)]`, so 38 are selected on Windows. The
+38 include four Windows-only integration tests: one uses only owned
+`tempfile` fixtures to check `stat`, `lstat`, `readDir`, and their sync forms
+for regular files and directories; one creates a final file symlink (a reparse
+point), verifies that `stat` follows it while `lstat` and `readDir` report the
+entry as a link, and fails closed if the process lacks
+`SeCreateSymbolicLinkPrivilege` or Developer Mode; one covers `mkdir` with a
+missing parent and with an intermediate regular file in sync, async, and
+recursive forms and logs the observed missing-parent and intermediate-file
+codes with fixed labels; the intermediate-file result is restricted to
+`FS_NOT_FOUND` or `FS_NOT_DIRECTORY` until a native run observes it; and one is
+a gated basic round trip. The previous Windows-only integration test that passed
+root, namespace, UNC, device, and stream names to `copyFile` was removed; those
+cases now run in a pure validation unit test
 (`fs::tests::windows_copy_paths_are_rejected_before_io`) selected with
 `--lib -- ... --exact`. It calls `validate_entry_path` and
 `validate_copy_disk_path` directly and performs no I/O. No junction is created
 and no privileged directory link or host path outside the temp directory is
-touched. The targeted suites total 94 Windows-selected tests when this branch's
+touched. The targeted suites total 97 Windows-selected tests when this branch's
 filesystem suite and validation unit test are included.
+
+The filesystem suite invocation does not add `--nocapture`. The Windows `mkdir`
+diagnostic writes its sanitized fixed-label codes directly to the process
+stderr, so they are visible even when libtest captures ordinary test output; no
+path or arbitrary error property is written, and the guard's exact `--test fs`
+argument shape is unchanged.
 
 The full workspace suite is opt-in:
 
@@ -149,10 +178,10 @@ pwsh -File eng/ci/windows-native.ps1 -FullWorkspace
 It is also available from the workflow's `workflow_dispatch` input
 `full_workspace_tests`. It is off by default because the full workspace suite
 has never run on Windows; only the 58-test targeted set has passed, and this
-branch's filesystem extension has not run. The first full run is expected to
-expose further failures, and turning that on for every pull request would
-conflate "the native build works" with "every unverified Windows behavior is
-correct".
+branch's filesystem extension has not passed (run `44936430027` failed before
+any `mkdir` test passed). The first full run is expected to expose further
+failures, and turning that on for every pull request would conflate "the native
+build works" with "every unverified Windows behavior is correct".
 
 Compiling the workspace compiles the native MSVC dependencies, including the
 bundled QuickJS C sources used by `rquickjs`, the bundled SQLite C sources used

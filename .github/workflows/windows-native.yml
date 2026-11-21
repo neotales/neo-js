@@ -1,12 +1,18 @@
 name: Windows native
 
 # Hosted Windows run 44845110559 at 51f3994 passed the targeted 58-test gate.
-# This workflow now also runs the neojs-core filesystem suite (35
-# Windows-selected integration tests) and one pure validation unit test,
-# including Windows-only metadata/directory and fail-closed reparse coverage;
-# that extension has not run on Windows yet. Reaching a hosted runner does not
-# establish organization eligibility or billing; see eng/ci/README.md for the
-# run results and the unverified extension.
+# Run 44936430027 at 2703526 failed in the neojs-core filesystem suite before
+# any mkdir test passed on Windows; the escaped error was FS_NOT_FOUND
+# ("filesystem path does not exist"). This workflow now also runs the
+# neojs-core filesystem suite (38 Windows-selected integration tests) and one
+# pure validation unit test (97 selected in total), including Windows-only
+# metadata/directory, fail-closed reparse, and mkdir coverage; that revised
+# extension has not run on Windows yet. The mkdir diagnostic logs sanitized
+# observed missing-parent and intermediate-file codes with fixed labels and no
+# path; the intermediate-file result is restricted to FS_NOT_FOUND or
+# FS_NOT_DIRECTORY until a native run observes it. Reaching a hosted runner does
+# not establish organization eligibility or billing; see eng/ci/README.md for
+# the run results and the unverified extension.
 
 on:
   workflow_dispatch:
@@ -17,7 +23,7 @@ on:
         type: boolean
         default: false
   # pull_request: deliberately not enabled yet. A PR trigger would queue the
-  # extended gate on every pull request before the filesystem suite has run on
+  # extended gate on every pull request before the filesystem suite passes on
   # Windows. Enable it only after that suite passes once; see eng/ci/README.md.
 
 permissions:

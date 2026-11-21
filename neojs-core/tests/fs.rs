@@ -35,6 +35,79 @@ fn run(js: &NeoJs, source: &str) {
     js.run_module("main.js", source).unwrap();
 }
 
+/// Fixed-label JavaScript helpers shared by the directory-creation tests.
+///
+/// Failure and diagnostic text never interpolates `error.code`, `error.name`,
+/// `error.message`, or a supplied path. A known `FsError` code maps to the same
+/// fixed literal; any other code, unreadable property, or non-`FsError` maps to
+/// a fixed placeholder. Property reads are guarded so a hostile getter cannot
+/// throw into the assertion or leak its value.
+const FS_TEST_ERROR_HELPERS: &str = r#"
+function fsErrorCode(error) {
+    try {
+        if (!(error instanceof FsError)) return null;
+        let code;
+        try { code = error.code; } catch { return 'FS_UNREADABLE'; }
+        switch (code) {
+            case 'FS_PATH': return 'FS_PATH';
+            case 'FS_NOT_FOUND': return 'FS_NOT_FOUND';
+            case 'FS_NOT_DIRECTORY': return 'FS_NOT_DIRECTORY';
+            case 'FS_IS_DIRECTORY': return 'FS_IS_DIRECTORY';
+            case 'FS_ALREADY_EXISTS': return 'FS_ALREADY_EXISTS';
+            case 'FS_NOT_EMPTY': return 'FS_NOT_EMPTY';
+            case 'FS_CROSS_DEVICE': return 'FS_CROSS_DEVICE';
+            case 'FS_DENIED': return 'FS_DENIED';
+            case 'FS_LIMIT': return 'FS_LIMIT';
+            case 'FS_ENCODING': return 'FS_ENCODING';
+            case 'FS_DETACHED': return 'FS_DETACHED';
+            case 'FS_OUT_OF_BOUNDS': return 'FS_OUT_OF_BOUNDS';
+            case 'FS_CWD': return 'FS_CWD';
+            case 'FS_TYPE': return 'FS_TYPE';
+            case 'FS_IO': return 'FS_IO';
+            case 'FS_UNSUPPORTED': return 'FS_UNSUPPORTED';
+            case 'FS_ASYNC_OUTSIDE_TURN': return 'FS_ASYNC_OUTSIDE_TURN';
+            case 'FS_CANCELLED': return 'FS_CANCELLED';
+            default: return 'FS_UNRECOGNIZED';
+        }
+    } catch {
+        return 'FS_UNCLASSIFIABLE';
+    }
+}
+function describeError(error) {
+    const code = fsErrorCode(error);
+    if (code !== null) return code;
+    try {
+        if (error instanceof TypeError) return 'TypeError';
+        if (error instanceof Error) return 'Error';
+    } catch {
+        return 'UNCLASSIFIABLE';
+    }
+    return 'NON_ERROR';
+}
+function leaksPath(error, path) {
+    try {
+        const message = error && error.message;
+        return typeof message === 'string' ? message.includes(path) : true;
+    } catch {
+        return true;
+    }
+}
+async function expectAsyncSuccess(label, action) {
+    try {
+        return await action();
+    } catch (error) {
+        throw Error(label + ': unexpected error ' + describeError(error));
+    }
+}
+function expectSyncSuccess(label, action) {
+    try {
+        return action();
+    } catch (error) {
+        throw Error(label + ': unexpected error ' + describeError(error));
+    }
+}
+"#;
+
 #[test]
 fn permission_and_allowlist_gate_the_global_and_the_module() {
     let denied = NeoJs::new(Permissions::default()).unwrap();
@@ -569,90 +642,136 @@ fn directory_creation_is_asynchronous_and_sync_forms_still_throw() {
     let nested = dir.path().join("one/two/three");
     let sync_dir = dir.path().join("sync");
     let missing_parent = dir.path().join("missing/child");
-    let below_file = file.join("child");
     let js = runtime();
     run(
         &js,
         &format!(
             r#"import {{mkdir, mkdirSync, exists, FsError, MAX_PATH_BYTES}} from 'neo:fs';
+            {error_helpers}
             const asyncDir = {async_dir};
             const nested = {nested};
             const syncDir = {sync_dir};
             const existing = {existing};
             const missingParent = {missing_parent};
-            const belowFile = {below_file};
             const file = {file};
 
-            const pending = mkdir(asyncDir);
+            // Every assertion names its own case in the thrown message. The
+            // message uses only a fixed label and a sanitized code literal,
+            // never a supplied path or an arbitrary error property.
+            async function expectAsyncCode(label, code, action) {{
+                try {{ await action(); }}
+                catch (error) {{
+                    if (fsErrorCode(error) === code) return error;
+                    throw Error(label + ': expected ' + code + ', got ' + describeError(error));
+                }}
+                throw Error(label + ': expected ' + code + ' but the call succeeded');
+            }}
+            function expectSyncCode(label, code, action) {{
+                try {{ action(); }}
+                catch (error) {{
+                    if (fsErrorCode(error) === code) return error;
+                    throw Error(label + ': expected ' + code + ', got ' + describeError(error));
+                }}
+                throw Error(label + ': expected ' + code + ' but the call succeeded');
+            }}
+            async function expectAsyncType(label, action) {{
+                try {{ await action(); }}
+                catch (error) {{
+                    let isTypeError = false;
+                    try {{ isTypeError = error instanceof TypeError; }} catch {{}}
+                    if (isTypeError) return error;
+                    throw Error(label + ': expected TypeError, got ' + describeError(error));
+                }}
+                throw Error(label + ': expected TypeError but the call succeeded');
+            }}
+            function expectSyncType(label, action) {{
+                try {{ action(); }}
+                catch (error) {{
+                    let isTypeError = false;
+                    try {{ isTypeError = error instanceof TypeError; }} catch {{}}
+                    if (isTypeError) return error;
+                    throw Error(label + ': expected TypeError, got ' + describeError(error));
+                }}
+                throw Error(label + ': expected TypeError but the call succeeded');
+            }}
+
+            // Sanitizer self-check: known codes stay fixed literals; unknown
+            // and unreadable code properties become fixed placeholders, so a
+            // hostile value can never reach an assertion message.
+            if (fsErrorCode(new FsError('FS_DENIED')) !== 'FS_DENIED') {{
+                throw Error('sanitizer did not preserve a known code');
+            }}
+            if (fsErrorCode(new FsError('not-a-known-code')) !== 'FS_UNRECOGNIZED') {{
+                throw Error('sanitizer did not replace an unknown code');
+            }}
+            const unreadableCode = new FsError('FS_IO');
+            Object.defineProperty(unreadableCode, 'code', {{
+                configurable: true,
+                get() {{ throw Error('hostile getter'); }},
+            }});
+            if (fsErrorCode(unreadableCode) !== 'FS_UNREADABLE') {{
+                throw Error('sanitizer did not replace an unreadable code');
+            }}
+
+            const pending = expectSyncSuccess(
+                'async mkdir create call', () => mkdir(asyncDir));
             if (!(pending instanceof Promise)) throw Error('mkdir did not return a Promise');
-            if ((await pending) !== undefined) throw Error('mkdir resolved with a value');
+            if ((await expectAsyncSuccess(
+                'async mkdir create promise', () => pending)) !== undefined) {{
+                throw Error('mkdir resolved with a value');
+            }}
             if (!exists(asyncDir)) throw Error('async mkdir did not create the directory');
 
-            await mkdir(nested, {{recursive: true}});
+            await expectAsyncSuccess(
+                'recursive async mkdir creates parents', () => mkdir(nested, {{recursive: true}}));
             if (!exists(nested)) throw Error('recursive async mkdir did not create parents');
-            mkdirSync(syncDir);
+            expectSyncSuccess('sync mkdir creates a directory', () => mkdirSync(syncDir));
             if (!exists(syncDir)) throw Error('sync mkdir did not create the directory');
-            mkdirSync(nested, {{recursive: true}});
+            expectSyncSuccess('recursive sync mkdir accepts an existing directory',
+                () => mkdirSync(nested, {{recursive: true}}));
 
-            try {{ await mkdir(missingParent); throw Error('async mkdir created without a parent'); }}
-            catch (error) {{
-                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
-                if (error.message.includes(missingParent)) throw Error('mkdir leaked the path');
+            const asyncMissing = await expectAsyncCode(
+                'async mkdir missing parent', 'FS_NOT_FOUND', () => mkdir(missingParent));
+            if (leaksPath(asyncMissing, missingParent)) {{
+                throw Error('async mkdir missing parent leaked the path');
             }}
-            try {{ await mkdir(existing); throw Error('async mkdir accepted an existing path'); }}
-            catch (error) {{
-                if (!(error instanceof FsError) || error.code !== 'FS_ALREADY_EXISTS') throw error;
-            }}
-            await mkdir(existing, {{recursive: true}});
-            try {{ await mkdir(belowFile); throw Error('async mkdir accepted a file parent'); }}
-            catch (error) {{
-                if (!(error instanceof FsError) || error.code !== 'FS_NOT_DIRECTORY') throw error;
-            }}
-            try {{ mkdirSync(missingParent); throw Error('sync mkdir created without a parent'); }}
-            catch (error) {{
-                if (!(error instanceof FsError) || error.code !== 'FS_NOT_FOUND') throw error;
-            }}
-            try {{ mkdirSync(existing); throw Error('sync mkdir accepted an existing path'); }}
-            catch (error) {{
-                if (!(error instanceof FsError) || error.code !== 'FS_ALREADY_EXISTS') throw error;
-            }}
-            try {{ mkdirSync(belowFile); throw Error('sync mkdir accepted a file parent'); }}
-            catch (error) {{
-                if (!(error instanceof FsError) || error.code !== 'FS_NOT_DIRECTORY') throw error;
-            }}
+            await expectAsyncCode('async mkdir existing path', 'FS_ALREADY_EXISTS',
+                () => mkdir(existing));
+            await expectAsyncSuccess('async recursive mkdir accepts an existing directory',
+                () => mkdir(existing, {{recursive: true}}));
+            expectSyncCode('sync mkdir missing parent', 'FS_NOT_FOUND',
+                () => mkdirSync(missingParent));
+            expectSyncCode('sync mkdir existing path', 'FS_ALREADY_EXISTS',
+                () => mkdirSync(existing));
 
-            for (const [action, code] of [
-                [() => mkdir(''), 'FS_PATH'],
-                [() => mkdir('x'.repeat(MAX_PATH_BYTES + 1)), 'FS_LIMIT'],
-            ]) {{
-                try {{ await action(); throw Error('expected rejection'); }}
-                catch (error) {{
-                    if (!(error instanceof FsError) || error.code !== code) throw error;
-                }}
-            }}
-            try {{ await mkdir(null); throw Error('expected type rejection'); }}
-            catch (error) {{ if (!(error instanceof TypeError)) throw error; }}
-            try {{ mkdirSync({{}}); throw Error('expected type throw'); }}
-            catch (error) {{ if (!(error instanceof TypeError)) throw error; }}
-            try {{
-                await mkdir({file} + '/bad-options', {{recursive: 'yes'}});
-                throw Error('expected option rejection');
-            }} catch (error) {{
-                if (!(error instanceof TypeError)) throw error;
-            }}
-            if (exists({file} + '/bad-options')) throw Error('invalid options created a directory');"#,
+            await expectAsyncCode('async mkdir empty path', 'FS_PATH', () => mkdir(''));
+            await expectAsyncCode('async mkdir oversize path', 'FS_LIMIT',
+                () => mkdir('x'.repeat(MAX_PATH_BYTES + 1)));
+            await expectAsyncType('async mkdir null path', () => mkdir(null));
+            expectSyncType('sync mkdir object path', () => mkdirSync({{}}));
+            await expectAsyncType('async mkdir invalid recursive option',
+                () => mkdir({file} + '/bad-options', {{recursive: 'yes'}}));
+            if (exists({file} + '/bad-options')) {{
+                throw Error('invalid options created a directory');
+            }}"#,
+            error_helpers = FS_TEST_ERROR_HELPERS,
             async_dir = literal(&async_dir),
             nested = literal(&nested),
             sync_dir = literal(&sync_dir),
             existing = literal(&existing),
             missing_parent = literal(&missing_parent),
-            below_file = literal(&below_file),
             file = literal(&file),
         ),
     );
     js.run(
         "try { fs.mkdir('outside'); throw Error('dispatched outside managed turn'); }
-         catch (error) { if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }",
+         catch (error) {
+           let code = null;
+           try { code = error && error.code; } catch {}
+           if (code !== 'FS_ASYNC_OUTSIDE_TURN') {
+             throw Error('mkdir outside managed turn: unexpected error');
+           }
+         }",
     )
     .unwrap();
 }
@@ -666,7 +785,8 @@ fn directory_creation_uses_the_cwd_captured_before_option_reflection() {
         "mkdir-cwd.js",
         &format!(
             r#"import {{chdir}} from 'neo:process';
-            import {{mkdir, mkdirSync, exists}} from 'neo:fs';
+            import {{mkdir, mkdirSync, exists, FsError}} from 'neo:fs';
+            {error_helpers}
             const oldDir = {old};
             const newDir = {new};
             chdir(oldDir);
@@ -678,14 +798,16 @@ fn directory_creation_uses_the_cwd_captured_before_option_reflection() {
                     return [];
                 }},
             }});
-            await mkdir('late', options);
+            await expectAsyncSuccess('async mkdir keeps the captured cwd',
+                () => mkdir('late', options));
             if (!trapped) throw Error('option trap did not run');
             if (!exists(oldDir + '/late') || exists(newDir + '/late')) {{
                 throw Error('async mkdir did not keep the old cwd');
             }}
             chdir(newDir);
-            mkdirSync('sync');
+            expectSyncSuccess('sync mkdir uses the captured cwd', () => mkdirSync('sync'));
             if (!exists(newDir + '/sync')) throw Error('sync mkdir did not use the new cwd');"#,
+            error_helpers = FS_TEST_ERROR_HELPERS,
             old = literal(old.path()),
             new = literal(new.path()),
         ),
@@ -725,6 +847,7 @@ fn directory_creation_follows_unix_symlinks_without_containment() {
         &js,
         &format!(
             r#"import {{mkdir, mkdirSync, lstatSync, statSync, exists, FsError}} from 'neo:fs';
+            {error_helpers}
             const finalDir = {final_dir};
             const outsideDir = {outside_dir};
             const dangling = {dangling};
@@ -734,20 +857,21 @@ fn directory_creation_follows_unix_symlinks_without_containment() {
             const intermediateDangling = {intermediate_dangling};
             const missingParent = {missing_parent};
             const intermediateFile = {intermediate_file};
+            const plainFile = {plain_file};
 
             function expectSync(code, action) {{
                 try {{ action(); }}
                 catch (error) {{
-                    if (!(error instanceof FsError) || error.code !== code) throw error;
-                    return;
+                    if (fsErrorCode(error) === code) return;
+                    throw Error('expected ' + code + ', got ' + describeError(error));
                 }}
                 throw Error('did not throw ' + code);
             }}
             async function expectAsync(code, action) {{
                 try {{ await action(); }}
                 catch (error) {{
-                    if (!(error instanceof FsError) || error.code !== code) throw error;
-                    return;
+                    if (fsErrorCode(error) === code) return;
+                    throw Error('expected ' + code + ', got ' + describeError(error));
                 }}
                 throw Error('did not reject ' + code);
             }}
@@ -757,8 +881,12 @@ fn directory_creation_follows_unix_symlinks_without_containment() {
             // replace the link.
             await expectAsync('FS_ALREADY_EXISTS', () => mkdir(finalDir));
             expectSync('FS_ALREADY_EXISTS', () => mkdirSync(finalDir));
-            await mkdir(finalDir, {{recursive: true}});
-            mkdirSync(finalDir, {{recursive: true}});
+            await expectAsyncSuccess(
+                'unix async recursive mkdir accepts a final directory link',
+                () => mkdir(finalDir, {{recursive: true}}));
+            expectSyncSuccess(
+                'unix sync recursive mkdir accepts a final directory link',
+                () => mkdirSync(finalDir, {{recursive: true}}));
             if (!lstatSync(finalDir).isSymlink || !statSync(outsideDir).isDirectory) {{
                 throw Error('recursive call did not keep the final directory link');
             }}
@@ -775,16 +903,24 @@ fn directory_creation_follows_unix_symlinks_without_containment() {
 
             // Intermediate directory links are followed. Creation lands under
             // the link target, outside the apparent root, in both modes.
-            await mkdir(intermediate + '/async-nonrec');
+            await expectAsyncSuccess(
+                'unix async mkdir follows an intermediate directory link',
+                () => mkdir(intermediate + '/async-nonrec'));
             if (!statSync(outside + '/async-nonrec').isDirectory) {{
                 throw Error('async non-recursive creation did not follow the link');
             }}
-            await mkdir(intermediate + '/async-rec/nested', {{recursive: true}});
+            await expectAsyncSuccess(
+                'unix async recursive mkdir follows an intermediate directory link',
+                () => mkdir(intermediate + '/async-rec/nested', {{recursive: true}}));
             if (!statSync(outside + '/async-rec/nested').isDirectory) {{
                 throw Error('async recursive creation did not follow the link');
             }}
-            mkdirSync(intermediate + '/sync-nonrec');
-            mkdirSync(intermediate + '/sync-rec/nested', {{recursive: true}});
+            expectSyncSuccess(
+                'unix sync mkdir follows an intermediate directory link',
+                () => mkdirSync(intermediate + '/sync-nonrec'));
+            expectSyncSuccess(
+                'unix sync recursive mkdir follows an intermediate directory link',
+                () => mkdirSync(intermediate + '/sync-rec/nested', {{recursive: true}}));
             if (!statSync(outside + '/sync-nonrec').isDirectory ||
                 !statSync(outside + '/sync-rec/nested').isDirectory) {{
                 throw Error('sync creation did not follow the link');
@@ -808,7 +944,40 @@ fn directory_creation_follows_unix_symlinks_without_containment() {
             await expectAsync('FS_NOT_DIRECTORY',
                 () => mkdir(intermediateFile + '/child', {{recursive: true}}));
             expectSync('FS_NOT_DIRECTORY',
-                () => mkdirSync(intermediateFile + '/child', {{recursive: true}}));"#,
+                () => mkdirSync(intermediateFile + '/child', {{recursive: true}}));
+
+            // A direct regular-file component follows the same Unix rule as a
+            // symlink that resolves to a regular file. The labels let a
+            // failure identify one of the four cases without echoing a path.
+            async function expectAsyncCode(label, code, action) {{
+                try {{ await action(); }}
+                catch (error) {{
+                    if (fsErrorCode(error) === code) return;
+                    throw Error(label + ': expected ' + code + ', got ' + describeError(error));
+                }}
+                throw Error(label + ': expected ' + code + ' but the call succeeded');
+            }}
+            function expectSyncCode(label, code, action) {{
+                try {{ action(); }}
+                catch (error) {{
+                    if (fsErrorCode(error) === code) return;
+                    throw Error(label + ': expected ' + code + ', got ' + describeError(error));
+                }}
+                throw Error(label + ': expected ' + code + ' but the call succeeded');
+            }}
+            await expectAsyncCode('unix async mkdir below a regular file', 'FS_NOT_DIRECTORY',
+                () => mkdir(plainFile + '/direct-child'));
+            expectSyncCode('unix sync mkdir below a regular file', 'FS_NOT_DIRECTORY',
+                () => mkdirSync(plainFile + '/direct-child'));
+            await expectAsyncCode('unix async recursive mkdir below a regular file',
+                'FS_NOT_DIRECTORY',
+                () => mkdir(plainFile + '/direct-recursive', {{recursive: true}}));
+            expectSyncCode('unix sync recursive mkdir below a regular file', 'FS_NOT_DIRECTORY',
+                () => mkdirSync(plainFile + '/direct-recursive', {{recursive: true}}));
+            if (exists(plainFile + '/direct-child') || exists(plainFile + '/direct-recursive')) {{
+                throw Error('unix mkdir below a regular file created a directory');
+            }}"#,
+            error_helpers = FS_TEST_ERROR_HELPERS,
             final_dir = literal(&final_dir),
             outside_dir = literal(&outside_dir),
             dangling = literal(&dangling),
@@ -818,6 +987,7 @@ fn directory_creation_follows_unix_symlinks_without_containment() {
             intermediate_dangling = literal(&intermediate_dangling),
             missing_parent = literal(&missing_parent),
             intermediate_file = literal(&intermediate_file),
+            plain_file = literal(&file),
         ),
     );
     assert!(outside.join("async-nonrec").is_dir());
@@ -839,13 +1009,17 @@ fn directory_creation_rejects_an_existing_final_file() {
         &js,
         &format!(
             r#"import {{mkdir, mkdirSync, lstatSync, readFileSync, FsError}} from 'neo:fs';
+            {error_helpers}
             const file = {file};
 
             async function expectAsync(code, action) {{
                 try {{ await action(); }}
                 catch (error) {{
-                    if (!(error instanceof FsError) || error.code !== code) throw error;
-                    if (error.message.includes(file)) throw Error('async mkdir leaked the path');
+                    if (fsErrorCode(error) !== code) {{
+                        throw Error('async mkdir expected ' + code + ', got ' +
+                            describeError(error));
+                    }}
+                    if (leaksPath(error, file)) throw Error('async mkdir leaked the path');
                     return;
                 }}
                 throw Error('async mkdir did not reject with ' + code);
@@ -853,8 +1027,11 @@ fn directory_creation_rejects_an_existing_final_file() {
             function expectSync(code, action) {{
                 try {{ action(); }}
                 catch (error) {{
-                    if (!(error instanceof FsError) || error.code !== code) throw error;
-                    if (error.message.includes(file)) throw Error('sync mkdir leaked the path');
+                    if (fsErrorCode(error) !== code) {{
+                        throw Error('sync mkdir expected ' + code + ', got ' +
+                            describeError(error));
+                    }}
+                    if (leaksPath(error, file)) throw Error('sync mkdir leaked the path');
                     return;
                 }}
                 throw Error('mkdirSync did not throw ' + code);
@@ -866,6 +1043,7 @@ fn directory_creation_rejects_an_existing_final_file() {
             expectSync('FS_ALREADY_EXISTS', () => mkdirSync(file, {{recursive: true}}));
             if (!lstatSync(file).isFile) throw Error('mkdir replaced the regular file');
             if (readFileSync(file)[0] !== 120) throw Error('mkdir changed the file contents');"#,
+            error_helpers = FS_TEST_ERROR_HELPERS,
             file = literal(&file),
         ),
     );
@@ -1392,11 +1570,12 @@ fn overwrite_no_clobber_mkdir_and_remove_are_explicit() {
     let js = runtime();
     let source = r#"
         import {readText, writeText, writeFileSync, mkdirSync, remove, exists, FsError} from 'neo:fs';
+        __ERROR_HELPERS__
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
-                if (error.code !== code) throw Error('wrong code: ' + error.code);
-                return;
+                if (fsErrorCode(error) === code) return;
+                throw Error('wrong code: expected ' + code + ', got ' + describeError(error));
             }
             throw Error('did not throw ' + code);
         }
@@ -1424,20 +1603,25 @@ fn overwrite_no_clobber_mkdir_and_remove_are_explicit() {
         expectFsError('FS_IS_DIRECTORY', () => writeFileSync(dir, new Uint8Array([1])));
         expectFsError('FS_NOT_FOUND', () => writeFileSync(missing, new Uint8Array([1])));
 
-        mkdirSync(empty);
+        expectSyncSuccess('overwrite test: sync mkdir creates an empty directory',
+            () => mkdirSync(empty));
         expectFsError('FS_ALREADY_EXISTS', () => mkdirSync(empty));
-        mkdirSync(empty, {recursive: true});
-        mkdirSync(nested, {recursive: true});
+        expectSyncSuccess('overwrite test: recursive sync mkdir accepts a directory',
+            () => mkdirSync(empty, {recursive: true}));
+        expectSyncSuccess('overwrite test: recursive sync mkdir creates parents',
+            () => mkdirSync(nested, {recursive: true}));
         if (!exists(nested)) throw Error('recursive mkdir failed');
         remove(empty);
         if (exists(empty)) throw Error('remove empty dir failed');
 
-        mkdirSync(tree);
+        expectSyncSuccess('overwrite test: sync mkdir creates a tree root',
+            () => mkdirSync(tree));
         writeText(tree + '/inside.txt', 'inside');
         expectFsError('FS_NOT_EMPTY', () => remove(tree));
         remove(tree, {recursive: true});
         if (exists(tree)) throw Error('recursive remove failed');
     "#
+    .replace("__ERROR_HELPERS__", FS_TEST_ERROR_HELPERS)
     .replace("__FILE__", &literal(&file))
     .replace("__FRESH__", &literal(&fresh))
     .replace("__NESTED__", &literal(&nested))
@@ -2526,6 +2710,191 @@ fn windows_final_symlink_metadata_and_listing_fails_closed_without_capability() 
             link = literal(&link),
         ),
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_directory_creation_covers_missing_parents_and_intermediate_files() {
+    // The shared mkdir test asserts only the documented cross-platform
+    // contract. The Unix rule that a non-directory intermediate component
+    // reports `FS_NOT_DIRECTORY` is explicitly Unix-scoped in the module docs;
+    // the Windows code is selected by the OS and has no native evidence in this
+    // build. This regression pins the documented missing-parent and recursive
+    // contract on a native Windows fixture and proves that an intermediate
+    // regular file fails instead of silently creating a directory. The
+    // intermediate-file result is restricted to the two plausible OS codes,
+    // `FS_NOT_FOUND` and `FS_NOT_DIRECTORY`; the test does not claim which one
+    // Windows selects until a native run observes it. Failure and diagnostic
+    // text uses only fixed labels and sanitized code literals, never a path.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("windows-file.txt");
+    fs::write(&file, b"x").unwrap();
+    let missing_parent = dir.path().join("missing/child");
+    let nested_async = dir.path().join("nested-async/one/two");
+    let nested_sync = dir.path().join("nested-sync/one/two");
+    let below_file = file.join("child");
+    let below_file_recursive = file.join("child-recursive");
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{mkdir, mkdirSync, exists, FsError}} from 'neo:fs';
+            {error_helpers}
+            const missingParent = {missing_parent};
+            const nestedAsync = {nested_async};
+            const nestedSync = {nested_sync};
+            const belowFile = {below_file};
+            const belowFileRecursive = {below_file_recursive};
+
+            // Each label is fixed text. No supplied path or arbitrary error
+            // property is placed in an error message; codes are sanitized by
+            // the shared helpers.
+            async function expectAsyncCode(label, code, action) {{
+                try {{ await action(); }}
+                catch (error) {{
+                    if (fsErrorCode(error) === code) return error;
+                    throw Error(label + ': expected ' + code + ', got ' + describeError(error));
+                }}
+                throw Error(label + ': expected ' + code + ' but the call succeeded');
+            }}
+            function expectSyncCode(label, code, action) {{
+                try {{ action(); }}
+                catch (error) {{
+                    if (fsErrorCode(error) === code) return error;
+                    throw Error(label + ': expected ' + code + ', got ' + describeError(error));
+                }}
+                throw Error(label + ': expected ' + code + ' but the call succeeded');
+            }}
+            async function expectAsyncFailure(label, action) {{
+                try {{ await action(); }}
+                catch (error) {{
+                    const code = fsErrorCode(error);
+                    if (code !== null) return code;
+                    throw Error(label + ': expected FsError, got ' + describeError(error));
+                }}
+                throw Error(label + ': expected a rejection but the call succeeded');
+            }}
+            function expectSyncFailure(label, action) {{
+                try {{ action(); }}
+                catch (error) {{
+                    const code = fsErrorCode(error);
+                    if (code !== null) return code;
+                    throw Error(label + ': expected FsError, got ' + describeError(error));
+                }}
+                throw Error(label + ': expected a throw but the call succeeded');
+            }}
+            function expectAllowedCode(label, code) {{
+                if (code !== 'FS_NOT_FOUND' && code !== 'FS_NOT_DIRECTORY') {{
+                    throw Error(label + ': expected FS_NOT_FOUND or FS_NOT_DIRECTORY, got ' +
+                        code);
+                }}
+            }}
+            // The restriction must not silently accept a code that would hide
+            // a denial, invalid path, or cancellation.
+            for (const rejected of ['FS_DENIED', 'FS_PATH', 'FS_CANCELLED']) {{
+                let rejectedByCheck = false;
+                try {{ expectAllowedCode('restriction self-check', rejected); }}
+                catch (error) {{ rejectedByCheck = true; }}
+                if (!rejectedByCheck) {{
+                    throw Error('restriction accepted a non-plausible code');
+                }}
+            }}
+
+            // A missing parent without recursion is documented as
+            // FS_NOT_FOUND without a platform qualifier, and the redacted
+            // message must not echo the path.
+            const asyncMissing = await expectAsyncCode(
+                'windows async mkdir missing parent', 'FS_NOT_FOUND',
+                () => mkdir(missingParent));
+            const syncMissing = expectSyncCode(
+                'windows sync mkdir missing parent', 'FS_NOT_FOUND',
+                () => mkdirSync(missingParent));
+            if (leaksPath(asyncMissing, missingParent)) {{
+                throw Error('windows async mkdir missing parent leaked the path');
+            }}
+            if (leaksPath(syncMissing, missingParent)) {{
+                throw Error('windows sync mkdir missing parent leaked the path');
+            }}
+
+            // Recursion creates the whole missing tree in both forms. Separate
+            // paths prove each form creates parents rather than accepting a
+            // directory the other form left behind.
+            await expectAsyncSuccess(
+                'windows async recursive mkdir creates parents',
+                () => mkdir(nestedAsync, {{recursive: true}}));
+            if (!exists(nestedAsync)) {{
+                throw Error('windows async recursive mkdir did not create parents');
+            }}
+            expectSyncSuccess(
+                'windows sync recursive mkdir creates parents',
+                () => mkdirSync(nestedSync, {{recursive: true}}));
+            if (!exists(nestedSync)) {{
+                throw Error('windows sync recursive mkdir did not create parents');
+            }}
+
+            // An intermediate regular file must fail and must not create the
+            // child. Windows may report either of the two plausible OS codes;
+            // neither is claimed until a native run observes it. Codes outside
+            // that set, including FS_DENIED, FS_PATH, and FS_CANCELLED, fail.
+            const asyncBelow = await expectAsyncFailure(
+                'windows async mkdir below an intermediate file',
+                () => mkdir(belowFile));
+            const syncBelow = expectSyncFailure(
+                'windows sync mkdir below an intermediate file',
+                () => mkdirSync(belowFile));
+            const asyncBelowRecursive = await expectAsyncFailure(
+                'windows async recursive mkdir below an intermediate file',
+                () => mkdir(belowFileRecursive, {{recursive: true}}));
+            const syncBelowRecursive = expectSyncFailure(
+                'windows sync recursive mkdir below an intermediate file',
+                () => mkdirSync(belowFileRecursive, {{recursive: true}}));
+            expectAllowedCode('windows async mkdir below an intermediate file', asyncBelow);
+            expectAllowedCode('windows sync mkdir below an intermediate file', syncBelow);
+            expectAllowedCode('windows async recursive mkdir below an intermediate file',
+                asyncBelowRecursive);
+            expectAllowedCode('windows sync recursive mkdir below an intermediate file',
+                syncBelowRecursive);
+            // Record the observed missing-parent and intermediate-file codes
+            // for the Rust side to log on a passing run. Only sanitized fixed
+            // labels are stored; no path is included.
+            globalThis.__neoWindowsMkdirCodes =
+                'missingAsync=' + fsErrorCode(asyncMissing) +
+                ' missingSync=' + fsErrorCode(syncMissing) +
+                ' belowAsync=' + asyncBelow +
+                ' belowSync=' + syncBelow +
+                ' belowAsyncRecursive=' + asyncBelowRecursive +
+                ' belowSyncRecursive=' + syncBelowRecursive;
+            if (asyncBelow !== syncBelow) {{
+                throw Error('windows mkdir below an intermediate file differs by form: ' +
+                    asyncBelow + ' vs ' + syncBelow);
+            }}
+            if (asyncBelowRecursive !== syncBelowRecursive) {{
+                throw Error('windows recursive mkdir below an intermediate file differs by form: ' +
+                    asyncBelowRecursive + ' vs ' + syncBelowRecursive);
+            }}"#,
+            error_helpers = FS_TEST_ERROR_HELPERS,
+            missing_parent = literal(&missing_parent),
+            nested_async = literal(&nested_async),
+            nested_sync = literal(&nested_sync),
+            below_file = literal(&below_file),
+            below_file_recursive = literal(&below_file_recursive),
+        ),
+    );
+    // libtest captures ordinary test output, so a passing run would otherwise
+    // hide the codes. Write directly to the process stderr with a fixed label;
+    // only sanitized code literals are included, never a path. The CI guard
+    // pins the exact `--test fs` argument shape, so this deliberately avoids
+    // adding `--nocapture` to the gate.
+    let observed = js
+        .eval("globalThis.__neoWindowsMkdirCodes")
+        .expect("the Windows mkdir diagnostic did not record the observed codes");
+    let mut stderr = std::io::stderr();
+    use std::io::Write as _;
+    writeln!(stderr, "windows mkdir observed codes: {observed}").unwrap();
+    // Checked outside the module so an unexpected `exists` failure below a
+    // file cannot be mistaken for a mkdir result. Any entry here is a bug.
+    assert!(!below_file.exists());
+    assert!(!below_file_recursive.exists());
 }
 
 #[cfg(windows)]
