@@ -3,11 +3,12 @@
 //! The module is available only when [`crate::Permissions::filesystem`] is
 //! granted and the runtime's module allowlist admits [`crate::RuntimeModule::Fs`].
 //! Both gates are checked before the `fs` global or any native callback is
-//! constructed. `readFile`, `writeFile`, `stat`, `lstat`, and `readDir` run on
-//! workers; `readFileSync`, `writeFileSync`, `statSync`, `lstatSync`,
-//! `readDirSync`, and all other operations block. Nothing here starts a shell,
-//! a child process, or a network request directly. The OS may still perform
-//! network I/O for network paths and filesystems.
+//! constructed. `readFile`, `writeFile`, `stat`, `lstat`, `readDir`, and
+//! `mkdir` run on workers; `readFileSync`, `writeFileSync`, `statSync`,
+//! `lstatSync`, `readDirSync`, `mkdirSync`, and all other operations block.
+//! Nothing here starts a shell, a child process, or a network request
+//! directly. The OS may still perform network I/O for network paths and
+//! filesystems.
 //!
 //! # Authority
 //!
@@ -106,8 +107,34 @@
 //! before sorting. A cancelled listing reports `FS_CANCELLED` and never
 //! returns a partial array. The initial `read_dir` call and an individual
 //! metadata call are not interruptible once started; teardown waits for them
-//! to return. The
-//! synchronous forms take no cancellation token.
+//! to return. The synchronous forms take no cancellation token.
+//!
+//! # Directories
+//!
+//! `mkdir` and `mkdirSync` create one directory. With `recursive: true` they
+//! create missing parents and accept an existing directory; without it, an
+//! existing path reports `FS_ALREADY_EXISTS` and a missing parent reports
+//! `FS_NOT_FOUND`. An OS or network failure can leave a partially created
+//! tree; there is no rollback, cleanup, or removal. A started asynchronous
+//! creation cannot be interrupted by teardown and may still create some or all
+//! directories after a failed turn; cancellation never removes a directory
+//! that was created.
+//!
+//! On Unix, a non-recursive creation refuses a final symlink, including a
+//! dangling one, with `FS_ALREADY_EXISTS` and never follows it. Recursive
+//! creation accepts a final symlink to an existing directory but reports
+//! `FS_ALREADY_EXISTS` for a dangling final symlink. Both forms follow
+//! intermediate symlinks, so creation can land outside the apparent parent
+//! tree. A non-recursive path below a dangling intermediate symlink reports
+//! `FS_NOT_FOUND`; the recursive form reports `FS_ALREADY_EXISTS`. An
+//! intermediate component that resolves to a non-directory reports
+//! `FS_NOT_DIRECTORY`. A final path occupied by an existing regular file
+//! reports `FS_ALREADY_EXISTS` in both modes.
+//!
+//! These rules are path-based and are not containment. A component can be
+//! replaced between path resolution and the OS call, redirecting creation
+//! elsewhere. Windows reparse-point, junction, and symbolic-link semantics are
+//! platform-specific; this build does not assert them.
 //!
 //! # Deletion
 //!
@@ -214,7 +241,7 @@ pub(crate) const MAX_LIST_NAME_BYTES: usize = 1024;
 /// Largest sum of directory-entry names `readDir` returns, in UTF-8 bytes.
 pub(crate) const MAX_LIST_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
-const EXPORTS: [&str; 24] = [
+const EXPORTS: [&str; 25] = [
     "readText",
     "writeText",
     "readFile",
@@ -229,6 +256,7 @@ const EXPORTS: [&str; 24] = [
     "readDir",
     "readDirSync",
     "mkdir",
+    "mkdirSync",
     "remove",
     "rename",
     "copyFile",
@@ -1524,7 +1552,7 @@ fn build_native<'js>(
 
     let mkdir_cwd = Rc::clone(&cwd);
     native.set(
-        "mkdir",
+        "mkdirSync",
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'js>, path: String, recursive: bool| -> JsResult<Object<'js>> {

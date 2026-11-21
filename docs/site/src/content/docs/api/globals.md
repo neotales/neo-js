@@ -123,7 +123,19 @@ declare const fs: {
   readDir(path: string): Promise<import("neo:fs").DirEntry[]>;
   /** Same sorted, bounded listing and error rules as `neo:fs.readDirSync`. */
   readDirSync(path: string): import("neo:fs").DirEntry[];
-  mkdir(path: string, options?: import("neo:fs").MkdirOptions): void;
+  /**
+   * Create a directory during managed module evaluation. Outside it, this
+   * throws `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. It uses the same
+   * outstanding-operation and worker limits as `readFile`. It follows
+   * intermediate symlinks and provides no path containment. See
+   * `neo:fs.mkdir` for the full symlink, failure, and race rules.
+   */
+  mkdir(path: string, options?: import("neo:fs").MkdirOptions): Promise<void>;
+  /**
+   * Create a directory synchronously. It has the same final and intermediate
+   * symlink behavior and no containment as `neo:fs.mkdirSync`.
+   */
+  mkdirSync(path: string, options?: import("neo:fs").MkdirOptions): void;
   remove(path: string, options?: import("neo:fs").RemoveOptions): void;
   /** Same entry, replacement, and error semantics as `neo:fs.rename`. */
   rename: typeof import("neo:fs").rename;

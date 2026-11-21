@@ -297,6 +297,26 @@
     }
 
     function mkdir(path, options) {
+      // Outside a managed turn there is no owner to deliver a rejection.
+      if (!native.canAsync()) throw makeError('FS_ASYNC_OUTSIDE_TURN');
+      try {
+        requirePath(path, makeError);
+        // Snapshot the cwd before option reflection can run script.
+        const snapshot = unwrapWith(native.snapshotPath(path), makeError);
+        const opts = requireOptions(options, ['recursive']);
+        let recursive = false;
+        if (opts !== null) {
+          if (hasOwn(opts, 'recursive')) {
+            recursive = requireBoolean(opts.recursive, 'options.recursive');
+          }
+        }
+        return native.mkdir(snapshot, recursive, makeError);
+      } catch (error) {
+        return rejectPromise(error);
+      }
+    }
+
+    function mkdirSync(path, options) {
       requirePath(path);
       const snapshot = unwrap(native.snapshotPath(path));
       const opts = requireOptions(options, ['recursive']);
@@ -306,7 +326,7 @@
           recursive = requireBoolean(opts.recursive, 'options.recursive');
         }
       }
-      unwrap(native.mkdir(snapshot, recursive));
+      unwrap(native.mkdirSync(snapshot, recursive));
     }
 
     function remove(path, options) {
@@ -353,6 +373,7 @@
     defineValue(api, 'readDir', readDir);
     defineValue(api, 'readDirSync', readDirSync);
     defineValue(api, 'mkdir', mkdir);
+    defineValue(api, 'mkdirSync', mkdirSync);
     defineValue(api, 'remove', remove);
     defineValue(api, 'rename', rename);
     defineValue(api, 'copyFile', copyFile);

@@ -1193,3 +1193,307 @@ fn cancellation_stops_started_directory_enumeration_before_the_next_entry() {
     assert!(js.run("1").unwrap_err().contains("NEO_MODULE_ABORTED"));
     drop(js);
 }
+
+#[test]
+fn a_directory_creation_completes_while_first_worker_is_blocked() {
+    let dir = tempfile::tempdir().unwrap();
+    let first_dir = dir.path().join("first");
+    let second_dir = dir.path().join("second");
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    js.ops.gates.borrow_mut().push_back(Gate(Box::new(move |_| {
+        started_tx.send(()).unwrap();
+        release_rx.recv_timeout(TIMEOUT).unwrap();
+        Ok(())
+    })));
+    let (progress, progress_rx) = mpsc::channel();
+    js.context.with(|ctx| {
+        let progress = Function::new(ctx.clone(), move |phase: u8| {
+            progress.send(phase).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("progress", progress).unwrap();
+    });
+    let controller = thread::spawn(move || {
+        started.recv_timeout(TIMEOUT).unwrap();
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 1);
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 2);
+        release.send(()).unwrap();
+    });
+    let result = js.run_module(
+        "mkdir-progress.js",
+        &format!(
+            r#"import {{mkdir}} from 'neo:fs';
+            let done = false;
+            const first = mkdir({first_dir}).then(() => {{
+                done = true;
+            }});
+            await Promise.resolve();
+            if (done) throw Error('first creation finished before release');
+            progress(1);
+            await mkdir({second_dir});
+            if (done) throw Error('first finished before its worker was released');
+            progress(2);
+            await first;"#,
+            first_dir = literal(&first_dir),
+            second_dir = literal(&second_dir),
+        ),
+    );
+    controller.join().unwrap();
+    result.unwrap();
+    assert!(first_dir.is_dir());
+    assert!(second_dir.is_dir());
+}
+
+#[test]
+fn outstanding_directory_creations_share_the_operation_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<_> = (0..=MAX_PENDING)
+        .map(|index| dir.path().join(format!("out-{index}")))
+        .collect();
+    let literals: Vec<_> = paths.iter().map(|path| literal(path)).collect();
+    let path_array = format!("[{}]", literals.join(","));
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (progress, progress_rx) = std::sync::mpsc::channel();
+    js.context.with(|ctx| {
+        let progress = Function::new(ctx.clone(), move |phase: u8| {
+            progress.send(phase).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("progress", progress).unwrap();
+    });
+    let (release_first_tx, release_first) = mpsc::channel::<()>();
+    let (release_second_tx, release_second) = mpsc::channel::<()>();
+    {
+        let mut gates = js.ops.gates.borrow_mut();
+        for wait in [release_first, release_second] {
+            let started_tx = started_tx.clone();
+            gates.push_back(Gate(Box::new(move |_| {
+                started_tx.send(()).unwrap();
+                wait.recv_timeout(TIMEOUT).unwrap();
+                Ok(())
+            })));
+        }
+    }
+    drop(started_tx);
+    let controller = thread::spawn(move || {
+        started.recv_timeout(TIMEOUT).unwrap();
+        started.recv_timeout(TIMEOUT).unwrap();
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 1);
+        release_first_tx.send(()).unwrap();
+        release_second_tx.send(()).unwrap();
+    });
+    let result = js.run_module(
+        "mkdir-saturation.js",
+        &format!(
+            r#"import {{mkdir, FsError}} from 'neo:fs';
+            const paths = {paths};
+            const creations = [];
+            for (let i = 0; i < {limit}; i++) creations.push(mkdir(paths[i]));
+            try {{
+                await mkdir(paths[{limit}]);
+                throw Error('admitted one creation beyond the bound');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_LIMIT') throw error;
+            }}
+            progress(1);
+            for (const result of await Promise.all(creations)) {{
+                if (result !== undefined) throw Error('mkdir resolved with a value');
+            }}
+            await mkdir(paths[{limit}]);
+            if (fs.readDirSync(paths[0]).length !== 0) throw Error('created directory not empty');"#,
+            paths = path_array,
+            limit = MAX_PENDING,
+        ),
+    );
+    controller.join().unwrap();
+    result.unwrap();
+    for path in &paths {
+        assert!(path.is_dir(), "missing {}", path.display());
+    }
+}
+
+#[test]
+fn directory_creations_share_the_bound_with_reads_and_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.bin");
+    let written = dir.path().join("written.bin");
+    let first_dir = dir.path().join("first");
+    let second_dir = dir.path().join("second");
+    let rejected_dir = dir.path().join("rejected");
+    fs::write(&file, [42, 7]).unwrap();
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (progress, progress_rx) = std::sync::mpsc::channel();
+    js.context.with(|ctx| {
+        let progress = Function::new(ctx.clone(), move |phase: u8| {
+            progress.send(phase).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("progress", progress).unwrap();
+    });
+    let (release_read_tx, release_read) = mpsc::channel::<()>();
+    let (release_mkdir_tx, release_mkdir) = mpsc::channel::<()>();
+    {
+        let mut gates = js.ops.gates.borrow_mut();
+        gates.push_back(Gate(Box::new({
+            let started_tx = started_tx.clone();
+            move |_| {
+                started_tx.send(()).unwrap();
+                release_read.recv_timeout(TIMEOUT).unwrap();
+                Ok(())
+            }
+        })));
+        gates.push_back(Gate(Box::new(move |_| {
+            started_tx.send(()).unwrap();
+            release_mkdir.recv_timeout(TIMEOUT).unwrap();
+            Ok(())
+        })));
+    }
+    let controller = thread::spawn(move || {
+        started.recv_timeout(TIMEOUT).unwrap();
+        started.recv_timeout(TIMEOUT).unwrap();
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 1);
+        release_read_tx.send(()).unwrap();
+        release_mkdir_tx.send(()).unwrap();
+    });
+    let result = js.run_module(
+        "mkdir-mixed-saturation.js",
+        &format!(
+            r#"import {{readFile, writeFile, mkdir, FsError}} from 'neo:fs';
+            const read = readFile({file});
+            const first = mkdir({first_dir});
+            const write = writeFile({written}, new Uint8Array([5]));
+            const second = mkdir({second_dir});
+            try {{
+                await mkdir({rejected_dir});
+                throw Error('admitted work beyond the shared bound');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_LIMIT') throw error;
+            }}
+            progress(1);
+            const [bytes, createdFirst, wrote, createdSecond] =
+                await Promise.all([read, first, write, second]);
+            if (bytes[0] !== 42 || createdFirst !== undefined || createdSecond !== undefined) {{
+                throw Error('accepted work resolved with the wrong value');
+            }}
+            if (wrote !== undefined) throw Error('write resolved with a value');
+            if (fs.readFileSync({written})[0] !== 5) throw Error('accepted write did not land');
+            await mkdir({rejected_dir});
+            if (!fs.exists({rejected_dir})) throw Error('creation admission did not recover');"#,
+            file = literal(&file),
+            written = literal(&written),
+            first_dir = literal(&first_dir),
+            second_dir = literal(&second_dir),
+            rejected_dir = literal(&rejected_dir),
+        ),
+    );
+    controller.join().unwrap();
+    result.unwrap();
+    assert_eq!(fs::read(&written).unwrap(), [5]);
+    assert!(first_dir.is_dir() && second_dir.is_dir() && rejected_dir.is_dir());
+}
+
+#[test]
+fn a_panicking_directory_creation_is_reported_as_io_and_leaves_the_worker_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("created");
+    let js = runtime();
+    js.ops.gates.borrow_mut().push_back(Gate(Box::new(|_| {
+        panic!("injected worker panic");
+    })));
+    js.run_module(
+        "panic-mkdir.js",
+        &format!(
+            r#"import {{mkdir, FsError}} from 'neo:fs';
+            try {{
+                await mkdir({target});
+                throw Error('panicking creation fulfilled');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_IO') throw error;
+            }}
+            await mkdir({target});
+            if (!fs.exists({target})) throw Error('worker did not recover');"#,
+            target = literal(&target),
+        ),
+    )
+    .unwrap();
+    assert!(target.is_dir());
+}
+
+#[test]
+fn failing_turn_cancels_pending_directory_creations() {
+    let dir = tempfile::tempdir().unwrap();
+    let targets: Vec<_> = (0..3)
+        .map(|index| dir.path().join(format!("cancelled-{index}")))
+        .collect();
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (joined_tx, joined) = mpsc::channel();
+    let (third_tx, third_started) = mpsc::channel();
+    let mut release = Vec::new();
+    {
+        let mut gates = js.ops.gates.borrow_mut();
+        for _ in 0..2 {
+            let (send, wait) = mpsc::channel::<()>();
+            release.push(send);
+            let started_tx = started_tx.clone();
+            let joined_tx = joined_tx.clone();
+            gates.push_back(Gate(Box::new(move |cancel| {
+                started_tx.send(()).unwrap();
+                assert_eq!(
+                    wait.recv_timeout(TIMEOUT),
+                    Err(mpsc::RecvTimeoutError::Disconnected)
+                );
+                joined_tx.send(cancel.requested()).unwrap();
+                Ok(())
+            })));
+        }
+        gates.push_back(Gate(Box::new(move |_| {
+            drop(release);
+            third_tx.send(()).unwrap();
+            Ok(())
+        })));
+    }
+    js.context.with(|ctx| {
+        let wait = Function::new(ctx.clone(), move || {
+            started.recv_timeout(TIMEOUT).unwrap();
+            started.recv_timeout(TIMEOUT).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("finishCreations", wait).unwrap();
+    });
+    let result = js.run_module(
+        "cancel-mkdir.js",
+        &format!(
+            "globalThis.cancelledMkdir = fs.mkdir({first});
+             fs.mkdir({second}); fs.mkdir({third});
+             finishCreations(); throw Error('entry failed');",
+            first = literal(&targets[0]),
+            second = literal(&targets[1]),
+            third = literal(&targets[2]),
+        ),
+    );
+    assert!(result.unwrap_err().contains("entry failed"));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(
+        third_started.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    );
+    assert!(targets.iter().all(|path| !path.exists()));
+    assert!(js.ops.active.borrow().is_none());
+    js.context.with(|ctx| {
+        let promise: Promise = ctx.globals().get("cancelledMkdir").unwrap();
+        assert!(matches!(
+            promise.result::<()>(),
+            Some(Err(JsError::Exception))
+        ));
+        let reason = ctx.catch().into_object().unwrap();
+        assert_eq!(reason.get::<_, String>("code").unwrap(), "FS_CANCELLED");
+    });
+    assert!(js.run("1").unwrap_err().contains("NEO_MODULE_ABORTED"));
+    drop(js);
+}

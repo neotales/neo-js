@@ -85,7 +85,19 @@ declare const fs: {
   readDir(path: string): Promise<import("neo:fs").DirEntry[]>;
   /** Same sorted, bounded listing and error rules as `neo:fs.readDirSync`. */
   readDirSync(path: string): import("neo:fs").DirEntry[];
-  mkdir(path: string, options?: import("neo:fs").MkdirOptions): void;
+  /**
+   * Create a directory during managed module evaluation. Outside it, this
+   * throws `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. It uses the same
+   * outstanding-operation and worker limits as `readFile`. It follows
+   * intermediate symlinks and provides no path containment. See
+   * `neo:fs.mkdir` for the full symlink, failure, and race rules.
+   */
+  mkdir(path: string, options?: import("neo:fs").MkdirOptions): Promise<void>;
+  /**
+   * Create a directory synchronously. It has the same final and intermediate
+   * symlink behavior and no containment as `neo:fs.mkdirSync`.
+   */
+  mkdirSync(path: string, options?: import("neo:fs").MkdirOptions): void;
   remove(path: string, options?: import("neo:fs").RemoveOptions): void;
   /** Same entry, replacement, and error semantics as `neo:fs.rename`. */
   rename: typeof import("neo:fs").rename;
@@ -118,10 +130,10 @@ declare module "neo:env" {
  * allowlist that admits `neo:fs`.
  *
  * During managed module evaluation, `readFile` reads, `writeFile` writes,
- * `stat` and `lstat` read metadata, and `readDir` lists a directory on a
- * worker. Those five return Promises. `readFileSync`, `writeFileSync`,
- * `statSync`, `lstatSync`, `readDirSync`, and the other operations block the
- * JavaScript thread. Relative paths resolve
+ * `stat` and `lstat` read metadata, `readDir` lists a directory, and `mkdir`
+ * creates a directory on a worker. Those six return Promises. `readFileSync`,
+ * `writeFileSync`, `statSync`, `lstatSync`, `readDirSync`, `mkdirSync`, and
+ * the other operations block the JavaScript thread. Relative paths resolve
  * against the runtime's working directory, with no fallback to the host
  * directory. If that directory is unavailable, the asynchronous forms reject
  * with `FS_CWD` during a managed turn and synchronous operations throw
@@ -258,7 +270,7 @@ declare module "neo:fs" {
     overwrite?: boolean;
   }
 
-  /** Options for `mkdir`. */
+  /** Options for `mkdir` and `mkdirSync`. */
   export interface MkdirOptions {
     /**
      * Create missing parent directories. With `true`, an existing directory
@@ -323,8 +335,9 @@ declare module "neo:fs" {
    * to four outstanding filesystem operations (including undelivered
    * results) and runs up to two on workers. Metadata and directory reads
    * share this bound but charge their path plus a small metadata or listing
-   * result bound. Each outstanding read charges `MAX_READ_BYTES` plus the
-   * encoded byte length of its resolved path against a shared turn budget of
+   * result bound; a directory creation charges its path. Each outstanding read
+   * charges `MAX_READ_BYTES` plus the encoded byte length of its resolved path
+   * against a shared turn budget of
    * `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
    * Excess work rejects with `FS_LIMIT`. This budget does not cover buffers
    * JavaScript retains after delivery. There is no caller cancellation API.
@@ -506,14 +519,53 @@ declare module "neo:fs" {
   export function readDirSync(path: string): DirEntry[];
 
   /**
-   * Create a directory.
+   * Create a directory on a worker.
    *
-   * Without `recursive`, an existing path throws `FS_ALREADY_EXISTS` and a
-   * missing parent throws `FS_NOT_FOUND`. With `recursive: true`, missing
-   * parents are created and an existing directory is accepted. No `mode`
-   * option is provided.
+   * **Breaking change:** this function was synchronous. Use
+   * `await mkdir(path, options)` during managed module evaluation, or
+   * `mkdirSync(path, options)` in synchronous code. Outside a managed turn
+   * this throws `FS_ASYNC_OUTSIDE_TURN` before I/O.
+   *
+   * In a managed turn, invalid arguments and filesystem errors reject the
+   * Promise. Without `recursive`, an existing path reports `FS_ALREADY_EXISTS`
+   * and a missing parent reports `FS_NOT_FOUND`. With `recursive: true`,
+   * missing parents are created and an existing directory is accepted. No
+   * `mode` option is provided.
+   *
+   * Creation shares the four-operation outstanding bound and two-worker pool
+   * with the other asynchronous filesystem operations, and charges its
+   * resolved path against the same turn budget. Teardown cannot interrupt a
+   * creation that has started: it may still create some or all directories
+   * after a failed turn, and cancellation never removes a created directory.
+   * An OS or network failure can leave a partial tree with no rollback.
+   *
+   * On Unix, a non-recursive creation refuses a final symlink, including a
+   * dangling one, with `FS_ALREADY_EXISTS` and never follows it. Recursive
+   * creation accepts a final symlink to an existing directory but reports
+   * `FS_ALREADY_EXISTS` for a dangling final symlink. Both forms follow
+   * intermediate symlinks, so creation can land outside the apparent parent
+   * tree. A non-recursive path below a dangling intermediate symlink reports
+   * `FS_NOT_FOUND`; the recursive form reports `FS_ALREADY_EXISTS`. An
+   * intermediate component that resolves to a non-directory reports
+   * `FS_NOT_DIRECTORY`. A final path occupied by an existing regular file
+   * reports `FS_ALREADY_EXISTS` in both modes.
+   *
+   * These rules are path-based and are not containment. A component can be
+   * replaced between path resolution and the OS call, redirecting creation
+   * elsewhere. Windows reparse-point, junction, and symbolic-link semantics are
+   * platform-specific; this build does not assert them.
    */
-  export function mkdir(path: string, options?: MkdirOptions): void;
+  export function mkdir(path: string, options?: MkdirOptions): Promise<void>;
+
+  /**
+   * Create a directory, blocking the JavaScript thread.
+   *
+   * The same creation, option, error, final and intermediate symlink, and
+   * no-containment rules as `mkdir` apply, except that failures throw instead
+   * of rejecting. An OS or network failure can leave a partial tree with no
+   * rollback.
+   */
+  export function mkdirSync(path: string, options?: MkdirOptions): void;
 
   /**
    * Remove a file, symlink, or directory.

@@ -17,8 +17,8 @@ use super::{
     Code, DirEntryInfo, FileInfo, FsError, JsError, JsResult, JsString, MAX_LIST_ENTRIES,
     MAX_LIST_NAME_BYTES, MAX_LIST_TOTAL_BYTES, MAX_PATH_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES,
     WorkingDirectory, bounded_copy, checked_js_path, entries_json, file_info_at, file_info_value,
-    open_regular_source, read_bounded_until, read_dir_at_until, resolve, validate_path, worker,
-    write_bytes_at,
+    mkdir_at, open_regular_source, read_bounded_until, read_dir_at_until, resolve, validate_path,
+    worker, write_bytes_at,
 };
 
 /// Maximum outstanding filesystem operations, including undelivered
@@ -75,6 +75,10 @@ enum JobKind {
     ReadDir {
         path: PathBuf,
     },
+    Mkdir {
+        path: PathBuf,
+        recursive: bool,
+    },
 }
 
 /// A worker result that still needs an owner-side settlement.
@@ -83,6 +87,7 @@ enum Output {
     Write,
     Stat(FileInfo),
     ReadDir(Vec<DirEntryInfo>),
+    Mkdir,
 }
 
 type OperationResult = Result<Output, FsError>;
@@ -130,6 +135,10 @@ fn execute(job: Job, cancellation: &worker::Cancellation) -> OperationResult {
             )
             .map(Output::ReadDir)
         }
+        JobKind::Mkdir { path, recursive } => {
+            mkdir_at(&path, recursive)?;
+            Ok(Output::Mkdir)
+        }
     }
 }
 
@@ -141,6 +150,7 @@ enum SettlementKind {
     Write,
     Stat,
     ReadDir,
+    Mkdir,
 }
 
 struct Settlement {
@@ -171,7 +181,8 @@ impl Settlement {
         };
         match (self.kind, output) {
             (SettlementKind::Read, Output::Read(bytes)) => self.finish_read(ctx, bytes),
-            (SettlementKind::Write, Output::Write) => self.finish_write(ctx),
+            (SettlementKind::Write, Output::Write) => self.finish_void(ctx),
+            (SettlementKind::Mkdir, Output::Mkdir) => self.finish_void(ctx),
             (SettlementKind::Stat, Output::Stat(info)) => self.finish_stat(ctx, info),
             (SettlementKind::ReadDir, Output::ReadDir(entries)) => {
                 self.finish_read_dir(ctx, entries)
@@ -206,7 +217,9 @@ impl Settlement {
         object.remove("then")
     }
 
-    fn finish_write(self, ctx: &Ctx<'_>) -> JsResult<()> {
+    /// Resolve an operation that has no value: a write or a directory
+    /// creation.
+    fn finish_void(self, ctx: &Ctx<'_>) -> JsResult<()> {
         self.resolve.restore(ctx)?.call::<_, ()>((Undefined,))
     }
 
@@ -354,6 +367,19 @@ impl FsDriver {
         let bytes = MAX_LIST_OPERATION_BYTES + path.as_os_str().as_encoded_bytes().len();
         self.submit(ctx, bytes, SettlementKind::ReadDir, make_error, move || {
             Ok(JobKind::ReadDir { path })
+        })
+    }
+
+    fn submit_mkdir<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        path: PathBuf,
+        recursive: bool,
+        make_error: Function<'js>,
+    ) -> JsResult<Promise<'js>> {
+        let bytes = path.as_os_str().as_encoded_bytes().len();
+        self.submit(ctx, bytes, SettlementKind::Mkdir, make_error, move || {
+            Ok(JobKind::Mkdir { path, recursive })
         })
     }
 
@@ -568,8 +594,8 @@ pub(super) fn install<'js>(
         )?;
     }
 
-    let read_dir_driver = driver;
-    let read_dir_cwd = stat_base_cwd;
+    let read_dir_driver = driver.clone();
+    let read_dir_cwd = Rc::clone(&stat_base_cwd);
     native.set(
         "readDir",
         Function::new(
@@ -577,6 +603,24 @@ pub(super) fn install<'js>(
             move |ctx: Ctx<'js>, path: JsString<'js>, make_error: Function<'js>| {
                 match snapshot_absolute_path(&read_dir_cwd, path) {
                     Ok(path) => read_dir_driver.submit_read_dir(&ctx, path, make_error),
+                    Err(error) => throw_argument(&ctx, error, make_error),
+                }
+            },
+        )?,
+    )?;
+
+    let mkdir_driver = driver;
+    let mkdir_cwd = stat_base_cwd;
+    native.set(
+        "mkdir",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  path: JsString<'js>,
+                  recursive: bool,
+                  make_error: Function<'js>| {
+                match snapshot_absolute_path(&mkdir_cwd, path) {
+                    Ok(path) => mkdir_driver.submit_mkdir(&ctx, path, recursive, make_error),
                     Err(error) => throw_argument(&ctx, error, make_error),
                 }
             },

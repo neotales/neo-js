@@ -25,7 +25,8 @@ functions and `FsError` class.
 | `exists(path)`                        | Existence check, following a final symlink.                            |
 | `readDir(path)`                       | List a directory on a worker. Returns `Promise<DirEntry[]>`.           |
 | `readDirSync(path)`                   | Non-recursive, sorted listing, blocking the JavaScript thread.         |
-| `mkdir(path, options?)`               | Create a directory; `{recursive: true}` creates parents.               |
+| `mkdir(path, options?)`               | Create a directory on a worker. Returns `Promise<void>`.               |
+| `mkdirSync(path, options?)`           | Create a directory; `{recursive: true}` creates parents.               |
 | `remove(path, options?)`              | Remove a file, link, or directory; `{recursive: true}` removes a tree. |
 | `rename(source, destination)`         | Rename a file, directory, or symlink entry using the host OS.          |
 
@@ -45,23 +46,23 @@ if (entries.some((entry) => entry.name === "README.md")) {
 Relative paths use the runtime's working directory, not the host process's
 mutable directory. `neo:process.chdir` changes only that runtime. If the
 runtime directory is unavailable, `readFile`, `writeFile`, `stat`, `lstat`,
-and `readDir` reject with `FS_CWD` during a managed turn, and synchronous
-operations such as `readFileSync`, `writeFileSync`, `statSync`, and
-`readDirSync` throw `FS_CWD`. None falls back to the host directory. Absolute
-paths and `..` components still reach everything the host user can reach; the
-working directory is coordination, not confinement.
+`readDir`, and `mkdir` reject with `FS_CWD` during a managed turn, and
+synchronous operations such as `readFileSync`, `writeFileSync`, `statSync`,
+`readDirSync`, and `mkdirSync` throw `FS_CWD`. None falls back to the host
+directory. Absolute paths and `..` components still reach everything the host
+user can reach; the working directory is coordination, not confinement.
 
 ## Migrate asynchronous operations
 
-`readFile`, `writeFile`, `stat`, `lstat`, and `readDir` return Promises on
-both `fs` and `neo:fs`. Rename an existing blocking call to its `Sync`
-counterpart, or await the asynchronous form in a module. `readText`,
+`readFile`, `writeFile`, `stat`, `lstat`, `readDir`, and `mkdir` return
+Promises on both `fs` and `neo:fs`. Rename an existing blocking call to its
+`Sync` counterpart, or await the asynchronous form in a module. `readText`,
 `writeText`, and the remaining filesystem methods are still synchronous.
 During managed module evaluation, invalid arguments and filesystem errors
-reject the Promise. The `Sync` forms still throw. Outside a managed turn, the asynchronous forms throw
-`FS_ASYNC_OUTSIDE_TURN` before any I/O. This includes calls from `NeoJs::eval`,
-`NeoJs::run`, and the CLI's automatic `neo:test` runner after the module
-returns.
+reject the Promise. The `Sync` forms still throw. Outside a managed turn, the
+asynchronous forms throw `FS_ASYNC_OUTSIDE_TURN` before any I/O. This includes
+calls from `NeoJs::eval`, `NeoJs::run`, and the CLI's automatic `neo:test`
+runner after the module returns.
 
 ### Breaking change: readDir
 
@@ -71,14 +72,23 @@ worker and returns `Promise<DirEntry[]>`. In a managed module, write
 `readDir` outside a managed turn throws `FS_ASYNC_OUTSIDE_TURN` before any
 I/O. This is the same migration shape as `readFile` and `writeFile`.
 
+### Breaking change: mkdir
+
+`mkdir(path, options?)` used to return `void` synchronously. It now runs on a
+worker and returns `Promise<void>`. In a managed module, write
+`await mkdir(path, options)`; in synchronous code use
+`mkdirSync(path, options)`. Calling `mkdir` outside a managed turn throws
+`FS_ASYNC_OUTSIDE_TURN` before any I/O.
+
 ```js
-import { readDir, readFile, stat, writeFile } from "neo:fs";
+import { mkdir, readDir, readFile, stat, writeFile } from "neo:fs";
 
 const bytes = await readFile("input.bin");
 await writeFile("output.bin", bytes);
 const info = await stat("output.bin");
 console.log(info.size);
 for (const entry of await readDir(".")) console.log(entry.name);
+await mkdir("cache", { recursive: true });
 ```
 
 Each managed turn accepts at most four outstanding filesystem operations,
@@ -86,8 +96,8 @@ including undelivered results. At most two run on workers. Each outstanding
 read charges `MAX_READ_BYTES` plus the encoded byte length of its resolved
 path; each write charges its copied byte length plus that path length; each
 metadata read charges a small result bound plus its resolved path length; a
-directory read charges a bounded listing result plus that path length. The
-shared budget is `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
+directory read charges a bounded listing result plus that path length; a
+directory creation charges its resolved path length. The shared budget is `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
 Exceeding the count or byte budget rejects the operation with `FS_LIMIT`.
 This accounts for outstanding worker work, not total memory use. A large
 asynchronous write can briefly hold the caller's input, the JavaScript
@@ -97,17 +107,19 @@ JavaScript retains after delivery.
 The asynchronous forms capture the working directory at the call. A read
 Promise resolves to a new `Uint8Array`; a write Promise resolves to
 `undefined` after the file operation completes; a metadata Promise resolves
-to a `FileInfo` snapshot; a directory Promise resolves to a sorted
-`DirEntry[]`. Concurrent operations have no
-guaranteed completion order. There is no caller cancellation API. On a failed
+to a `FileInfo` snapshot; a directory listing Promise resolves to a sorted
+`DirEntry[]`; a directory creation Promise resolves to `undefined`.
+Concurrent operations have no guaranteed completion order. There is no caller cancellation API. On a failed
 turn with outstanding work, the driver cancels queued work and stops running
 reads between chunks and directory listings between entries where possible.
 A started listing checks cancellation between entries, before its explicit
 no-follow metadata fallback, and before sorting; it rejects with
-`FS_CANCELLED` rather than resolving a partial array. Pending operations reject with `FS_CANCELLED`.
-Teardown cannot interrupt an OS call that has already started:
-a write may still create, truncate, or fully write the file after a failed
-turn or abandoned Promise, and cancellation does not roll back those side
+`FS_CANCELLED` rather than resolving a partial array. Pending operations
+reject with `FS_CANCELLED`. Teardown cannot interrupt an OS call that has
+already started: a write may still create, truncate, or fully write the file
+after a failed turn or abandoned Promise; a started `mkdir` may still create
+some or all directories, including a partial recursive tree, and cancellation
+never removes a directory. Cancellation does not roll back those side
 effects. An OS call can delay teardown. See
 [Managed module evaluation](/runtime/loading/#managed-module-evaluation) for
 runtime failure and quiescence rules.
@@ -182,6 +194,33 @@ The listing is not an atomic snapshot: entries can change while the host reads
 the directory, and type flags may reflect a different instant from the names.
 An asynchronous listing that hits a cancellation check rejects with
 `FS_CANCELLED` instead of returning the entries gathered so far.
+
+## Directories
+
+`mkdir` creates on a worker; `mkdirSync` blocks. Without `recursive`, an
+existing path reports `FS_ALREADY_EXISTS` and a missing parent reports
+`FS_NOT_FOUND`. With `recursive: true`, missing parents are created and an
+existing directory is accepted. No `mode` option is provided. An OS or
+network failure can leave a partially created tree; there is no rollback,
+cleanup, or removal. A started asynchronous creation cannot be interrupted by
+teardown and may still create some or all directories, including a partial
+recursive tree, after a failed turn.
+
+On Unix, a non-recursive `mkdir` refuses a final symlink, including a dangling
+one, with `FS_ALREADY_EXISTS` and never follows it. Recursive `mkdir` accepts a
+final symlink to an existing directory but reports `FS_ALREADY_EXISTS` for a
+dangling final symlink. Both modes follow intermediate symlinks, so creation
+can land outside the apparent parent tree. A non-recursive path below a
+dangling intermediate symlink reports `FS_NOT_FOUND`; the recursive form
+reports `FS_ALREADY_EXISTS`. An intermediate component that resolves to a
+non-directory reports `FS_NOT_DIRECTORY`. A final path occupied by an existing
+regular file reports `FS_ALREADY_EXISTS` in both modes. These rules apply to
+`mkdir` and `mkdirSync`.
+
+These rules are path-based and are not containment. A component can be
+replaced between path resolution and the OS call, redirecting creation
+elsewhere. Windows reparse-point, junction, and symbolic-link semantics are
+platform-specific; this build does not assert them.
 
 ## Deletion
 
@@ -312,7 +351,7 @@ option proxy traps can propagate or reject likewise.
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `FS_PATH`               | Invalid or unsupported path syntax, including empty paths, embedded NULs, and on Windows, drive-relative paths; also a parsed root, trailing separator, or final `.` or `..` for `remove`, `rename`, and `copyFile`. |
 | `FS_NOT_FOUND`          | The path does not exist (or a parent does not).                                                                                                                                                                      |
-| `FS_NOT_DIRECTORY`      | A path component, or a listed path, is not a directory.                                                                                                                                                              |
+| `FS_NOT_DIRECTORY`      | An intermediate path component, or a listed path, is not a directory.                                                                                                                                                |
 | `FS_IS_DIRECTORY`       | A file operation was given a directory.                                                                                                                                                                              |
 | `FS_ALREADY_EXISTS`     | The OS reported an existing path, e.g. for `copyFile`, non-recursive `mkdir`, a write with `{overwrite: false}`, or a `rename` rejected because the destination directory is non-empty.                              |
 | `FS_NOT_EMPTY`          | The OS required an empty directory, e.g. for non-recursive `remove` or some `rename` replacements.                                                                                                                   |
