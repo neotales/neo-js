@@ -17,8 +17,8 @@ use super::{
     Code, DirEntryInfo, FileInfo, FsError, JsError, JsResult, JsString, MAX_LIST_ENTRIES,
     MAX_LIST_NAME_BYTES, MAX_LIST_TOTAL_BYTES, MAX_PATH_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES,
     WorkingDirectory, bounded_copy, checked_js_path, entries_json, file_info_at, file_info_value,
-    mkdir_at, open_regular_source, read_bounded_until, read_dir_at_until, resolve, validate_path,
-    worker, write_bytes_at,
+    mkdir_at, open_regular_source, read_bounded_until, read_dir_at_until, remove_at, resolve,
+    resolve_path, validate_entry_path, validate_path, worker, write_bytes_at,
 };
 
 /// Maximum outstanding filesystem operations, including undelivered
@@ -57,6 +57,8 @@ struct Job {
     gate: Option<Gate>,
     #[cfg(test)]
     read_dir_gate: Option<ReadDirGate>,
+    #[cfg(test)]
+    remove_gate: Option<RemoveGate>,
 }
 
 enum JobKind {
@@ -79,6 +81,10 @@ enum JobKind {
         path: PathBuf,
         recursive: bool,
     },
+    Remove {
+        path: PathBuf,
+        recursive: bool,
+    },
 }
 
 /// A worker result that still needs an owner-side settlement.
@@ -88,6 +94,7 @@ enum Output {
     Stat(FileInfo),
     ReadDir(Vec<DirEntryInfo>),
     Mkdir,
+    Remove,
 }
 
 type OperationResult = Result<Output, FsError>;
@@ -139,6 +146,17 @@ fn execute(job: Job, cancellation: &worker::Cancellation) -> OperationResult {
             mkdir_at(&path, recursive)?;
             Ok(Output::Mkdir)
         }
+        JobKind::Remove { path, recursive } => {
+            remove_at(&path, recursive)?;
+            // Test-only point after the deletion effect has happened. A turn
+            // failure here proves teardown joins a worker that has already
+            // changed the filesystem, so nothing is rolled back.
+            #[cfg(test)]
+            if let Some(RemoveGate(gate)) = job.remove_gate {
+                gate(cancellation)?;
+            }
+            Ok(Output::Remove)
+        }
     }
 }
 
@@ -151,6 +169,7 @@ enum SettlementKind {
     Stat,
     ReadDir,
     Mkdir,
+    Remove,
 }
 
 struct Settlement {
@@ -183,6 +202,7 @@ impl Settlement {
             (SettlementKind::Read, Output::Read(bytes)) => self.finish_read(ctx, bytes),
             (SettlementKind::Write, Output::Write) => self.finish_void(ctx),
             (SettlementKind::Mkdir, Output::Mkdir) => self.finish_void(ctx),
+            (SettlementKind::Remove, Output::Remove) => self.finish_void(ctx),
             (SettlementKind::Stat, Output::Stat(info)) => self.finish_stat(ctx, info),
             (SettlementKind::ReadDir, Output::ReadDir(entries)) => {
                 self.finish_read_dir(ctx, entries)
@@ -217,8 +237,8 @@ impl Settlement {
         object.remove("then")
     }
 
-    /// Resolve an operation that has no value: a write or a directory
-    /// creation.
+    /// Resolve an operation that has no value: a write, a directory
+    /// creation, or a deletion.
     fn finish_void(self, ctx: &Ctx<'_>) -> JsResult<()> {
         self.resolve.restore(ctx)?.call::<_, ()>((Undefined,))
     }
@@ -278,6 +298,8 @@ pub(crate) struct FsDriver {
     gates: Rc<RefCell<std::collections::VecDeque<Gate>>>,
     #[cfg(test)]
     read_dir_gates: Rc<RefCell<std::collections::VecDeque<ReadDirGate>>>,
+    #[cfg(test)]
+    remove_gates: Rc<RefCell<std::collections::VecDeque<RemoveGate>>>,
 }
 
 impl FsDriver {
@@ -383,6 +405,19 @@ impl FsDriver {
         })
     }
 
+    fn submit_remove<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        path: PathBuf,
+        recursive: bool,
+        make_error: Function<'js>,
+    ) -> JsResult<Promise<'js>> {
+        let bytes = path.as_os_str().as_encoded_bytes().len();
+        self.submit(ctx, bytes, SettlementKind::Remove, make_error, move || {
+            Ok(JobKind::Remove { path, recursive })
+        })
+    }
+
     fn dispatch(
         &self,
         bytes: usize,
@@ -422,6 +457,12 @@ impl FsDriver {
         } else {
             None
         };
+        #[cfg(test)]
+        let remove_gate = if matches!(kind, JobKind::Remove { .. }) {
+            self.remove_gates.borrow_mut().pop_front()
+        } else {
+            None
+        };
         admission.send(
             id,
             Job {
@@ -430,6 +471,8 @@ impl FsDriver {
                 gate: self.gates.borrow_mut().pop_front(),
                 #[cfg(test)]
                 read_dir_gate,
+                #[cfg(test)]
+                remove_gate,
             },
         );
         Ok(())
@@ -507,6 +550,25 @@ fn snapshot_absolute_path(
         return Err(FsError::new(Code::Path));
     }
     validate_path(path.to_str().ok_or(FsError::new(Code::Encoding))?)?;
+    Ok(path)
+}
+
+/// Snapshot an absolute path that must name a specific directory entry.
+///
+/// The wrapper already rejected roots, trailing separators, and final `.` or
+/// `..` components before resolution. Re-checking the resolved path keeps that
+/// rule load-bearing for deletion even if the private native callback is ever
+/// reached by a different caller.
+fn snapshot_absolute_entry_path(
+    cwd: &Rc<RefCell<WorkingDirectory>>,
+    path: JsString<'_>,
+) -> Result<PathBuf, FsError> {
+    let path = checked_js_path(path, MAX_PATH_BYTES)?;
+    let path = validate_entry_path(&path)?;
+    let path = resolve_path(&cwd.borrow(), path)?;
+    if !path.is_absolute() {
+        return Err(FsError::new(Code::Path));
+    }
     Ok(path)
 }
 
@@ -609,8 +671,8 @@ pub(super) fn install<'js>(
         )?,
     )?;
 
-    let mkdir_driver = driver;
-    let mkdir_cwd = stat_base_cwd;
+    let mkdir_driver = driver.clone();
+    let mkdir_cwd = Rc::clone(&stat_base_cwd);
     native.set(
         "mkdir",
         Function::new(
@@ -621,6 +683,24 @@ pub(super) fn install<'js>(
                   make_error: Function<'js>| {
                 match snapshot_absolute_path(&mkdir_cwd, path) {
                     Ok(path) => mkdir_driver.submit_mkdir(&ctx, path, recursive, make_error),
+                    Err(error) => throw_argument(&ctx, error, make_error),
+                }
+            },
+        )?,
+    )?;
+
+    let remove_driver = driver;
+    let remove_cwd = stat_base_cwd;
+    native.set(
+        "remove",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  path: JsString<'js>,
+                  recursive: bool,
+                  make_error: Function<'js>| {
+                match snapshot_absolute_entry_path(&remove_cwd, path) {
+                    Ok(path) => remove_driver.submit_remove(&ctx, path, recursive, make_error),
                     Err(error) => throw_argument(&ctx, error, make_error),
                 }
             },
@@ -642,6 +722,14 @@ struct ReadDirGate(Box<ReadDirGateFn>);
 
 #[cfg(test)]
 type ReadDirGateFn = dyn FnMut(&DirEntryInfo, &worker::Cancellation) -> Result<(), FsError> + Send;
+
+/// Test-only pause after `remove_at` has returned, so a deletion effect is
+/// real before the gate blocks. Production builds have no such field or call.
+#[cfg(test)]
+struct RemoveGate(Box<RemoveGateFn>);
+
+#[cfg(test)]
+type RemoveGateFn = dyn FnOnce(&worker::Cancellation) -> Result<(), FsError> + Send;
 
 #[cfg(test)]
 mod tests;

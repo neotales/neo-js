@@ -180,6 +180,15 @@ fn permission_and_allowlist_gate_the_global_and_the_module() {
          if (module.mkdir !== fs.mkdir || module.mkdirSync !== fs.mkdirSync) {
            throw Error('mkdir module and global differ');
          }
+         if (typeof fs.remove !== 'function' || typeof module.remove !== 'function') {
+           throw Error('missing async remove');
+         }
+         if (typeof fs.removeSync !== 'function' || typeof module.removeSync !== 'function') {
+           throw Error('missing sync remove');
+         }
+         if (module.remove !== fs.remove || module.removeSync !== fs.removeSync) {
+           throw Error('remove module and global differ');
+         }
          if (typeof module.rename !== 'function' || module.rename !== fs.rename) {
            throw Error('missing or mismatched rename');
          }
@@ -815,6 +824,210 @@ fn directory_creation_uses_the_cwd_captured_before_option_reflection() {
     .unwrap();
 }
 
+#[test]
+fn removal_is_asynchronous_and_sync_forms_still_throw() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.txt");
+    fs::write(&file, b"x").unwrap();
+    let empty = dir.path().join("empty");
+    fs::create_dir(&empty).unwrap();
+    let tree = dir.path().join("tree");
+    fs::create_dir(&tree).unwrap();
+    fs::write(tree.join("inside.txt"), b"x").unwrap();
+    let nonempty = dir.path().join("nonempty");
+    fs::create_dir(&nonempty).unwrap();
+    fs::write(nonempty.join("child"), b"x").unwrap();
+    let sync_file = dir.path().join("sync-file.txt");
+    fs::write(&sync_file, b"x").unwrap();
+    let sync_empty = dir.path().join("sync-empty");
+    fs::create_dir(&sync_empty).unwrap();
+    let sync_tree = dir.path().join("sync-tree");
+    fs::create_dir(&sync_tree).unwrap();
+    fs::write(sync_tree.join("inside.txt"), b"x").unwrap();
+    let missing = dir.path().join("missing");
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{remove, removeSync, exists, FsError, MAX_PATH_BYTES}} from 'neo:fs';
+            {error_helpers}
+            const file = {file};
+            const empty = {empty};
+            const tree = {tree};
+            const nonempty = {nonempty};
+            const syncFile = {sync_file};
+            const syncEmpty = {sync_empty};
+            const syncTree = {sync_tree};
+            const missing = {missing};
+
+            // Every assertion names its own case in the thrown message.
+            async function expectAsyncCode(label, code, action) {{
+                try {{ await action(); }}
+                catch (error) {{
+                    if (fsErrorCode(error) === code) return error;
+                    throw Error(label + ': expected ' + code + ', got ' + describeError(error));
+                }}
+                throw Error(label + ': expected ' + code + ' but the call succeeded');
+            }}
+            function expectSyncCode(label, code, action) {{
+                try {{ action(); }}
+                catch (error) {{
+                    if (fsErrorCode(error) === code) return error;
+                    throw Error(label + ': expected ' + code + ', got ' + describeError(error));
+                }}
+                throw Error(label + ': expected ' + code + ' but the call succeeded');
+            }}
+            async function expectAsyncType(label, action) {{
+                try {{ await action(); }}
+                catch (error) {{
+                    let isTypeError = false;
+                    try {{ isTypeError = error instanceof TypeError; }} catch {{}}
+                    if (isTypeError) return error;
+                    throw Error(label + ': expected TypeError, got ' + describeError(error));
+                }}
+                throw Error(label + ': expected TypeError but the call succeeded');
+            }}
+            function expectSyncType(label, action) {{
+                try {{ action(); }}
+                catch (error) {{
+                    let isTypeError = false;
+                    try {{ isTypeError = error instanceof TypeError; }} catch {{}}
+                    if (isTypeError) return error;
+                    throw Error(label + ': expected TypeError, got ' + describeError(error));
+                }}
+                throw Error(label + ': expected TypeError but the call succeeded');
+            }}
+
+            const pending = expectSyncSuccess('async remove call', () => remove(file));
+            if (!(pending instanceof Promise)) throw Error('remove did not return a Promise');
+            if ((await expectAsyncSuccess(
+                'async remove promise', () => pending)) !== undefined) {{
+                throw Error('remove resolved with a value');
+            }}
+            if (exists(file)) throw Error('async remove left the file');
+
+            await expectAsyncSuccess('async remove empty directory', () => remove(empty));
+            if (exists(empty)) throw Error('async remove left the empty directory');
+
+            const missingError = await expectAsyncCode(
+                'async remove missing path', 'FS_NOT_FOUND', () => remove(missing));
+            if (leaksPath(missingError, missing)) {{
+                throw Error('async remove missing path leaked the path');
+            }}
+            await expectAsyncCode('async remove non-empty directory', 'FS_NOT_EMPTY',
+                () => remove(nonempty));
+            if (!exists(nonempty)) throw Error('failed async remove deleted the directory');
+            await expectAsyncSuccess('async recursive remove',
+                () => remove(tree, {{recursive: true}}));
+            if (exists(tree)) throw Error('recursive async remove left the tree');
+
+            expectSyncSuccess('sync remove file', () => removeSync(syncFile));
+            if (exists(syncFile)) throw Error('sync remove left the file');
+            expectSyncSuccess('sync remove empty directory', () => removeSync(syncEmpty));
+            if (exists(syncEmpty)) throw Error('sync remove left the empty directory');
+            expectSyncCode('sync remove missing path', 'FS_NOT_FOUND', () => removeSync(missing));
+            expectSyncCode('sync remove non-empty directory', 'FS_NOT_EMPTY',
+                () => removeSync(nonempty));
+            expectSyncSuccess('sync recursive remove',
+                () => removeSync(syncTree, {{recursive: true}}));
+            if (exists(syncTree)) throw Error('recursive sync remove left the tree');
+
+            await expectAsyncCode('async remove empty path', 'FS_PATH', () => remove(''));
+            await expectAsyncCode('async remove trailing separator', 'FS_PATH',
+                () => remove(empty + '/', {{recursive: true}}));
+            await expectAsyncCode('async remove root', 'FS_PATH',
+                () => remove('/', {{recursive: true}}));
+            await expectAsyncCode('async remove oversize path', 'FS_LIMIT',
+                () => remove('x'.repeat(MAX_PATH_BYTES + 1)));
+            await expectAsyncType('async remove null path', () => remove(null));
+            expectSyncType('sync remove object path', () => removeSync({{}}));
+            await expectAsyncType('async remove invalid recursive option',
+                () => remove(nonempty, {{recursive: 'yes'}}));
+            if (!exists(nonempty)) throw Error('invalid async options deleted the directory');
+            expectSyncType('sync remove invalid recursive option',
+                () => removeSync(nonempty, {{recursive: 'yes'}}));
+            if (!exists(nonempty)) throw Error('invalid sync options deleted the directory');"#,
+            error_helpers = FS_TEST_ERROR_HELPERS,
+            file = literal(&file),
+            empty = literal(&empty),
+            tree = literal(&tree),
+            nonempty = literal(&nonempty),
+            sync_file = literal(&sync_file),
+            sync_empty = literal(&sync_empty),
+            sync_tree = literal(&sync_tree),
+            missing = literal(&missing),
+        ),
+    );
+    assert!(nonempty.exists());
+    js.run(
+        "try { fs.remove('outside'); throw Error('dispatched outside managed turn'); }
+         catch (error) {
+           let code = null;
+           try { code = error && error.code; } catch {}
+           if (code !== 'FS_ASYNC_OUTSIDE_TURN') {
+             throw Error('remove outside managed turn: unexpected error');
+           }
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn removal_uses_the_cwd_captured_before_option_reflection() {
+    let old = tempfile::tempdir().unwrap();
+    let new = tempfile::tempdir().unwrap();
+    for root in [old.path(), new.path()] {
+        fs::create_dir(root.join("target")).unwrap();
+        fs::write(root.join("target/child"), b"x").unwrap();
+        fs::create_dir(root.join("sync-target")).unwrap();
+        fs::write(root.join("sync-target/child"), b"x").unwrap();
+    }
+    let js = chunked_runtime();
+    js.run_module(
+        "remove-cwd.js",
+        &format!(
+            r#"import {{chdir}} from 'neo:process';
+            import {{remove, removeSync, exists, FsError}} from 'neo:fs';
+            {error_helpers}
+            const oldDir = {old};
+            const newDir = {new};
+            chdir(oldDir);
+            let trapped = false;
+            const options = new Proxy({{}}, {{
+                ownKeys() {{
+                    trapped = true;
+                    chdir(newDir);
+                    return ['recursive'];
+                }},
+                getOwnPropertyDescriptor(_target, key) {{
+                    if (key !== 'recursive') return undefined;
+                    return {{value: true, enumerable: true, configurable: true, writable: true}};
+                }},
+            }});
+            await expectAsyncSuccess('async remove keeps the captured cwd',
+                () => remove('target', options));
+            if (!trapped) throw Error('option trap did not run');
+            if (exists(oldDir + '/target') || !exists(newDir + '/target/child')) {{
+                throw Error('async remove did not keep the old cwd');
+            }}
+            chdir(newDir);
+            expectSyncSuccess('sync remove uses the captured cwd',
+                () => removeSync('sync-target', {{recursive: true}}));
+            if (exists(newDir + '/sync-target')) {{
+                throw Error('sync remove did not use the new cwd');
+            }}"#,
+            error_helpers = FS_TEST_ERROR_HELPERS,
+            old = literal(old.path()),
+            new = literal(new.path()),
+        ),
+    )
+    .unwrap();
+    assert!(!old.path().join("target").exists());
+    assert!(new.path().join("target/child").exists());
+    assert!(old.path().join("sync-target/child").exists());
+    assert!(!new.path().join("sync-target").exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn directory_creation_follows_unix_symlinks_without_containment() {
@@ -1400,7 +1613,7 @@ fn stable_errors_never_include_the_supplied_path() {
     let js = chunked_runtime();
     let source = r#"
         import {chdir} from 'neo:process';
-        import {readText, readFileSync, writeText, writeFile, writeFileSync, statSync, exists, readDirSync, mkdirSync, remove, FsError} from 'neo:fs';
+        import {readText, readFileSync, writeText, writeFile, writeFileSync, statSync, exists, readDirSync, mkdirSync, removeSync, FsError} from 'neo:fs';
         chdir(__DIR__);
 
         function expectFsError(code, action) {
@@ -1427,7 +1640,7 @@ fn stable_errors_never_include_the_supplied_path() {
         if (error.message.includes(missing)) throw Error('path leaked in message');
         expectFsError('FS_NOT_FOUND', () => readFileSync(missing));
         expectFsError('FS_NOT_FOUND', () => statSync(missing));
-        expectFsError('FS_NOT_FOUND', () => remove(missing));
+        expectFsError('FS_NOT_FOUND', () => removeSync(missing));
 
         expectFsError('FS_PATH', () => readText(''));
         expectFsError('FS_PATH', () => readText('a\u0000b'));
@@ -1435,7 +1648,7 @@ fn stable_errors_never_include_the_supplied_path() {
         expectFsError('FS_PATH', () => exists(''));
         expectFsError('FS_PATH', () => readDirSync(''));
         expectFsError('FS_PATH', () => mkdirSync(''));
-        expectFsError('FS_PATH', () => remove(''));
+        expectFsError('FS_PATH', () => removeSync(''));
         expectFsError('FS_LIMIT', () => readText('x'.repeat(fs.MAX_PATH_BYTES + 1)));
         expectFsError('FS_ENCODING', () => readText('bad\uD800'));
         expectFsError('FS_ENCODING', () => writeText(missing, 'bad\uD800'));
@@ -1450,7 +1663,7 @@ fn stable_errors_never_include_the_supplied_path() {
         expectTypeError(() => writeFileSync(missing, new Uint8Array(0), {overwrite: 'yes'}));
         expectTypeError(() => mkdirSync(missing, null));
         expectTypeError(() => mkdirSync(missing, {recursive: 'yes'}));
-        expectTypeError(() => remove(missing, {recursive: 1}));
+        expectTypeError(() => removeSync(missing, {recursive: 1}));
         expectTypeError(() => statSync({}));
         expectTypeError(() => readDirSync([]));
 
@@ -1569,7 +1782,7 @@ fn overwrite_no_clobber_mkdir_and_remove_are_explicit() {
 
     let js = runtime();
     let source = r#"
-        import {readText, writeText, writeFileSync, mkdirSync, remove, exists, FsError} from 'neo:fs';
+        import {readText, writeText, writeFileSync, mkdirSync, removeSync, exists, FsError} from 'neo:fs';
         __ERROR_HELPERS__
         function expectFsError(code, action) {
             try { action(); }
@@ -1611,14 +1824,14 @@ fn overwrite_no_clobber_mkdir_and_remove_are_explicit() {
         expectSyncSuccess('overwrite test: recursive sync mkdir creates parents',
             () => mkdirSync(nested, {recursive: true}));
         if (!exists(nested)) throw Error('recursive mkdir failed');
-        remove(empty);
+        removeSync(empty);
         if (exists(empty)) throw Error('remove empty dir failed');
 
         expectSyncSuccess('overwrite test: sync mkdir creates a tree root',
             () => mkdirSync(tree));
         writeText(tree + '/inside.txt', 'inside');
-        expectFsError('FS_NOT_EMPTY', () => remove(tree));
-        remove(tree, {recursive: true});
+        expectFsError('FS_NOT_EMPTY', () => removeSync(tree));
+        removeSync(tree, {recursive: true});
         if (exists(tree)) throw Error('recursive remove failed');
     "#
     .replace("__ERROR_HELPERS__", FS_TEST_ERROR_HELPERS)
@@ -1645,7 +1858,7 @@ fn options_are_own_data_properties_and_paths_snapshot_cwd_before_proxy_traps() {
     let js = chunked_runtime();
     let source = r#"
         import {chdir} from 'neo:process';
-        import {readText, writeFileSync, mkdirSync, remove, exists} from 'neo:fs';
+        import {readText, writeFileSync, mkdirSync, removeSync, exists} from 'neo:fs';
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
@@ -1667,7 +1880,7 @@ fn options_are_own_data_properties_and_paths_snapshot_cwd_before_proxy_traps() {
 
         // Inherited options do not select destructive modes.
         expectFsError('FS_NOT_EMPTY', () =>
-            remove('target', Object.create({recursive: true})));
+            removeSync('target', Object.create({recursive: true})));
         writeFileSync('file', new Uint8Array([111]), Object.create({overwrite: false}));
         if (readText('file') !== 'o') throw Error('inherited overwrite changed mode');
 
@@ -1678,7 +1891,7 @@ fn options_are_own_data_properties_and_paths_snapshot_cwd_before_proxy_traps() {
             enumerable: true,
             get() { getterCalls++; return true; },
         });
-        expectTypeError(() => remove('target', accessor));
+        expectTypeError(() => removeSync('target', accessor));
         if (getterCalls !== 0) throw Error('option getter was invoked');
 
         const hidden = {};
@@ -1687,7 +1900,7 @@ fn options_are_own_data_properties_and_paths_snapshot_cwd_before_proxy_traps() {
             enumerable: false,
             value: true,
         });
-        expectTypeError(() => remove('target', hidden));
+        expectTypeError(() => removeSync('target', hidden));
         expectTypeError(() => mkdirSync('another', {recursive: true, unexpected: 1}));
 
         // Proxy reflection traps can run user JS, but the path has already
@@ -1704,7 +1917,7 @@ fn options_are_own_data_properties_and_paths_snapshot_cwd_before_proxy_traps() {
                 return {value: true, enumerable: true, configurable: true, writable: true};
             },
         });
-        remove('target', proxy);
+        removeSync('target', proxy);
         if (trapCalls !== 1) throw Error('proxy trap count');
         if (exists('target') !== true) throw Error('proxy trap redirected deletion');
         if (readText('target/child') !== 'new') throw Error('new cwd target changed');
@@ -1737,7 +1950,7 @@ fn symlink_semantics_are_explicit() {
 
     let js = runtime();
     let source = r#"
-        import {readText, readFileSync, statSync, lstatSync, exists, readDirSync, remove, FsError} from 'neo:fs';
+        import {readText, readFileSync, statSync, lstatSync, exists, readDirSync, removeSync, FsError} from 'neo:fs';
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
@@ -1780,12 +1993,12 @@ fn symlink_semantics_are_explicit() {
         const treeEntry = entries.find((entry) => entry.name === 'tree');
         if (!treeEntry.isDirectory || treeEntry.isSymlink) throw Error('listing directory');
 
-        remove(link);
+        removeSync(link);
         if (exists(link)) throw Error('remove link left the link');
         if (readText(target) !== 'abc') throw Error('remove link followed to target');
 
         // Recursive deletion must not follow a symlink inside the tree.
-        remove(tree, {recursive: true});
+        removeSync(tree, {recursive: true});
         if (exists(tree)) throw Error('recursive remove left the tree');
         if (readText(outside) !== 'keep') throw Error('recursive remove followed a link');
         if (fs.exists(outside) !== true) throw Error('outside target disappeared');
@@ -1813,7 +2026,7 @@ fn remove_rejects_symlink_trailing_components_and_never_resolves_them() {
 
     let js = runtime();
     let source = r#"
-        import {readText, remove, exists, FsError} from 'neo:fs';
+        import {readText, removeSync, exists, FsError} from 'neo:fs';
         function expectPathError(action) {
             try { action(); }
             catch (error) {
@@ -1827,23 +2040,149 @@ fn remove_rejects_symlink_trailing_components_and_never_resolves_them() {
         const link = __LINK__;
         const targetFile = __TARGET_FILE__;
         for (const suffix of ['/', '/.', '/..']) {
-            expectPathError(() => remove(link + suffix, {recursive: true}));
+            expectPathError(() => removeSync(link + suffix, {recursive: true}));
         }
         // Even a regressed guard must not attempt filesystem I/O at root.
-        expectPathError(() => remove('/', new Proxy({}, {
+        expectPathError(() => removeSync('/', new Proxy({}, {
             ownKeys() { throw Error('root path reached option reflection'); },
         })));
         if (!exists(link)) throw Error('link was deleted');
         if (readText(targetFile) !== 'keep') throw Error('target was touched');
 
         // Bare directory symlink removal deletes the link itself, not target.
-        remove(link, {recursive: true});
+        removeSync(link, {recursive: true});
         if (exists(link)) throw Error('bare symlink was retained');
         if (readText(targetFile) !== 'keep') throw Error('bare link removal followed target');
     "#
     .replace("__LINK__", &literal(&link))
     .replace("__TARGET_FILE__", &literal(&target.join("important.txt")));
     run(&js, &source);
+}
+
+#[cfg(unix)]
+#[test]
+fn async_removal_rejects_symlink_trailing_components_and_never_resolves_them() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let guarded = dir.path().join("guarded");
+    let bare = dir.path().join("bare");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("important.txt"), b"keep").unwrap();
+    symlink(&target, &guarded).unwrap();
+    symlink(&target, &bare).unwrap();
+
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{readText, remove, exists, FsError}} from 'neo:fs';
+            async function expectPathError(label, action) {{
+                try {{ await action(); }}
+                catch (error) {{
+                    if (!(error instanceof FsError) || error.code !== 'FS_PATH') {{
+                        throw Error(label + ': wrong error: ' + error);
+                    }}
+                    return;
+                }}
+                throw Error(label + ': unsafe terminal path was accepted');
+            }}
+            const guarded = {guarded};
+            const bare = {bare};
+            const targetFile = {target_file};
+            for (const suffix of ['/', '/.', '/..']) {{
+                await expectPathError('trailing component',
+                    () => remove(guarded + suffix, {{recursive: true}}));
+            }}
+            // Even a regressed guard must not attempt filesystem I/O at root.
+            await expectPathError('root path', () => remove('/', new Proxy({{}}, {{
+                ownKeys() {{ throw Error('root path reached option reflection'); }},
+            }})));
+            if (!exists(guarded)) throw Error('link was deleted');
+            if (readText(targetFile) !== 'keep') throw Error('target was touched');
+
+            // Bare directory symlink removal deletes the link itself, not target.
+            await remove(bare, {{recursive: true}});
+            if (exists(bare)) throw Error('bare symlink was retained');
+            if (readText(targetFile) !== 'keep') throw Error('bare link removal followed target');"#,
+            guarded = literal(&guarded),
+            bare = literal(&bare),
+            target_file = literal(&target.join("important.txt")),
+        ),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn removal_follows_an_intermediate_directory_link_into_an_owned_target() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempfile::tempdir().unwrap();
+    let unrelated = tempfile::tempdir().unwrap();
+    let tree = base.path().join("tree");
+    let target = base.path().join("target");
+    fs::create_dir(&tree).unwrap();
+    fs::create_dir(&target).unwrap();
+    symlink(&target, tree.join("link")).unwrap();
+    fs::write(target.join("victim-file.txt"), b"victim").unwrap();
+    fs::create_dir(target.join("victim-dir")).unwrap();
+    fs::write(target.join("victim-dir/inside.txt"), b"victim").unwrap();
+    fs::write(target.join("sync-file.txt"), b"victim").unwrap();
+    fs::create_dir(target.join("sync-dir")).unwrap();
+    fs::write(target.join("sync-dir/inside.txt"), b"victim").unwrap();
+    fs::write(target.join("keep.txt"), b"keep").unwrap();
+    let sentinel = base.path().join("sentinel.txt");
+    fs::write(&sentinel, b"keep").unwrap();
+    fs::write(unrelated.path().join("keep.txt"), b"keep").unwrap();
+
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{remove, removeSync, exists, lstatSync}} from 'neo:fs';
+            const tree = {tree};
+            const target = {target};
+
+            // An intermediate directory symlink is resolved by the OS. The
+            // final victim is deleted inside the link target, outside the
+            // apparent tree, while the link and every unrelated owned path
+            // remain. There is no containment check or rollback.
+            await remove(tree + '/link/victim-file.txt');
+            if (exists(target + '/victim-file.txt')) {{
+                throw Error('async intermediate link target file survived');
+            }}
+            await remove(tree + '/link/victim-dir', {{recursive: true}});
+            if (exists(target + '/victim-dir')) {{
+                throw Error('async intermediate link target tree survived');
+            }}
+            removeSync(tree + '/link/sync-file.txt');
+            if (exists(target + '/sync-file.txt')) {{
+                throw Error('sync intermediate link target file survived');
+            }}
+            removeSync(tree + '/link/sync-dir', {{recursive: true}});
+            if (exists(target + '/sync-dir')) {{
+                throw Error('sync intermediate link target tree survived');
+            }}
+
+            if (!lstatSync(tree + '/link').isSymlink) {{
+                throw Error('intermediate link was replaced or removed');
+            }}
+            if (!exists(target + '/keep.txt')) {{
+                throw Error('unrelated target entry was removed');
+            }}"#,
+            tree = literal(&tree),
+            target = literal(&target),
+        ),
+    );
+    assert!(!target.join("victim-file.txt").exists());
+    assert!(!target.join("victim-dir").exists());
+    assert!(!target.join("sync-file.txt").exists());
+    assert!(!target.join("sync-dir").exists());
+    assert!(target.join("keep.txt").exists());
+    assert!(tree.join("link").is_symlink());
+    assert!(sentinel.exists());
+    assert!(unrelated.path().join("keep.txt").exists());
 }
 
 #[test]

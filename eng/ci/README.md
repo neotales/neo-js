@@ -49,8 +49,8 @@ Windows machine without GitHub Actions.
 > sanitized observed outcomes before asserting them; the non-recursive
 > intermediate-file result is restricted to `FS_NOT_FOUND` or
 > `FS_NOT_DIRECTORY`, and the recursive result also accepts the observed
-> `FS_ALREADY_EXISTS`. The filesystem suite is now `38` Windows-selected
-> integration tests, plus one filtered pure validation unit test (`97` selected
+> `FS_ALREADY_EXISTS`. The filesystem suite is now `40` Windows-selected
+> integration tests, plus one filtered pure validation unit test (`99` selected
 > in total). This revised suite has not been dispatched, so it is not evidence
 > that the filesystem path passes on Windows. The previous 58-test result
 > remains the only passing native Windows evidence.
@@ -133,7 +133,7 @@ It then runs, in order. Every command includes the explicit target:
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test winregistry -- --test-threads=1`              | 8             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test winregistry_windows -- --test-threads=1`      | 9             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test process`                                      | 9             |
-| `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test fs`                                           | 38            |
+| `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test fs`                                           | 40            |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --lib -- fs::tests::windows_copy_paths_are_rejected_before_io --exact` | 1 selected    |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs --test process`                                           | 19            |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs --test process_stdio`                                     | 6             |
@@ -148,8 +148,8 @@ fails the gate.
 The counts are source-level counts after applying `cfg` gates; they are not a
 claim that those tests passed. `neojs/tests/process.rs` contains 22 tests, of
 which three are `#[cfg(unix)]`, so 19 run on Windows. `neojs-core/tests/fs.rs`
-contains 50 tests; 12 are `#[cfg(unix)]`, so 38 are selected on Windows. The
-38 include four Windows-only integration tests: one uses only owned
+contains 54 tests; 14 are `#[cfg(unix)]`, so 40 are selected on Windows. The
+40 include four Windows-only integration tests: one uses only owned
 `tempfile` fixtures to check `stat`, `lstat`, `readDir`, and their sync forms
 for regular files and directories; one creates a final file symlink (a reparse
 point), verifies that `stat` follows it while `lstat` and `readDir` report the
@@ -168,7 +168,7 @@ cases now run in a pure validation unit test
 `--lib -- ... --exact`. It calls `validate_entry_path` and
 `validate_copy_disk_path` directly and performs no I/O. No junction is created
 and no privileged directory link or host path outside the temp directory is
-touched. The targeted suites total 97 Windows-selected tests when this branch's
+touched. The targeted suites total 99 Windows-selected tests when this branch's
 filesystem suite and validation unit test are included.
 
 The filesystem suite invocation does not add `--nocapture`. The Windows `mkdir`

@@ -1497,3 +1497,418 @@ fn failing_turn_cancels_pending_directory_creations() {
     assert!(js.run("1").unwrap_err().contains("NEO_MODULE_ABORTED"));
     drop(js);
 }
+
+#[test]
+fn a_removal_completes_while_first_worker_is_blocked() {
+    let dir = tempfile::tempdir().unwrap();
+    let first_path = dir.path().join("first");
+    let second_path = dir.path().join("second");
+    fs::write(&first_path, b"first").unwrap();
+    fs::write(&second_path, b"second").unwrap();
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    js.ops.gates.borrow_mut().push_back(Gate(Box::new(move |_| {
+        started_tx.send(()).unwrap();
+        release_rx.recv_timeout(TIMEOUT).unwrap();
+        Ok(())
+    })));
+    let (progress, progress_rx) = mpsc::channel();
+    js.context.with(|ctx| {
+        let progress = Function::new(ctx.clone(), move |phase: u8| {
+            progress.send(phase).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("progress", progress).unwrap();
+    });
+    let controller = thread::spawn(move || {
+        started.recv_timeout(TIMEOUT).unwrap();
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 1);
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 2);
+        release.send(()).unwrap();
+    });
+    let result = js.run_module(
+        "remove-progress.js",
+        &format!(
+            r#"import {{remove, exists}} from 'neo:fs';
+            let done = false;
+            const first = remove({first_path}).then(() => {{
+                done = true;
+                if (exists({first_path})) throw Error('first removal left the file');
+            }});
+            await Promise.resolve();
+            if (done) throw Error('first removal finished before release');
+            progress(1);
+            await remove({second_path});
+            if (done) throw Error('first finished before its worker was released');
+            progress(2);
+            await first;"#,
+            first_path = literal(&first_path),
+            second_path = literal(&second_path),
+        ),
+    );
+    controller.join().unwrap();
+    result.unwrap();
+    assert!(!first_path.exists());
+    assert!(!second_path.exists());
+}
+
+#[test]
+fn outstanding_removals_share_the_operation_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<_> = (0..=MAX_PENDING)
+        .map(|index| dir.path().join(format!("out-{index}")))
+        .collect();
+    for path in &paths {
+        fs::write(path, b"x").unwrap();
+    }
+    let literals: Vec<_> = paths.iter().map(|path| literal(path)).collect();
+    let path_array = format!("[{}]", literals.join(","));
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (progress, progress_rx) = std::sync::mpsc::channel();
+    js.context.with(|ctx| {
+        let progress = Function::new(ctx.clone(), move |phase: u8| {
+            progress.send(phase).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("progress", progress).unwrap();
+    });
+    let (release_first_tx, release_first) = mpsc::channel::<()>();
+    let (release_second_tx, release_second) = mpsc::channel::<()>();
+    {
+        let mut gates = js.ops.gates.borrow_mut();
+        for wait in [release_first, release_second] {
+            let started_tx = started_tx.clone();
+            gates.push_back(Gate(Box::new(move |_| {
+                started_tx.send(()).unwrap();
+                wait.recv_timeout(TIMEOUT).unwrap();
+                Ok(())
+            })));
+        }
+    }
+    drop(started_tx);
+    let controller = thread::spawn(move || {
+        started.recv_timeout(TIMEOUT).unwrap();
+        started.recv_timeout(TIMEOUT).unwrap();
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 1);
+        release_first_tx.send(()).unwrap();
+        release_second_tx.send(()).unwrap();
+    });
+    let result = js.run_module(
+        "remove-saturation.js",
+        &format!(
+            r#"import {{remove, exists, FsError}} from 'neo:fs';
+            const paths = {paths};
+            const removals = [];
+            for (let i = 0; i < {limit}; i++) removals.push(remove(paths[i]));
+            try {{
+                await remove(paths[{limit}]);
+                throw Error('admitted one removal beyond the bound');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_LIMIT') throw error;
+            }}
+            progress(1);
+            for (const result of await Promise.all(removals)) {{
+                if (result !== undefined) throw Error('remove resolved with a value');
+            }}
+            await remove(paths[{limit}]);
+            if (exists(paths[0]) || exists(paths[{limit}])) {{
+                throw Error('accepted removal left a file');
+            }}"#,
+            paths = path_array,
+            limit = MAX_PENDING,
+        ),
+    );
+    controller.join().unwrap();
+    result.unwrap();
+    for path in &paths {
+        assert!(!path.exists(), "still present: {}", path.display());
+    }
+}
+
+#[test]
+fn removals_share_the_bound_with_reads_and_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.bin");
+    let written = dir.path().join("written.bin");
+    let first_path = dir.path().join("first");
+    let second_path = dir.path().join("second");
+    let rejected_path = dir.path().join("rejected");
+    fs::write(&file, [42, 7]).unwrap();
+    fs::write(&first_path, b"first").unwrap();
+    fs::write(&second_path, b"second").unwrap();
+    fs::write(&rejected_path, b"rejected").unwrap();
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (progress, progress_rx) = std::sync::mpsc::channel();
+    js.context.with(|ctx| {
+        let progress = Function::new(ctx.clone(), move |phase: u8| {
+            progress.send(phase).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("progress", progress).unwrap();
+    });
+    let (release_read_tx, release_read) = mpsc::channel::<()>();
+    let (release_remove_tx, release_remove) = mpsc::channel::<()>();
+    {
+        let mut gates = js.ops.gates.borrow_mut();
+        gates.push_back(Gate(Box::new({
+            let started_tx = started_tx.clone();
+            move |_| {
+                started_tx.send(()).unwrap();
+                release_read.recv_timeout(TIMEOUT).unwrap();
+                Ok(())
+            }
+        })));
+        gates.push_back(Gate(Box::new(move |_| {
+            started_tx.send(()).unwrap();
+            release_remove.recv_timeout(TIMEOUT).unwrap();
+            Ok(())
+        })));
+    }
+    let controller = thread::spawn(move || {
+        started.recv_timeout(TIMEOUT).unwrap();
+        started.recv_timeout(TIMEOUT).unwrap();
+        assert_eq!(progress_rx.recv_timeout(TIMEOUT).unwrap(), 1);
+        release_read_tx.send(()).unwrap();
+        release_remove_tx.send(()).unwrap();
+    });
+    let result = js.run_module(
+        "remove-mixed-saturation.js",
+        &format!(
+            r#"import {{readFile, writeFile, remove, exists, FsError}} from 'neo:fs';
+            const read = readFile({file});
+            const first = remove({first_path});
+            const write = writeFile({written}, new Uint8Array([5]));
+            const second = remove({second_path});
+            try {{
+                await remove({rejected_path});
+                throw Error('admitted work beyond the shared bound');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_LIMIT') throw error;
+            }}
+            progress(1);
+            const [bytes, removedFirst, wrote, removedSecond] =
+                await Promise.all([read, first, write, second]);
+            if (bytes[0] !== 42 || removedFirst !== undefined || removedSecond !== undefined) {{
+                throw Error('accepted work resolved with the wrong value');
+            }}
+            if (wrote !== undefined) throw Error('write resolved with a value');
+            if (fs.readFileSync({written})[0] !== 5) throw Error('accepted write did not land');
+            if (exists({first_path}) || exists({second_path})) {{
+                throw Error('accepted removal left a file');
+            }}
+            await remove({rejected_path});
+            if (exists({rejected_path})) throw Error('removal admission did not recover');"#,
+            file = literal(&file),
+            written = literal(&written),
+            first_path = literal(&first_path),
+            second_path = literal(&second_path),
+            rejected_path = literal(&rejected_path),
+        ),
+    );
+    controller.join().unwrap();
+    result.unwrap();
+    assert_eq!(fs::read(&written).unwrap(), [5]);
+    assert!(!first_path.exists() && !second_path.exists() && !rejected_path.exists());
+}
+
+#[test]
+fn a_panicking_removal_is_reported_as_io_and_leaves_the_worker_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("removed");
+    fs::write(&target, b"x").unwrap();
+    let js = runtime();
+    js.ops.gates.borrow_mut().push_back(Gate(Box::new(|_| {
+        panic!("injected worker panic");
+    })));
+    js.run_module(
+        "panic-remove.js",
+        &format!(
+            r#"import {{remove, exists, FsError}} from 'neo:fs';
+            try {{
+                await remove({target});
+                throw Error('panicking removal fulfilled');
+            }} catch (error) {{
+                if (!(error instanceof FsError) || error.code !== 'FS_IO') throw error;
+            }}
+            if (!exists({target})) throw Error('panicking removal deleted the file');
+            await remove({target});
+            if (exists({target})) throw Error('worker did not recover');"#,
+            target = literal(&target),
+        ),
+    )
+    .unwrap();
+    assert!(!target.exists());
+}
+
+#[test]
+fn failing_turn_cancels_pending_removals() {
+    let dir = tempfile::tempdir().unwrap();
+    let targets: Vec<_> = (0..3)
+        .map(|index| dir.path().join(format!("cancelled-{index}")))
+        .collect();
+    for path in &targets {
+        fs::write(path, b"x").unwrap();
+    }
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (joined_tx, joined) = mpsc::channel();
+    let (third_tx, third_started) = mpsc::channel();
+    let mut release = Vec::new();
+    {
+        let mut gates = js.ops.gates.borrow_mut();
+        for _ in 0..2 {
+            let (send, wait) = mpsc::channel::<()>();
+            release.push(send);
+            let started_tx = started_tx.clone();
+            let joined_tx = joined_tx.clone();
+            gates.push_back(Gate(Box::new(move |cancel| {
+                started_tx.send(()).unwrap();
+                assert_eq!(
+                    wait.recv_timeout(TIMEOUT),
+                    Err(mpsc::RecvTimeoutError::Disconnected)
+                );
+                joined_tx.send(cancel.requested()).unwrap();
+                Ok(())
+            })));
+        }
+        gates.push_back(Gate(Box::new(move |_| {
+            drop(release);
+            third_tx.send(()).unwrap();
+            Ok(())
+        })));
+    }
+    js.context.with(|ctx| {
+        let wait = Function::new(ctx.clone(), move || {
+            started.recv_timeout(TIMEOUT).unwrap();
+            started.recv_timeout(TIMEOUT).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("finishRemovals", wait).unwrap();
+    });
+    let result = js.run_module(
+        "cancel-remove.js",
+        &format!(
+            "globalThis.cancelledRemove = fs.remove({first});
+             fs.remove({second}); fs.remove({third});
+             finishRemovals(); throw Error('entry failed');",
+            first = literal(&targets[0]),
+            second = literal(&targets[1]),
+            third = literal(&targets[2]),
+        ),
+    );
+    assert!(result.unwrap_err().contains("entry failed"));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(
+        third_started.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    );
+    assert!(targets.iter().all(|path| path.exists()));
+    assert!(js.ops.active.borrow().is_none());
+    js.context.with(|ctx| {
+        let promise: Promise = ctx.globals().get("cancelledRemove").unwrap();
+        assert!(matches!(
+            promise.result::<()>(),
+            Some(Err(JsError::Exception))
+        ));
+        let reason = ctx.catch().into_object().unwrap();
+        assert_eq!(reason.get::<_, String>("code").unwrap(), "FS_CANCELLED");
+    });
+    assert!(js.run("1").unwrap_err().contains("NEO_MODULE_ABORTED"));
+    drop(js);
+}
+
+#[test]
+fn failing_turn_cancels_a_removal_after_its_deletion_effect() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    let queued = dir.path().join("queued");
+    for path in [&first, &second, &queued] {
+        fs::write(path, b"x").unwrap();
+    }
+    let js = runtime();
+    let (started_tx, started) = mpsc::channel();
+    let (joined_tx, joined) = mpsc::channel();
+    let (queued_tx, queued_started) = mpsc::channel();
+    let mut release = Vec::new();
+    {
+        // Each of the two running workers pauses only after `remove_at` has
+        // returned, so the file is already gone when the wait begins.
+        let mut remove_gates = js.ops.remove_gates.borrow_mut();
+        for target in [first.clone(), second.clone()] {
+            let (send, wait) = mpsc::channel::<()>();
+            release.push(send);
+            let started_tx = started_tx.clone();
+            let joined_tx = joined_tx.clone();
+            remove_gates.push_back(RemoveGate(Box::new(move |cancel| {
+                assert!(!target.exists(), "gate ran before the deletion effect");
+                started_tx.send(()).unwrap();
+                assert_eq!(
+                    wait.recv_timeout(TIMEOUT),
+                    Err(mpsc::RecvTimeoutError::Disconnected)
+                );
+                joined_tx.send(cancel.requested()).unwrap();
+                Ok(())
+            })));
+        }
+        // A no-op pre-execute gate occupies each running job. The third gate
+        // owns the senders and is attached to the queued job; discarding that
+        // request during shutdown disconnects both post-effect waits.
+        let mut gates = js.ops.gates.borrow_mut();
+        for _ in 0..2 {
+            gates.push_back(Gate(Box::new(|_| Ok(()))));
+        }
+        gates.push_back(Gate(Box::new(move |_| {
+            drop(release);
+            queued_tx.send(()).unwrap();
+            Ok(())
+        })));
+    }
+    js.context.with(|ctx| {
+        let wait = Function::new(ctx.clone(), move || {
+            started.recv_timeout(TIMEOUT).unwrap();
+            started.recv_timeout(TIMEOUT).unwrap();
+        })
+        .unwrap();
+        ctx.globals().set("finishRemovals", wait).unwrap();
+    });
+    let result = js.run_module(
+        "cancel-remove-effect.js",
+        &format!(
+            "globalThis.cancelledRemoveEffect = fs.remove({first});
+             fs.remove({second}); fs.remove({queued});
+             finishRemovals(); throw Error('entry failed');",
+            first = literal(&first),
+            second = literal(&second),
+            queued = literal(&queued),
+        ),
+    );
+    assert!(result.unwrap_err().contains("entry failed"));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(joined.try_recv(), Ok(true));
+    assert_eq!(
+        queued_started.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    );
+    // The two started deletions are real side effects and were not rolled back.
+    assert!(!first.exists());
+    assert!(!second.exists());
+    // The queued deletion was never dispatched.
+    assert!(queued.exists());
+    assert!(js.ops.active.borrow().is_none());
+    js.context.with(|ctx| {
+        let promise: Promise = ctx.globals().get("cancelledRemoveEffect").unwrap();
+        assert!(matches!(
+            promise.result::<()>(),
+            Some(Err(JsError::Exception))
+        ));
+        let reason = ctx.catch().into_object().unwrap();
+        assert_eq!(reason.get::<_, String>("code").unwrap(), "FS_CANCELLED");
+    });
+    assert!(js.run("1").unwrap_err().contains("NEO_MODULE_ABORTED"));
+    drop(js);
+}

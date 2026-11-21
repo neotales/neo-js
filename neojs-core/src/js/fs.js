@@ -330,6 +330,28 @@
     }
 
     function remove(path, options) {
+      // Outside a managed turn there is no owner to deliver a rejection.
+      if (!native.canAsync()) throw makeError('FS_ASYNC_OUTSIDE_TURN');
+      try {
+        requirePath(path, makeError);
+        // Reject ambiguous terminal components before cwd resolution. The
+        // resolved absolute path is captured before proxy reflection can run
+        // script.
+        const snapshot = unwrapWith(native.snapshotRemovePath(path), makeError);
+        const opts = requireOptions(options, ['recursive']);
+        let recursive = false;
+        if (opts !== null) {
+          if (hasOwn(opts, 'recursive')) {
+            recursive = requireBoolean(opts.recursive, 'options.recursive');
+          }
+        }
+        return native.remove(snapshot, recursive, makeError);
+      } catch (error) {
+        return rejectPromise(error);
+      }
+    }
+
+    function removeSync(path, options) {
       requirePath(path);
       // Reject ambiguous terminal components before cwd resolution. The
       // resolved absolute path is captured before proxy reflection can run JS.
@@ -341,7 +363,7 @@
           recursive = requireBoolean(opts.recursive, 'options.recursive');
         }
       }
-      unwrap(native.remove(snapshot, recursive));
+      unwrap(native.removeSync(snapshot, recursive));
     }
 
     function rename(source, destination) {
@@ -375,6 +397,7 @@
     defineValue(api, 'mkdir', mkdir);
     defineValue(api, 'mkdirSync', mkdirSync);
     defineValue(api, 'remove', remove);
+    defineValue(api, 'removeSync', removeSync);
     defineValue(api, 'rename', rename);
     defineValue(api, 'copyFile', copyFile);
     defineValue(api, 'FsError', FsError);

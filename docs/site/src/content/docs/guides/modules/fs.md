@@ -9,26 +9,27 @@ admits `neo:fs`. Both gates are checked before the `fs` global or any native
 callback is built. The global `fs` object and the module expose the same
 functions and `FsError` class.
 
-| Function                              | Description                                                            |
-| ------------------------------------- | ---------------------------------------------------------------------- |
-| `readText(path)`                      | Read a regular file as UTF-8 text.                                     |
-| `writeText(path, data)`               | Write text, creating or truncating the file.                           |
-| `readFile(path)`                      | Read a regular file on a worker. Returns `Promise<Uint8Array>`.        |
-| `readFileSync(path)`                  | Read a regular file as a `Uint8Array`, blocking the JavaScript thread. |
-| `writeFile(path, data, options?)`     | Write a `Uint8Array` on a worker. Returns `Promise<void>`.             |
-| `writeFileSync(path, data, options?)` | Write a `Uint8Array`, blocking the JavaScript thread.                  |
-| `copyFile(source, destination)`       | Stream a regular file into a new file; never overwrite.                |
-| `stat(path)`                          | Metadata on a worker, following a final symlink. `Promise<FileInfo>`.  |
-| `statSync(path)`                      | Metadata, following a final symlink, blocking the JavaScript thread.   |
-| `lstat(path)`                         | Metadata on a worker without following a final symlink.                |
-| `lstatSync(path)`                     | Metadata without following a final symlink, blocking the thread.       |
-| `exists(path)`                        | Existence check, following a final symlink.                            |
-| `readDir(path)`                       | List a directory on a worker. Returns `Promise<DirEntry[]>`.           |
-| `readDirSync(path)`                   | Non-recursive, sorted listing, blocking the JavaScript thread.         |
-| `mkdir(path, options?)`               | Create a directory on a worker. Returns `Promise<void>`.               |
-| `mkdirSync(path, options?)`           | Create a directory; `{recursive: true}` creates parents.               |
-| `remove(path, options?)`              | Remove a file, link, or directory; `{recursive: true}` removes a tree. |
-| `rename(source, destination)`         | Rename a file, directory, or symlink entry using the host OS.          |
+| Function                              | Description                                                             |
+| ------------------------------------- | ----------------------------------------------------------------------- |
+| `readText(path)`                      | Read a regular file as UTF-8 text.                                      |
+| `writeText(path, data)`               | Write text, creating or truncating the file.                            |
+| `readFile(path)`                      | Read a regular file on a worker. Returns `Promise<Uint8Array>`.         |
+| `readFileSync(path)`                  | Read a regular file as a `Uint8Array`, blocking the JavaScript thread.  |
+| `writeFile(path, data, options?)`     | Write a `Uint8Array` on a worker. Returns `Promise<void>`.              |
+| `writeFileSync(path, data, options?)` | Write a `Uint8Array`, blocking the JavaScript thread.                   |
+| `copyFile(source, destination)`       | Stream a regular file into a new file; never overwrite.                 |
+| `stat(path)`                          | Metadata on a worker, following a final symlink. `Promise<FileInfo>`.   |
+| `statSync(path)`                      | Metadata, following a final symlink, blocking the JavaScript thread.    |
+| `lstat(path)`                         | Metadata on a worker without following a final symlink.                 |
+| `lstatSync(path)`                     | Metadata without following a final symlink, blocking the thread.        |
+| `exists(path)`                        | Existence check, following a final symlink.                             |
+| `readDir(path)`                       | List a directory on a worker. Returns `Promise<DirEntry[]>`.            |
+| `readDirSync(path)`                   | Non-recursive, sorted listing, blocking the JavaScript thread.          |
+| `mkdir(path, options?)`               | Create a directory on a worker. Returns `Promise<void>`.                |
+| `mkdirSync(path, options?)`           | Create a directory; `{recursive: true}` creates parents.                |
+| `remove(path, options?)`              | Remove a file, link, or directory on a worker. Returns `Promise<void>`. |
+| `removeSync(path, options?)`          | Remove a file, link, or directory; `{recursive: true}` removes a tree.  |
+| `rename(source, destination)`         | Rename a file, directory, or symlink entry using the host OS.           |
 
 ```js
 import { readDir, stat } from "neo:fs";
@@ -46,17 +47,18 @@ if (entries.some((entry) => entry.name === "README.md")) {
 Relative paths use the runtime's working directory, not the host process's
 mutable directory. `neo:process.chdir` changes only that runtime. If the
 runtime directory is unavailable, `readFile`, `writeFile`, `stat`, `lstat`,
-`readDir`, and `mkdir` reject with `FS_CWD` during a managed turn, and
-synchronous operations such as `readFileSync`, `writeFileSync`, `statSync`,
-`readDirSync`, and `mkdirSync` throw `FS_CWD`. None falls back to the host
-directory. Absolute paths and `..` components still reach everything the host
-user can reach; the working directory is coordination, not confinement.
+`readDir`, `mkdir`, and `remove` reject with `FS_CWD` during a managed turn,
+and synchronous operations such as `readFileSync`, `writeFileSync`, `statSync`,
+`readDirSync`, `mkdirSync`, and `removeSync` throw `FS_CWD`. None falls back to
+the host directory. Absolute paths and `..` components still reach everything
+the host user can reach; the working directory is coordination, not
+confinement.
 
 ## Migrate asynchronous operations
 
-`readFile`, `writeFile`, `stat`, `lstat`, `readDir`, and `mkdir` return
-Promises on both `fs` and `neo:fs`. Rename an existing blocking call to its
-`Sync` counterpart, or await the asynchronous form in a module. `readText`,
+`readFile`, `writeFile`, `stat`, `lstat`, `readDir`, `mkdir`, and `remove`
+return Promises on both `fs` and `neo:fs`. Rename an existing blocking call to
+its `Sync` counterpart, or await the asynchronous form in a module. `readText`,
 `writeText`, and the remaining filesystem methods are still synchronous.
 During managed module evaluation, invalid arguments and filesystem errors
 reject the Promise. The `Sync` forms still throw. Outside a managed turn, the
@@ -80,8 +82,16 @@ worker and returns `Promise<void>`. In a managed module, write
 `mkdirSync(path, options)`. Calling `mkdir` outside a managed turn throws
 `FS_ASYNC_OUTSIDE_TURN` before any I/O.
 
+### Breaking change: remove
+
+`remove(path, options?)` used to return `void` synchronously. It now runs on a
+worker and returns `Promise<void>`. In a managed module, write
+`await remove(path, options)`; in synchronous code use
+`removeSync(path, options)`. Calling `remove` outside a managed turn throws
+`FS_ASYNC_OUTSIDE_TURN` before any I/O.
+
 ```js
-import { mkdir, readDir, readFile, stat, writeFile } from "neo:fs";
+import { mkdir, readDir, readFile, remove, stat, writeFile } from "neo:fs";
 
 const bytes = await readFile("input.bin");
 await writeFile("output.bin", bytes);
@@ -89,6 +99,7 @@ const info = await stat("output.bin");
 console.log(info.size);
 for (const entry of await readDir(".")) console.log(entry.name);
 await mkdir("cache", { recursive: true });
+await remove("cache", { recursive: true });
 ```
 
 Each managed turn accepts at most four outstanding filesystem operations,
@@ -97,7 +108,8 @@ read charges `MAX_READ_BYTES` plus the encoded byte length of its resolved
 path; each write charges its copied byte length plus that path length; each
 metadata read charges a small result bound plus its resolved path length; a
 directory read charges a bounded listing result plus that path length; a
-directory creation charges its resolved path length. The shared budget is `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
+directory creation or deletion charges its resolved path length. The shared
+budget is `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
 Exceeding the count or byte budget rejects the operation with `FS_LIMIT`.
 This accounts for outstanding worker work, not total memory use. A large
 asynchronous write can briefly hold the caller's input, the JavaScript
@@ -108,8 +120,9 @@ The asynchronous forms capture the working directory at the call. A read
 Promise resolves to a new `Uint8Array`; a write Promise resolves to
 `undefined` after the file operation completes; a metadata Promise resolves
 to a `FileInfo` snapshot; a directory listing Promise resolves to a sorted
-`DirEntry[]`; a directory creation Promise resolves to `undefined`.
-Concurrent operations have no guaranteed completion order. There is no caller cancellation API. On a failed
+`DirEntry[]`; a directory creation or deletion Promise resolves to
+`undefined`. Concurrent operations have no guaranteed completion order. There
+is no caller cancellation API. On a failed
 turn with outstanding work, the driver cancels queued work and stops running
 reads between chunks and directory listings between entries where possible.
 A started listing checks cancellation between entries, before its explicit
@@ -119,8 +132,10 @@ reject with `FS_CANCELLED`. Teardown cannot interrupt an OS call that has
 already started: a write may still create, truncate, or fully write the file
 after a failed turn or abandoned Promise; a started `mkdir` may still create
 some or all directories, including a partial recursive tree, and cancellation
-never removes a directory. Cancellation does not roll back those side
-effects. An OS call can delay teardown. See
+never removes a directory; a started `remove` may still delete some or all
+entries, including part of a recursive tree, and cancellation restores
+nothing. Cancellation does not roll back those side effects. An OS call can
+delay teardown. See
 [Managed module evaluation](/runtime/loading/#managed-module-evaluation) for
 runtime failure and quiescence rules.
 
@@ -168,9 +183,11 @@ The rules are explicit:
 - `lstat` and `lstatSync` do not follow it and report `isSymlink: true`.
 - `readDir` and `readDirSync` follow a symlink to a directory but do not follow
   entries; an entry that is a link is reported with `isSymlink: true`.
-- `remove` does not follow a symlink at the target; it removes the link
-  except for Windows directory symlinks (see below). Recursive deletion also
-  does not follow symlinks inside the tree.
+- `remove` and `removeSync` do not follow a symlink at the target; they remove
+  the link except for Windows directory symlinks (see below). Recursive
+  deletion also does not follow symlinks inside the tree. An intermediate
+  directory symlink in the path is resolved by the OS, so deletion can land
+  inside the link target, outside the apparent tree.
 - `mkdir` follows the operating system's rules for existing components.
 - `rename` acts on the final entries without following either final symlink.
 - `copyFile` follows a final source symlink to a regular file. A final
@@ -224,14 +241,24 @@ platform-specific; this build does not assert them.
 
 ## Deletion
 
-`remove(path)` removes a file, symlink, or empty directory. A non-empty
-directory throws `FS_NOT_EMPTY`. `remove(path, {recursive: true})` removes a
-tree. Recursive deletion has no count limit and no undo; choose the path
-carefully. It may remove some entries before an OS error stops the traversal;
-there is no rollback. Parsed roots (including Windows UNC and verbatim UNC
-share roots without a trailing separator), paths ending in a separator, and
-paths ending in a `.` or `..` component are rejected with `FS_PATH` before cwd
-resolution, without canonicalizing. Remove a specific child instead.
+`remove` deletes on a worker; `removeSync` blocks. Both remove a file,
+symlink, or empty directory. A non-empty directory reports `FS_NOT_EMPTY`.
+`remove(path, {recursive: true})` removes a tree. Recursive deletion has no
+count limit and no undo; choose the path carefully. It may remove some entries
+before an OS error stops the traversal; there is no rollback. A started
+asynchronous deletion cannot be interrupted by teardown and may still remove
+some or all entries after a failed turn; cancellation restores nothing.
+Parsed roots (including Windows UNC and verbatim UNC share roots without a
+trailing separator), paths ending in a separator, and paths ending in a `.` or
+`..` component are rejected with `FS_PATH` before cwd resolution, without
+canonicalizing. Remove a specific child instead.
+
+A final symlink is removed as a link and is never followed. An intermediate
+directory symlink in the path is resolved by the OS, so both forms can delete
+inside the link target, outside the apparent parent tree. The path checks are
+not containment: an intermediate component can be replaced between validation
+and the OS call (time-of-check/time-of-use), and the runtime neither
+canonicalizes the target nor reverses a deletion.
 
 Options are strict: only `overwrite` or `recursive` (as applicable) is
 accepted, and each option must be an own, enumerable data property. Accessors,

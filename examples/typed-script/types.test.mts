@@ -1,5 +1,5 @@
 import process, { ElevationError, isElevated, stdout } from "neo:process";
-import { readFile, readFileSync, writeFile, writeFileSync, stat, statSync, lstat, lstatSync, readDir, readDirSync, mkdir, mkdirSync } from "neo:fs";
+import { readFile, readFileSync, writeFile, writeFileSync, stat, statSync, lstat, lstatSync, readDir, readDirSync, mkdir, mkdirSync, remove, removeSync } from "neo:fs";
 import type { DirEntry, FileInfo } from "neo:fs";
 
 const elevated: boolean = isElevated();
@@ -44,6 +44,11 @@ const syncedMkdir: void = mkdirSync("dir", { recursive: true });
 const globalPendingMkdir: Promise<void> = fs.mkdir("dir", { recursive: true });
 const globalSyncedMkdir: void = fs.mkdirSync("dir", { recursive: true });
 
+const pendingRemove: Promise<void> = remove("dir", { recursive: true });
+const syncedRemove: void = removeSync("dir", { recursive: true });
+const globalPendingRemove: Promise<void> = fs.remove("dir", { recursive: true });
+const globalSyncedRemove: void = fs.removeSync("dir", { recursive: true });
+
 // @ts-expect-error The unsuffixed method no longer returns metadata synchronously.
 const notMetadata: FileInfo = stat("data.bin");
 // @ts-expect-error The unsuffixed global method returns metadata asynchronously.
@@ -54,6 +59,8 @@ const notLinkMetadata: FileInfo = lstat("data.bin");
 const notEntries: DirEntry[] = readDir(".");
 // @ts-expect-error The unsuffixed mkdir no longer completes synchronously.
 const notMkdir: void = mkdir("dir");
+// @ts-expect-error The unsuffixed remove no longer completes synchronously.
+const notRemove: void = remove("dir");
 
 // @ts-expect-error The unsuffixed method no longer returns bytes synchronously.
 const notBytes: Uint8Array = readFile("data.bin");

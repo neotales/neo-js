@@ -98,7 +98,22 @@ declare const fs: {
    * symlink behavior and no containment as `neo:fs.mkdirSync`.
    */
   mkdirSync(path: string, options?: import("neo:fs").MkdirOptions): void;
-  remove(path: string, options?: import("neo:fs").RemoveOptions): void;
+  /**
+   * Remove a file, symlink, or directory during managed module evaluation.
+   * Outside it, this throws `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O.
+   * It uses the same outstanding-operation, worker, and turn-budget limits as
+   * `readFile`. An intermediate directory symlink is followed by the OS, so
+   * deletion can land outside the apparent tree, and a component can change
+   * between validation and use. See `neo:fs.remove` for the full symlink,
+   * error, and race rules.
+   */
+  remove(path: string, options?: import("neo:fs").RemoveOptions): Promise<void>;
+  /**
+   * Remove a file, symlink, or directory synchronously. It has the same entry,
+   * intermediate-symlink, time-of-check/time-of-use, and no-rollback rules as
+   * `neo:fs.removeSync`.
+   */
+  removeSync(path: string, options?: import("neo:fs").RemoveOptions): void;
   /** Same entry, replacement, and error semantics as `neo:fs.rename`. */
   rename: typeof import("neo:fs").rename;
   /** Same bounded, no-clobber copy as `neo:fs.copyFile`. */
@@ -130,10 +145,11 @@ declare module "neo:env" {
  * allowlist that admits `neo:fs`.
  *
  * During managed module evaluation, `readFile` reads, `writeFile` writes,
- * `stat` and `lstat` read metadata, `readDir` lists a directory, and `mkdir`
- * creates a directory on a worker. Those six return Promises. `readFileSync`,
- * `writeFileSync`, `statSync`, `lstatSync`, `readDirSync`, `mkdirSync`, and
- * the other operations block the JavaScript thread. Relative paths resolve
+ * `stat` and `lstat` read metadata, `readDir` lists a directory, `mkdir`
+ * creates a directory, and `remove` deletes an entry on a worker. Those seven
+ * return Promises. `readFileSync`, `writeFileSync`, `statSync`, `lstatSync`,
+ * `readDirSync`, `mkdirSync`, `removeSync`, and the other operations block
+ * the JavaScript thread. Relative paths resolve
  * against the runtime's working directory, with no fallback to the host
  * directory. If that directory is unavailable, the asynchronous forms reject
  * with `FS_CWD` during a managed turn and synchronous operations throw
@@ -156,10 +172,12 @@ declare module "neo:env" {
  * `writeFileSync`, `writeText`, `exists`, `readDir`, and `readDirSync` follow a
  * symlink at the final path component. `lstat` and `lstatSync` do not.
  * `readDir` and `readDirSync` do not follow entries and report a symlink entry
- * with `isSymlink: true`. `remove` never follows a symlink at the target, and
- * recursive deletion does not follow symlinks inside the tree.
- * `remove` rejects parsed roots (including Windows UNC share roots), paths
- * ending in a separator, and final `.` or `..` components with `FS_PATH`.
+ * with `isSymlink: true`. `remove` and `removeSync` never follow a symlink at
+ * the target, and recursive deletion does not follow symlinks inside the tree.
+ * An intermediate directory symlink in the path is resolved by the OS, so a
+ * deletion can land inside the link target, outside the apparent tree. They
+ * report parsed roots (including Windows UNC share roots), paths ending in a
+ * separator, and final `.` or `..` components with `FS_PATH`.
  * A Windows directory symlink named directly as the target is rejected with
  * `FS_UNSUPPORTED`, even if dangling.
  *
@@ -195,8 +213,9 @@ declare module "neo:env" {
 declare module "neo:fs" {
   /**
    * Stable failure codes reported by `FsError.code`. `FS_PATH` includes
-   * invalid or unsupported path syntax and, for `remove`, `rename`, and `copyFile`,
-   * parsed roots, trailing separators, and final `.` or `..` components.
+   * invalid or unsupported path syntax and, for `remove`, `removeSync`,
+   * `rename`, and `copyFile`, parsed roots, trailing separators, and final `.`
+   * or `..` components.
    */
   export type FsErrorCode =
     | "FS_PATH"
@@ -280,12 +299,12 @@ declare module "neo:fs" {
     recursive?: boolean;
   }
 
-  /** Options for `remove`. */
+  /** Options for `remove` and `removeSync`. */
   export interface RemoveOptions {
     /**
      * Remove a directory and everything below it, without following symlinks.
-     * Without this option a non-empty directory
-     * throws `FS_NOT_EMPTY`. There is no count limit and no undo.
+     * Without this option a non-empty directory reports `FS_NOT_EMPTY`. There
+     * is no count limit and no undo.
      */
     recursive?: boolean;
   }
@@ -335,8 +354,9 @@ declare module "neo:fs" {
    * to four outstanding filesystem operations (including undelivered
    * results) and runs up to two on workers. Metadata and directory reads
    * share this bound but charge their path plus a small metadata or listing
-   * result bound; a directory creation charges its path. Each outstanding read
-   * charges `MAX_READ_BYTES` plus the encoded byte length of its resolved path
+   * result bound; a directory creation or deletion charges its path. Each
+   * outstanding read charges `MAX_READ_BYTES` plus the encoded byte length of
+   * its resolved path
    * against a shared turn budget of
    * `4 * (max(MAX_READ_BYTES, MAX_WRITE_BYTES) + MAX_PATH_BYTES)`.
    * Excess work rejects with `FS_LIMIT`. This budget does not cover buffers
@@ -568,16 +588,52 @@ declare module "neo:fs" {
   export function mkdirSync(path: string, options?: MkdirOptions): void;
 
   /**
-   * Remove a file, symlink, or directory.
+   * Remove a file, symlink, or directory on a worker.
    *
-   * Without `recursive`, a non-empty directory throws `FS_NOT_EMPTY`. With
-   * `recursive: true`, the whole tree is removed without following symlinks.
-   * A final symlink is removed as a link, except that a Windows directory
-   * symlink is rejected with `FS_UNSUPPORTED`. Parsed roots, trailing
-   * separators, and final `.` or `..` components throw `FS_PATH`. There is
-   * no undo and no count limit.
+   * **Breaking change:** this function was synchronous. Use
+   * `await remove(path, options)` during managed module evaluation, or
+   * `removeSync(path, options)` in synchronous code. Outside a managed turn
+   * this throws `FS_ASYNC_OUTSIDE_TURN` before I/O.
+   *
+   * In a managed turn, invalid arguments and filesystem errors reject the
+   * Promise. Without `recursive`, a non-empty directory reports
+   * `FS_NOT_EMPTY`. With `recursive: true`, the whole tree is removed without
+   * following symlinks. A final symlink is removed as a link, except that a
+   * Windows directory symlink is reported as `FS_UNSUPPORTED`. Parsed roots
+   * (including Windows UNC share roots), trailing separators, and final `.` or
+   * `..` components report `FS_PATH` before I/O. There is no undo, no trash,
+   * and no count limit.
+   *
+   * Deletion shares the four-operation outstanding bound and two-worker pool
+   * with the other asynchronous filesystem operations, and charges its
+   * resolved path against the same turn budget. Teardown cannot interrupt a
+   * deletion that has started: it may still remove some or all entries after a
+   * failed turn, cancellation restores nothing, and an OS or network failure
+   * can stop a recursive deletion part-way with no rollback.
+   *
+   * A final symlink is removed as a link, never followed, and recursive
+   * deletion uses the OS-backed tree removal, which does not follow links
+   * inside the tree. An intermediate directory symlink in the path is
+   * resolved by the OS, so deletion can land inside the link target, outside
+   * the apparent parent tree.
+   *
+   * It is pathname based and is not containment: an intermediate component
+   * can be replaced between validation and the OS call
+   * (time-of-check/time-of-use), and the runtime neither canonicalizes the
+   * target nor reverses a deletion. Windows reparse-point, junction, and
+   * symbolic-link semantics are platform-specific; this build does not assert
+   * them.
    */
-  export function remove(path: string, options?: RemoveOptions): void;
+  export function remove(path: string, options?: RemoveOptions): Promise<void>;
+
+  /**
+   * Remove a file, symlink, or directory, blocking the JavaScript thread.
+   *
+   * The same entry, option, error, symlink, intermediate-symlink,
+   * time-of-check/time-of-use, and no-rollback rules as `remove` apply, except
+   * that failures throw instead of rejecting.
+   */
+  export function removeSync(path: string, options?: RemoveOptions): void;
 
   /**
    * Synchronously rename a file, directory, or symlink entry. Both relative

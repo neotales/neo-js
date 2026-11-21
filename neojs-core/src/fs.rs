@@ -3,12 +3,12 @@
 //! The module is available only when [`crate::Permissions::filesystem`] is
 //! granted and the runtime's module allowlist admits [`crate::RuntimeModule::Fs`].
 //! Both gates are checked before the `fs` global or any native callback is
-//! constructed. `readFile`, `writeFile`, `stat`, `lstat`, `readDir`, and
-//! `mkdir` run on workers; `readFileSync`, `writeFileSync`, `statSync`,
-//! `lstatSync`, `readDirSync`, `mkdirSync`, and all other operations block.
-//! Nothing here starts a shell, a child process, or a network request
-//! directly. The OS may still perform network I/O for network paths and
-//! filesystems.
+//! constructed. `readFile`, `writeFile`, `stat`, `lstat`, `readDir`, `mkdir`,
+//! and `remove` run on workers; `readFileSync`, `writeFileSync`, `statSync`,
+//! `lstatSync`, `readDirSync`, `mkdirSync`, `removeSync`, and all other
+//! operations block. Nothing here starts a shell, a child process, or a
+//! network request directly. The OS may still perform network I/O for network
+//! paths and filesystems.
 //!
 //! # Authority
 //!
@@ -74,11 +74,13 @@
 //!   `isSymlink: true`.
 //! * `readDir` and `readDirSync` do not follow entries; a symlink entry is
 //!   reported with `isSymlink: true` and `isFile`/`isDirectory` both `false`.
-//! * `remove` does not follow a symlink at the target path. It removes the
-//!   link itself, except a Windows directory symlink at the target path is
-//!   rejected with `FS_UNSUPPORTED`, even if dangling. Recursive deletion
-//!   uses the OS-backed `remove_dir_all`, which does not follow symlinks in
-//!   the tree.
+//! * `remove` and `removeSync` do not follow a symlink at the target path.
+//!   They remove the link itself, except a Windows directory symlink at the
+//!   target path is rejected with `FS_UNSUPPORTED`, even if dangling.
+//!   Recursive deletion uses the OS-backed `remove_dir_all`, which does not
+//!   follow symlinks inside the tree. An intermediate directory symlink in
+//!   the path is resolved by the OS instead, so deletion can land inside the
+//!   link target, outside the apparent parent tree.
 //! * `rename` acts on the final directory entries, including symlinks
 //!   themselves, without canonicalizing either path on disk. Joining a
 //!   relative path to a Windows verbatim cwd can normalize intermediate
@@ -138,12 +140,23 @@
 //!
 //! # Deletion
 //!
-//! `remove(path)` removes a file, symlink, or empty directory. A non-empty
-//! directory reports `FS_NOT_EMPTY`. `remove(path, {recursive: true})` removes
-//! a tree, including files, directories, and symlinks as links. Deletion has no
-//! undo, no trash, and no count limit; the caller is responsible for choosing
-//! the path. Parsed roots (including Windows UNC share roots), trailing
-//! separators, and final `.` or `..` are rejected with `FS_PATH` before I/O.
+//! `remove` and `removeSync` remove a file, symlink, or empty directory. A
+//! non-empty directory reports `FS_NOT_EMPTY`. `remove(path, {recursive:
+//! true})` removes a tree, including files, directories, and symlinks as
+//! links. Deletion has no undo, no trash, and no count limit; the caller is
+//! responsible for choosing the path. Parsed roots (including Windows UNC
+//! share roots), trailing separators, and final `.` or `..` are rejected with
+//! `FS_PATH` before I/O. A started asynchronous deletion cannot be interrupted
+//! by teardown and may still remove some or all entries after a failed turn;
+//! cancellation restores nothing, and an OS or network failure can stop a
+//! recursive deletion part-way with no rollback.
+//!
+//! A final symlink is removed as a link and is never followed. An intermediate
+//! directory symlink in the path is resolved by the OS, so both forms can
+//! delete inside the link target, outside the apparent parent tree. The path
+//! checks are not containment: an intermediate component can be replaced
+//! between validation and the OS call (time-of-check/time-of-use), and the
+//! runtime neither canonicalizes the target nor reverses a deletion.
 //!
 //! # Rename
 //!
@@ -241,7 +254,7 @@ pub(crate) const MAX_LIST_NAME_BYTES: usize = 1024;
 /// Largest sum of directory-entry names `readDir` returns, in UTF-8 bytes.
 pub(crate) const MAX_LIST_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
-const EXPORTS: [&str; 25] = [
+const EXPORTS: [&str; 26] = [
     "readText",
     "writeText",
     "readFile",
@@ -258,6 +271,7 @@ const EXPORTS: [&str; 25] = [
     "mkdir",
     "mkdirSync",
     "remove",
+    "removeSync",
     "rename",
     "copyFile",
     "FsError",
@@ -1563,7 +1577,7 @@ fn build_native<'js>(
 
     let remove_cwd = Rc::clone(&cwd);
     native.set(
-        "remove",
+        "removeSync",
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'js>, path: String, recursive: bool| -> JsResult<Object<'js>> {

@@ -136,7 +136,22 @@ declare const fs: {
    * symlink behavior and no containment as `neo:fs.mkdirSync`.
    */
   mkdirSync(path: string, options?: import("neo:fs").MkdirOptions): void;
-  remove(path: string, options?: import("neo:fs").RemoveOptions): void;
+  /**
+   * Remove a file, symlink, or directory during managed module evaluation.
+   * Outside it, this throws `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O.
+   * It uses the same outstanding-operation, worker, and turn-budget limits as
+   * `readFile`. An intermediate directory symlink is followed by the OS, so
+   * deletion can land outside the apparent tree, and a component can change
+   * between validation and use. See `neo:fs.remove` for the full symlink,
+   * error, and race rules.
+   */
+  remove(path: string, options?: import("neo:fs").RemoveOptions): Promise<void>;
+  /**
+   * Remove a file, symlink, or directory synchronously. It has the same entry,
+   * intermediate-symlink, time-of-check/time-of-use, and no-rollback rules as
+   * `neo:fs.removeSync`.
+   */
+  removeSync(path: string, options?: import("neo:fs").RemoveOptions): void;
   /** Same entry, replacement, and error semantics as `neo:fs.rename`. */
   rename: typeof import("neo:fs").rename;
   /** Same bounded, no-clobber copy as `neo:fs.copyFile`. */
