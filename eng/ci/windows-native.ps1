@@ -7,8 +7,9 @@
     This is the reproducible form of .github/workflows/windows-native.yml. It
     checks that the host is a 64-bit Windows x64 process with the pinned MSVC
     Rust toolchain and the x86_64-pc-windows-msvc standard library, refuses to
-    start with stale registry fixtures, runs the Windows registry and process
-    suites, and compiles every workspace test target.
+    start with stale registry fixtures, runs the Windows registry, process, and
+    filesystem suites with the pure copy-path validation unit test, and
+    compiles every workspace test target.
 
     Every cargo command passes --target x86_64-pc-windows-msvc explicitly. The
     rustc host check alone is not treated as proof that cargo would build for
@@ -51,6 +52,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Target = 'x86_64-pc-windows-msvc'
 $registryTestsRan = $false
 $failed = $false
+$script:LastCargoOutput = $null
 
 function Invoke-Cargo {
     param(
@@ -73,9 +75,14 @@ function Invoke-Cargo {
     }
 
     Write-Host "==> cargo +1.87.0 $($Arguments -join ' ')"
-    & cargo '+1.87.0' @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo +1.87.0 failed with exit code $LASTEXITCODE`: cargo $($Arguments -join ' ')"
+    $output = & cargo '+1.87.0' @Arguments
+    $exitCode = $LASTEXITCODE
+    $script:LastCargoOutput = $output
+    if ($null -ne $output) {
+        $output | Out-Host
+    }
+    if ($exitCode -ne 0) {
+        throw "cargo +1.87.0 failed with exit code $exitCode`: cargo $($Arguments -join ' ')"
     }
 }
 
@@ -156,6 +163,15 @@ try {
         Invoke-Cargo @('test', '--locked', '--target', $Target, '-p', 'neojs-core', '--test', 'winregistry_windows', '--', '--test-threads=1')
 
         Invoke-Cargo @('test', '--locked', '--target', $Target, '-p', 'neojs-core', '--test', 'process')
+        Invoke-Cargo @('test', '--locked', '--target', $Target, '-p', 'neojs-core', '--test', 'fs')
+        Invoke-Cargo @('test', '--locked', '--target', $Target, '-p', 'neojs-core', '--lib', '--', 'fs::tests::windows_copy_paths_are_rejected_before_io', '--exact')
+        # Exit zero is not enough: require libtest's own one-test summary.
+        $validatorText = ($script:LastCargoOutput | Out-String)
+        if ($validatorText -notmatch '(?m)^running 1 test\r?$' -or
+            $validatorText -notmatch 'test result: ok\. 1 passed; 0 failed;' -or
+            $validatorText -notmatch [regex]::Escape('fs::tests::windows_copy_paths_are_rejected_before_io')) {
+            throw "the pure validation unit test filter did not run exactly one test:`n$validatorText"
+        }
         Invoke-Cargo @('test', '--locked', '--target', $Target, '-p', 'neojs', '--test', 'process')
         Invoke-Cargo @('test', '--locked', '--target', $Target, '-p', 'neojs', '--test', 'process_stdio')
         Invoke-Cargo @('test', '--locked', '--target', $Target, '-p', 'neojs-os', '--test', 'os')

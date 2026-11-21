@@ -2044,4 +2044,49 @@ mod tests {
         }
         assert!(live.is_dir());
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_copy_paths_are_rejected_before_io() {
+        // This is a pure validation test. It calls the same checks that
+        // `copy_file_path` runs before resolving or opening either operand,
+        // so it cannot touch a device, UNC share, namespace, or stream even if
+        // the validation regresses.
+        fn validate(path: &str) -> &'static str {
+            match validate_entry_path(path) {
+                Ok(entry) => match validate_copy_disk_path(entry) {
+                    Ok(()) => "accepted",
+                    Err(error) => error.code(),
+                },
+                Err(error) => error.code(),
+            }
+        }
+
+        for path in [
+            r"C:\",
+            "C:",
+            "C:relative",
+            r"\rooted",
+            r"\\?\C:\",
+            r"\\server\share",
+            r"\\server\share\",
+            r"\\server\share\file",
+            r"\\?\UNC\server\share",
+            r"\\.\pipe\neo-fs-test",
+            r"\\?\GLOBALROOT\Device\Null",
+            "NUL",
+            "con.txt",
+            "COM¹.bin",
+            "source:stream",
+            "source.",
+            "source ",
+        ] {
+            assert_eq!(validate(path), "FS_PATH", "{path}");
+        }
+
+        // These must remain accepted by validation; no I/O is performed.
+        assert_eq!(validate("owned-file.txt"), "accepted");
+        assert_eq!(validate(r"C:\owned-file.txt"), "accepted");
+        assert_eq!(validate(r"\\?\C:\owned-file.txt"), "accepted");
+    }
 }

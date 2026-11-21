@@ -16,9 +16,12 @@
 
     Covered bypasses: direct cargo, Windows path-qualified cargo, Windows and
     Unix path-qualified shells, an environment-expanded cargo command, a
-    path-qualified wrapper command, a missing --target, a cargo alias, a
-    floating action ref, policy-rejected `with:` blocks on dtolnay including
-    quoted keys, extra `release`/`workflow_call` triggers, column-zero comments
+    path-qualified wrapper command, a missing --target, and missing,
+    duplicated, no-run, list, wrong-package, conditional, outside-else, or
+    uninvoked-function neojs-core filesystem and validation invocations, a
+    cargo alias, a floating action ref, policy-rejected `with:` blocks on
+    dtolnay including quoted keys, extra `release`/`workflow_call` triggers,
+    column-zero comments
     hiding a following trigger or permission, quoted or unquoted job-level
     permissions, quoted permission keys, `id-token: write`, `contents: write`,
     and a missing registry test source.
@@ -224,6 +227,141 @@ try {
     Assert-Rejected -Name 'missing --target' -Root $targetRoot -Expected @(
         'cargo call lacks exactly one --target',
         'winregistry'
+    )
+
+    $filesystemCall = "        Invoke-Cargo @('test', '--locked', '--target', `$Target, '-p', 'neojs-core', '--test', 'fs')"
+    $validationCall = "        Invoke-Cargo @('test', '--locked', '--target', `$Target, '-p', 'neojs-core', '--lib', '--', 'fs::tests::windows_copy_paths_are_rejected_before_io', '--exact')"
+
+    $missingFilesystemRoot = New-Fixture -Name 'missing-filesystem-suite'
+    $missingFilesystemScript = Join-Path $missingFilesystemRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $missingFilesystemScript -Find $filesystemCall -Replacement '        # removed by mutation self-test'
+    Assert-Rejected -Name 'missing neojs-core filesystem suite' -Root $missingFilesystemRoot -Expected @(
+        'expected 10 Invoke-Cargo calls, found 9',
+        'expected exactly one unconditional test -p neojs-core --test fs invocation with the exact argument shape, found 0'
+    )
+
+    $duplicateFilesystemRoot = New-Fixture -Name 'duplicate-filesystem-suite'
+    $duplicateFilesystemScript = Join-Path $duplicateFilesystemRoot 'eng/ci/windows-native.ps1'
+    Insert-AfterLine -Path $duplicateFilesystemScript -Line $filesystemCall -Insert $filesystemCall
+    Assert-Rejected -Name 'duplicate neojs-core filesystem suite' -Root $duplicateFilesystemRoot -Expected @(
+        'expected 10 Invoke-Cargo calls, found 11',
+        'expected exactly one unconditional test -p neojs-core --test fs invocation with the exact argument shape, found 2'
+    )
+
+    $noRunFilesystemRoot = New-Fixture -Name 'no-run-filesystem-suite'
+    $noRunFilesystemScript = Join-Path $noRunFilesystemRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $noRunFilesystemScript -Find "'-p', 'neojs-core', '--test', 'fs')" -Replacement "'-p', 'neojs-core', '--test', 'fs', '--no-run')"
+    Assert-Rejected -Name 'no-run neojs-core filesystem suite' -Root $noRunFilesystemRoot -Expected @(
+        'filesystem suite invocation must not use --no-run'
+    )
+
+    $listFilesystemRoot = New-Fixture -Name 'list-filesystem-suite'
+    $listFilesystemScript = Join-Path $listFilesystemRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $listFilesystemScript -Find "'-p', 'neojs-core', '--test', 'fs')" -Replacement "'-p', 'neojs-core', '--test', 'fs', '--list')"
+    Assert-Rejected -Name 'list neojs-core filesystem suite' -Root $listFilesystemRoot -Expected @(
+        'filesystem suite invocation must not use --list',
+        'expected exactly one unconditional test -p neojs-core --test fs invocation with the exact argument shape, found 0'
+    )
+
+    $wrongPackageRoot = New-Fixture -Name 'wrong-filesystem-package'
+    $wrongPackageScript = Join-Path $wrongPackageRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $wrongPackageScript -Find "'-p', 'neojs-core', '--test', 'fs'" -Replacement "'-p', 'neojs-other', '--test', 'fs'"
+    Assert-Rejected -Name 'wrong filesystem package' -Root $wrongPackageRoot -Expected @(
+        'expected exactly one unconditional test -p neojs-core --test fs invocation with the exact argument shape, found 0'
+    )
+
+    $conditionalFilesystemRoot = New-Fixture -Name 'conditional-filesystem-suite'
+    $conditionalFilesystemScript = Join-Path $conditionalFilesystemRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $conditionalFilesystemScript -Find $filesystemCall -Replacement ("        if (`$false) {`n" + $filesystemCall + "`n        }")
+    Assert-Rejected -Name 'conditional neojs-core filesystem suite' -Root $conditionalFilesystemRoot -Expected @(
+        'filesystem suite invocation must not be conditional',
+        'filesystem suite invocation must be a direct statement in the CheckOnly else block'
+    )
+
+    $outsideFilesystemRoot = New-Fixture -Name 'outside-filesystem-suite'
+    $outsideFilesystemScript = Join-Path $outsideFilesystemRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $outsideFilesystemScript -Find $filesystemCall -Replacement '        # moved outside by mutation self-test'
+    Insert-AfterLine -Path $outsideFilesystemScript -Line 'Push-Location $repoRoot' -Insert $filesystemCall
+    Assert-Rejected -Name 'outside neojs-core filesystem suite' -Root $outsideFilesystemRoot -Expected @(
+        'filesystem suite invocation must be a direct statement in the CheckOnly else block'
+    )
+
+    $uninvokedFilesystemRoot = New-Fixture -Name 'uninvoked-filesystem-suite'
+    $uninvokedFilesystemScript = Join-Path $uninvokedFilesystemRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $uninvokedFilesystemScript -Find $filesystemCall -Replacement ("        function Invoke-UnusedFilesystem {`n" + $filesystemCall + "`n        }")
+    Assert-Rejected -Name 'uninvoked filesystem function' -Root $uninvokedFilesystemRoot -Expected @(
+        'filesystem suite invocation must not be inside a function',
+        'filesystem suite invocation must be a direct statement in the CheckOnly else block'
+    )
+
+    $missingValidationRoot = New-Fixture -Name 'missing-validation-unit-test'
+    $missingValidationScript = Join-Path $missingValidationRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $missingValidationScript -Find $validationCall -Replacement '        # removed by mutation self-test'
+    Assert-Rejected -Name 'missing validation unit test' -Root $missingValidationRoot -Expected @(
+        'expected 10 Invoke-Cargo calls, found 9',
+        'expected exactly one exact validation unit test invocation, found 0'
+    )
+
+    $duplicateValidationRoot = New-Fixture -Name 'duplicate-validation-unit-test'
+    $duplicateValidationScript = Join-Path $duplicateValidationRoot 'eng/ci/windows-native.ps1'
+    Insert-AfterLine -Path $duplicateValidationScript -Line $validationCall -Insert $validationCall
+    Assert-Rejected -Name 'duplicate validation unit test' -Root $duplicateValidationRoot -Expected @(
+        'expected 10 Invoke-Cargo calls, found 11',
+        'expected exactly one exact validation unit test invocation, found 2'
+    )
+
+    $noRunValidationRoot = New-Fixture -Name 'no-run-validation-unit-test'
+    $noRunValidationScript = Join-Path $noRunValidationRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $noRunValidationScript -Find "'--exact')" -Replacement "'--exact', '--no-run')"
+    Assert-Rejected -Name 'no-run validation unit test' -Root $noRunValidationRoot -Expected @(
+        'validation unit test invocation must not use --no-run',
+        'expected exactly one exact validation unit test invocation, found 0'
+    )
+
+    $listValidationRoot = New-Fixture -Name 'list-validation-unit-test'
+    $listValidationScript = Join-Path $listValidationRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $listValidationScript -Find "'--exact')" -Replacement "'--exact', '--list')"
+    Assert-Rejected -Name 'list validation unit test' -Root $listValidationRoot -Expected @(
+        'validation unit test invocation must not use --list',
+        'expected exactly one exact validation unit test invocation, found 0'
+    )
+
+    $bogusValidationRoot = New-Fixture -Name 'bogus-validation-filter'
+    $bogusValidationScript = Join-Path $bogusValidationRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $bogusValidationScript -Find 'fs::tests::windows_copy_paths_are_rejected_before_io' -Replacement 'fs::tests::bogus_validation_filter'
+    Assert-Rejected -Name 'bogus validation filter' -Root $bogusValidationRoot -Expected @(
+        'expected exactly one exact validation unit test invocation, found 0'
+    )
+
+    $validationWrongPackageRoot = New-Fixture -Name 'wrong-validation-package'
+    $validationWrongPackageScript = Join-Path $validationWrongPackageRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $validationWrongPackageScript -Find "'-p', 'neojs-core', '--lib'" -Replacement "'-p', 'neojs-other', '--lib'"
+    Assert-Rejected -Name 'wrong validation package' -Root $validationWrongPackageRoot -Expected @(
+        'expected exactly one exact validation unit test invocation, found 0'
+    )
+
+    $conditionalValidationRoot = New-Fixture -Name 'conditional-validation-unit-test'
+    $conditionalValidationScript = Join-Path $conditionalValidationRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $conditionalValidationScript -Find $validationCall -Replacement ("        if (`$false) {`n" + $validationCall + "`n        }")
+    Assert-Rejected -Name 'conditional validation unit test' -Root $conditionalValidationRoot -Expected @(
+        'validation unit test invocation must not be conditional',
+        'validation unit test invocation must be a direct statement in the CheckOnly else block'
+    )
+
+    $outsideValidationRoot = New-Fixture -Name 'outside-validation-unit-test'
+    $outsideValidationScript = Join-Path $outsideValidationRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $outsideValidationScript -Find $validationCall -Replacement '        # moved outside by mutation self-test'
+    Insert-AfterLine -Path $outsideValidationScript -Line 'Push-Location $repoRoot' -Insert $validationCall
+    Assert-Rejected -Name 'outside validation unit test' -Root $outsideValidationRoot -Expected @(
+        'validation unit test invocation must be a direct statement in the CheckOnly else block'
+    )
+
+    $uninvokedValidationRoot = New-Fixture -Name 'uninvoked-validation-unit-test'
+    $uninvokedValidationScript = Join-Path $uninvokedValidationRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $uninvokedValidationScript -Find $validationCall -Replacement ("        function Invoke-UnusedValidation {`n" + $validationCall + "`n        }")
+    Assert-Rejected -Name 'uninvoked validation function' -Root $uninvokedValidationRoot -Expected @(
+        'validation unit test invocation must not be inside a function',
+        'validation unit test invocation must be a direct statement in the CheckOnly else block'
     )
 
     $aliasRoot = New-Fixture -Name 'cargo-alias'

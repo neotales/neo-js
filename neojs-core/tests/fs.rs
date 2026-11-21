@@ -144,10 +144,11 @@ fn binary_read_rejects_asynchronously_and_sync_read_still_throws() {
             file = literal(&file),
         ),
     );
-    js.run(
-        "try { fs.readFile('fixture'); throw Error('dispatched outside managed turn'); }
-         catch (error) { if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }",
-    )
+    js.run(&format!(
+        "try {{ fs.readFile({file}); throw Error('dispatched outside managed turn'); }}
+         catch (error) {{ if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }}",
+        file = literal(&file),
+    ))
     .unwrap();
 }
 
@@ -198,10 +199,11 @@ fn binary_write_is_asynchronous_and_sync_write_still_throws() {
             file = literal(&file),
         ),
     );
-    js.run(
-        "try { fs.writeFile('fixture', new Uint8Array([1])); throw Error('dispatched outside managed turn'); }
-         catch (error) { if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }",
-    )
+    js.run(&format!(
+        "try {{ fs.writeFile({file}, new Uint8Array([1])); throw Error('dispatched outside managed turn'); }}
+         catch (error) {{ if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }}",
+        file = literal(&file),
+    ))
     .unwrap();
 }
 
@@ -210,11 +212,13 @@ fn metadata_reads_are_asynchronous_and_sync_forms_still_throw() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("fixture");
     fs::write(&file, b"abc").unwrap();
-    let js = runtime();
+    let js = chunked_runtime();
     run(
         &js,
         &format!(
-            r#"import {{stat, statSync, lstat, lstatSync, FsError, MAX_PATH_BYTES}} from 'neo:fs';
+            r#"import {{chdir}} from 'neo:process';
+            import {{stat, statSync, lstat, lstatSync, FsError, MAX_PATH_BYTES}} from 'neo:fs';
+            chdir({dir});
             const file = {file};
             const missing = {missing};
 
@@ -265,16 +269,18 @@ fn metadata_reads_are_asynchronous_and_sync_forms_still_throw() {
             catch (error) {{ if (!(error instanceof TypeError)) throw error; }}
             try {{ statSync({{}}); throw Error('expected type throw'); }}
             catch (error) {{ if (!(error instanceof TypeError)) throw error; }}"#,
+            dir = literal(dir.path()),
             file = literal(&file),
             missing = literal(&dir.path().join("not-here")),
         ),
     );
-    js.run(
-        "for (const action of [() => fs.stat('fixture'), () => fs.lstat('fixture')]) {
-           try { action(); throw Error('dispatched outside managed turn'); }
-           catch (error) { if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }
-         }",
-    )
+    js.run(&format!(
+        "for (const action of [() => fs.stat({file}), () => fs.lstat({file})]) {{
+           try {{ action(); throw Error('dispatched outside managed turn'); }}
+           catch (error) {{ if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }}
+         }}",
+        file = literal(&file),
+    ))
     .unwrap();
 }
 
@@ -360,11 +366,13 @@ fn directory_reads_are_asynchronous_and_sync_forms_still_throw() {
     fs::create_dir(dir.path().join("child")).unwrap();
     let missing = dir.path().join("not-here");
     let file = dir.path().join("a.txt");
-    let js = runtime();
+    let js = chunked_runtime();
     run(
         &js,
         &format!(
-            r#"import {{readDir, readDirSync, FsError, MAX_PATH_BYTES}} from 'neo:fs';
+            r#"import {{chdir}} from 'neo:process';
+            import {{readDir, readDirSync, FsError, MAX_PATH_BYTES}} from 'neo:fs';
+            chdir({dir});
             const dir = {dir};
             const missing = {missing};
             const file = {file};
@@ -427,10 +435,11 @@ fn directory_reads_are_asynchronous_and_sync_forms_still_throw() {
             file = literal(&file),
         ),
     );
-    js.run(
-        "try { fs.readDir('.'); throw Error('dispatched outside managed turn'); }
-         catch (error) { if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }",
-    )
+    js.run(&format!(
+        "try {{ fs.readDir({dir}); throw Error('dispatched outside managed turn'); }}
+         catch (error) {{ if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error; }}",
+        dir = literal(dir.path()),
+    ))
     .unwrap();
 }
 
@@ -674,11 +683,12 @@ fn owner_reports_unhandled_read_rejections_and_stalled_modules() {
 
 #[test]
 fn out_of_turn_jobs_or_resolvers_cannot_enter_a_managed_module() {
-    let filename = "should-never-read";
+    let dir = tempfile::tempdir().unwrap();
+    let missing = literal(&dir.path().join("should-never-read"));
     for initial in [
-        format!("Promise.resolve().then(() => fs.readFile('{filename}'));"),
+        format!("Promise.resolve().then(() => fs.readFile({missing}));"),
         format!(
-            "new Promise(resolve => globalThis.resume = resolve).then(() => fs.readFile('{filename}'));"
+            "new Promise(resolve => globalThis.resume = resolve).then(() => fs.readFile({missing}));"
         ),
     ] {
         let js = runtime();
@@ -688,8 +698,10 @@ fn out_of_turn_jobs_or_resolvers_cannot_enter_a_managed_module() {
         assert!(js.eval("'x'").unwrap_err().contains("NEO_MODULE_ABORTED"));
     }
     let js = runtime();
-    js.eval("Promise.resolve().then(() => fs.readFile('should-never-read')); 'saved'")
-        .unwrap();
+    js.eval(&format!(
+        "Promise.resolve().then(() => fs.readFile({missing})); 'saved'"
+    ))
+    .unwrap();
     assert!(
         js.run_module("eval-next.js", "")
             .unwrap_err()
@@ -698,8 +710,10 @@ fn out_of_turn_jobs_or_resolvers_cannot_enter_a_managed_module() {
     let js = runtime();
     js.run_module(
         "register.js",
-        "import test from 'neo:test';
-         test('schedules a job', () => { Promise.resolve().then(() => fs.readFile('no')); });",
+        &format!(
+            "import test from 'neo:test';
+             test('schedules a job', () => {{ Promise.resolve().then(() => fs.readFile({missing})); }});"
+        ),
     )
     .unwrap();
     assert!(js.run_pending_tests().unwrap().unwrap().all_passed());
@@ -762,10 +776,11 @@ fn settled_async_dependency_is_cached_across_successful_turns() {
 
 #[test]
 fn async_path_errors_keep_codes_after_public_error_constructor_tampering() {
-    let js = runtime();
-    run(
-        &js,
-        r#"import {readFile, writeFile, FsError, MAX_PATH_BYTES} from 'neo:fs';
+    let dir = tempfile::tempdir().unwrap();
+    let js = chunked_runtime();
+    let source = r#"import {chdir} from 'neo:process';
+           import {readFile, writeFile, FsError, MAX_PATH_BYTES} from 'neo:fs';
+           chdir(__DIR__);
            Object.setPrototypeOf(FsError, function () { throw Error('intercepted'); });
            for (const [path, code] of [
                ['', 'FS_PATH'], ['\uD800', 'FS_ENCODING'],
@@ -780,18 +795,23 @@ fn async_path_errors_keep_codes_after_public_error_constructor_tampering() {
                        if (!(error instanceof FsError) || error.code !== code) throw error;
                    }
                }
-           }"#,
-    );
+           }"#
+    .replace("__DIR__", &literal(dir.path()));
+    run(&js, &source);
 }
 
 #[test]
 fn a_failed_module_cannot_submit_reads_through_jobs_in_a_later_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = literal(&dir.path().join("should-not-be-read"));
     let js = runtime();
     let failure = js
         .run_module(
             "failed.js",
-            "Promise.resolve().then(() => fs.readFile('should-not-be-read'));
-             throw Error('entry failure');",
+            &format!(
+                "Promise.resolve().then(() => fs.readFile({missing}));
+                 throw Error('entry failure');"
+            ),
         )
         .unwrap_err();
     assert!(failure.contains("entry failure"));
@@ -868,9 +888,11 @@ fn writing_empty_text_truncates_an_existing_file_to_zero_bytes() {
 fn stable_errors_never_include_the_supplied_path() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("existing.txt"), "still usable").unwrap();
-    let js = runtime();
+    let js = chunked_runtime();
     let source = r#"
+        import {chdir} from 'neo:process';
         import {readText, readFileSync, writeText, writeFile, writeFileSync, statSync, exists, readDirSync, mkdir, remove, FsError} from 'neo:fs';
+        chdir(__DIR__);
 
         function expectFsError(code, action) {
             try { action(); }
@@ -952,6 +974,7 @@ fn stable_errors_never_include_the_supplied_path() {
         if (constructed.code !== 'FS_IO') throw Error('FsError code');
         if (!constructed.message.includes('filesystem')) throw Error('FsError message');
     "#
+    .replace("__DIR__", &literal(dir.path()))
     .replace("__MISSING__", &literal(&dir.path().join("no-such-file")))
     .replace("__MISSING_PARENT__", &literal(&dir.path().join("no-such-dir/file")))
     .replace("__EXISTING__", &literal(&dir.path().join("existing.txt")));
@@ -1599,7 +1622,6 @@ fn copy_file_validates_both_primitive_entry_paths_before_opening() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("source"), b"unchanged").unwrap();
     fs::create_dir(dir.path().join("directory")).unwrap();
-    let root = dir.path().ancestors().last().unwrap();
     let script = r#"
         import {chdir} from 'neo:process';
         import {copyFile, FsError, MAX_PATH_BYTES} from 'neo:fs';
@@ -1618,7 +1640,7 @@ fn copy_file_validates_both_primitive_entry_paths_before_opening() {
         rejects('TypeError', hostile, 'output');
         rejects('TypeError', '', hostile);
         for (const [code, path] of [
-            ['FS_PATH', ''], ['FS_PATH', 'bad\0path'], ['FS_PATH', __ROOT__],
+            ['FS_PATH', ''], ['FS_PATH', 'bad\0path'],
             ['FS_PATH', 'directory/'], ['FS_PATH', 'directory/.'], ['FS_PATH', 'directory/..'],
             ['FS_ENCODING', 'bad-\uD800'], ['FS_LIMIT', 'a'.repeat(MAX_PATH_BYTES + 1)],
         ]) {
@@ -1629,8 +1651,7 @@ fn copy_file_validates_both_primitive_entry_paths_before_opening() {
         rejects('FS_IS_DIRECTORY', 'directory', 'output');
         rejects('FS_NOT_FOUND', 'source', 'missing/child');
     "#
-    .replace("__DIR__", &literal(dir.path()))
-    .replace("__ROOT__", &literal(root));
+    .replace("__DIR__", &literal(dir.path()));
     run(&chunked_runtime(), &script);
     assert_eq!(fs::read(dir.path().join("source")).unwrap(), b"unchanged");
     assert!(!dir.path().join("output").exists());
@@ -1770,42 +1791,12 @@ fn copy_file_rejects_fifos_without_waiting_for_a_peer() {
     assert!(!dir.path().join("no-output").exists());
 }
 
-#[cfg(windows)]
-#[test]
-fn copy_file_rejects_windows_namespaces_and_streams_before_opening() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("source"), b"unchanged").unwrap();
-    let script = r#"
-        import {chdir} from 'neo:process';
-        import {copyFile, FsError} from 'neo:fs';
-        chdir(__DIR__);
-        for (const path of [
-            'C:relative', '\\rooted', '\\\\?\\C:\\', '\\\\server\\share', '\\\\server\\share\\file',
-            '\\\\.\\pipe\\neo-fs-test', '\\\\?\\GLOBALROOT\\Device\\Null',
-            'NUL', 'con.txt', 'COM¹.bin', 'source:stream', 'source.', 'source ',
-        ]) {
-            for (const [from, to] of [[path, 'output'], ['source', path]]) {
-                try { copyFile(from, to); }
-                catch (error) {
-                    if (!(error instanceof FsError) || error.code !== 'FS_PATH') throw error;
-                    continue;
-                }
-                throw Error('copy accepted ambiguous Windows path');
-            }
-        }
-    "#
-    .replace("__DIR__", &literal(dir.path()));
-    run(&chunked_runtime(), &script);
-    assert_eq!(fs::read(dir.path().join("source")).unwrap(), b"unchanged");
-    assert!(!dir.path().join("output").exists());
-}
-
 #[test]
 fn reads_are_bounded_before_allocation_and_sizes_stay_decimal() {
     let dir = tempfile::tempdir().unwrap();
     let big = dir.path().join("big.bin");
 
-    let js = runtime();
+    let js = chunked_runtime();
     let max_read: u64 = js
         .eval("String(fs.MAX_READ_BYTES)")
         .unwrap()
@@ -1816,7 +1807,9 @@ fn reads_are_bounded_before_allocation_and_sizes_stay_decimal() {
     drop(handle);
 
     let source = r#"
+        import {chdir} from 'neo:process';
         import {readText, readFileSync, writeFile, writeFileSync, statSync, exists, FsError} from 'neo:fs';
+        chdir(__DIR__);
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
@@ -1853,6 +1846,7 @@ fn reads_are_bounded_before_allocation_and_sizes_stay_decimal() {
 
         expectFsError('FS_LIMIT', () => readText('x'.repeat(fs.MAX_PATH_BYTES + 1)));
     "#
+    .replace("__DIR__", &literal(dir.path()))
     .replace("__BIG__", &literal(&big))
     .replace("__OUTPUT__", &literal(&dir.path().join("output.bin")));
     run(&js, &source);
@@ -1868,9 +1862,11 @@ fn utf8_limits_are_checked_in_bytes_before_native_string_conversion() {
     let invalid_text = dir.path().join("invalid-utf8.txt");
     fs::write(&invalid_text, [0xff]).unwrap();
 
-    let js = runtime();
+    let js = chunked_runtime();
     let source = r#"
+        import {chdir} from 'neo:process';
         import {writeText, readText, statSync, exists, FsError} from 'neo:fs';
+        chdir(__DIR__);
         function expectFsError(code, action) {
             try { action(); }
             catch (error) {
@@ -1899,6 +1895,7 @@ fn utf8_limits_are_checked_in_bytes_before_native_string_conversion() {
         expectFsError('FS_LIMIT', () =>
             statSync('😀'.repeat(fs.MAX_PATH_BYTES / 4) + 'a'));
     "#
+    .replace("__DIR__", &literal(dir.path()))
     .replace("__EXACT__", &literal(&exact))
     .replace("__TOO_LARGE__", &literal(&too_large))
     .replace("__INVALID__", &literal(&invalid_text));
@@ -2056,8 +2053,155 @@ fn listing_rejects_names_that_are_not_utf8() {
 
 #[cfg(windows)]
 #[test]
+fn windows_metadata_and_directory_reads_use_owned_fixtures() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("windows-file.txt");
+    let child = dir.path().join("windows-child");
+    fs::write(&file, b"win").unwrap();
+    fs::create_dir(&child).unwrap();
+    fs::write(child.join("inside.txt"), b"inside").unwrap();
+
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{stat, statSync, lstat, lstatSync, readDir, readDirSync}} from 'neo:fs';
+            const dir = {dir};
+            const file = {file};
+            const child = {child};
+
+            const fileInfo = await stat(file);
+            if (!fileInfo.isFile || fileInfo.isDirectory || fileInfo.isSymlink) {{
+                throw Error('async stat did not report a regular file');
+            }}
+            if (fileInfo.size !== '3') throw Error('async stat size is not decimal bytes');
+            if (typeof fileInfo.mtimeMs !== 'string') throw Error('async stat mtime is not a string');
+
+            const fileLinkInfo = await lstat(file);
+            if (!fileLinkInfo.isFile || fileLinkInfo.isSymlink) {{
+                throw Error('async lstat did not report a regular file');
+            }}
+            if (statSync(file).size !== '3' || lstatSync(file).isFile !== true) {{
+                throw Error('sync file metadata differs');
+            }}
+
+            const directoryInfo = await stat(child);
+            if (!directoryInfo.isDirectory || directoryInfo.isFile || directoryInfo.isSymlink) {{
+                throw Error('async stat did not report a directory');
+            }}
+            const directoryLinkInfo = await lstat(child);
+            if (!directoryLinkInfo.isDirectory || directoryLinkInfo.isSymlink) {{
+                throw Error('async lstat did not report a directory');
+            }}
+
+            const entries = await readDir(dir);
+            const names = entries.map((entry) => entry.name).join(',');
+            if (names !== 'windows-child,windows-file.txt') throw Error('async names: ' + names);
+            const directoryEntry = entries[0];
+            if (!directoryEntry.isDirectory || directoryEntry.isFile || directoryEntry.isSymlink) {{
+                throw Error('async directory entry type');
+            }}
+            const fileEntry = entries[1];
+            if (!fileEntry.isFile || fileEntry.isDirectory || fileEntry.isSymlink) {{
+                throw Error('async file entry type');
+            }}
+            const syncEntries = readDirSync(dir);
+            if (syncEntries.map((entry) => entry.name).join(',') !== names) {{
+                throw Error('sync directory listing differs');
+            }}
+            const nested = await readDir(child);
+            if (nested.length !== 1 || nested[0].name !== 'inside.txt' || !nested[0].isFile) {{
+                throw Error('nested async directory listing');
+            }}"#,
+            dir = literal(dir.path()),
+            file = literal(&file),
+            child = literal(&child),
+        ),
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_final_symlink_metadata_and_listing_fails_closed_without_capability() {
+    use std::os::windows::fs::symlink_file;
+    use windows_sys::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("windows-target.txt");
+    let link = dir.path().join("windows-link.txt");
+    fs::write(&target, b"abc").unwrap();
+    match symlink_file(&target, &link) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD as i32) => {
+            // This gate proves native reparse behavior. A missing privilege is
+            // a failed gate, not a skipped test that could be mistaken for
+            // coverage.
+            panic!(
+                "Windows file symlink creation requires \
+                 SeCreateSymbolicLinkPrivilege or Developer Mode; the native gate fails closed: \
+                 {error}"
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+            panic!(
+                "the file system does not support Windows file symlinks; the native gate fails \
+                 closed instead of skipping: {error}"
+            );
+        }
+        Err(error) => {
+            panic!(
+                "unexpected failure creating a Windows file symlink in an owned temp fixture: \
+                 {error}"
+            );
+        }
+    }
+
+    let js = runtime();
+    run(
+        &js,
+        &format!(
+            r#"import {{stat, statSync, lstat, lstatSync, readDir, readDirSync}} from 'neo:fs';
+            const dir = {dir};
+            const link = {link};
+
+            const followed = await stat(link);
+            if (!followed.isFile || followed.isDirectory || followed.isSymlink) {{
+                throw Error('async stat did not follow a final Windows symlink');
+            }}
+            if (followed.size !== '3') throw Error('async stat size after following is not 3');
+
+            const linkInfo = await lstat(link);
+            if (linkInfo.isFile || linkInfo.isDirectory || !linkInfo.isSymlink) {{
+                throw Error('async lstat followed a final Windows symlink');
+            }}
+            if (!statSync(link).isFile || statSync(link).isSymlink) {{
+                throw Error('sync stat did not follow a final Windows symlink');
+            }}
+            if (!lstatSync(link).isSymlink) {{
+                throw Error('sync lstat did not report a final Windows symlink');
+            }}
+
+            const entries = await readDir(dir);
+            const entry = entries.find((candidate) => candidate.name === 'windows-link.txt');
+            if (!entry || !entry.isSymlink || entry.isFile || entry.isDirectory) {{
+                throw Error('async readDir followed a reparse entry');
+            }}
+            const syncEntry = readDirSync(dir).find(
+                (candidate) => candidate.name === 'windows-link.txt');
+            if (!syncEntry || !syncEntry.isSymlink) {{
+                throw Error('sync readDir followed a reparse entry');
+            }}"#,
+            dir = literal(dir.path()),
+            link = literal(&link),
+        ),
+    );
+}
+
+#[cfg(windows)]
+#[test]
 fn windows_basic_round_trip_is_gated_and_unverified() {
-    // This test is compiled on Windows but has not been run by this build.
+    // This test is selected by the native Windows gate. It had not passed a
+    // hosted Windows run when this branch was written.
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("windows.txt");
     let js = runtime();

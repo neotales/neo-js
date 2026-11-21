@@ -1,10 +1,12 @@
 name: Windows native
 
-# Hosted Windows has run twice; neither run has passed the gate. Run 44841666909
-# failed in neojs/tests/process_stdio.rs on the initial-cwd comparison this
-# branch corrects; the correction has not run on Windows. Reaching a hosted
-# runner in those runs does not establish organization eligibility or billing;
-# see eng/ci/README.md for both run results.
+# Hosted Windows run 44845110559 at 51f3994 passed the targeted 58-test gate.
+# This workflow now also runs the neojs-core filesystem suite (35
+# Windows-selected integration tests) and one pure validation unit test,
+# including Windows-only metadata/directory and fail-closed reparse coverage;
+# that extension has not run on Windows yet. Reaching a hosted runner does not
+# establish organization eligibility or billing; see eng/ci/README.md for the
+# run results and the unverified extension.
 
 on:
   workflow_dispatch:
@@ -14,9 +16,9 @@ on:
         required: false
         type: boolean
         default: false
-  # pull_request: deliberately not enabled yet. A PR trigger would queue a
-  # job on every pull request before hosted Windows availability is proven.
-  # Enable it only after one successful manual dispatch; see eng/ci/README.md.
+  # pull_request: deliberately not enabled yet. A PR trigger would queue the
+  # extended gate on every pull request before the filesystem suite has run on
+  # Windows. Enable it only after that suite passes once; see eng/ci/README.md.
 
 permissions:
   contents: read

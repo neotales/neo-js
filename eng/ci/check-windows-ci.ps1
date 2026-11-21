@@ -18,8 +18,14 @@
     The cargo check enumerates CommandAst nodes. It allows exactly one literal
     cargo command: `& cargo '+1.87.0' @Arguments` inside Invoke-Cargo. It
     rejects direct cargo calls, dynamic command expressions, shell/dynamic
-    wrappers, and cargo aliases/functions. This is a source/AST guarantee; it
-    does not attest the cargo binary on PATH or cargo's subprocesses.
+    wrappers, and cargo aliases/functions. It also requires exactly one
+    full-shape `neojs-core --test fs` invocation and one exact filtered pure
+    validation unit test, both as direct statements in the CheckOnly else
+    block. It rejects duplicates, extra arguments such as --list or --no-run,
+    wrong packages, filters, functions, script blocks, loops, and conditional
+    placement. This is a source/AST guarantee; it does not attest the cargo
+    binary on PATH, cargo's subprocesses, or runtime test counts (the gate
+    separately checks the validator's libtest summary).
 #>
 [CmdletBinding()]
 param()
@@ -47,6 +53,22 @@ function Get-ExecutableBasename {
         $value = $value.Substring($lastSlash + 1)
     }
     return $value.TrimEnd('.', ' ').ToLowerInvariant()
+}
+
+function Test-ArgumentShape {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Actual,
+        [Parameter(Mandatory = $true)][string[]]$Expected
+    )
+    if ($Actual.Count -ne $Expected.Count) {
+        return $false
+    }
+    for ($index = 0; $index -lt $Expected.Count; $index++) {
+        if ($Actual[$index] -ne $Expected[$index]) {
+            return $false
+        }
+    }
+    return $true
 }
 
 function Get-YamlTopLevelBlock {
@@ -459,9 +481,28 @@ if ($failures.Count -eq 0) {
                 $node -is [System.Management.Automation.Language.CommandAst] -and
                 $node.GetCommandName() -eq 'Invoke-Cargo'
             }, $true)
-        if ($invokeCargoCalls.Count -ne 8) {
-            Add-Failure "expected 8 Invoke-Cargo calls, found $($invokeCargoCalls.Count)"
+        if ($invokeCargoCalls.Count -ne 10) {
+            Add-Failure "expected 10 Invoke-Cargo calls, found $($invokeCargoCalls.Count)"
         }
+
+        $checkOnlyIfs = @($ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                    $node.Clauses.Count -eq 1 -and
+                    $node.Clauses[0].Item1.Extent.Text.Trim() -eq '$CheckOnly'
+                }, $true))
+        $checkOnlyElse = $null
+        if ($checkOnlyIfs.Count -ne 1 -or $null -eq $checkOnlyIfs[0].ElseClause) {
+            Add-Failure 'windows-native.ps1 must have exactly one if ($CheckOnly) with an else block for normal tests'
+        }
+        else {
+            $checkOnlyElse = $checkOnlyIfs[0].ElseClause
+        }
+
+        $filesystemShape = @('test', '--locked', '--target', '$Target', '-p', 'neojs-core', '--test', 'fs')
+        $validationShape = @('test', '--locked', '--target', '$Target', '-p', 'neojs-core', '--lib', '--', 'fs::tests::windows_copy_paths_are_rejected_before_io', '--exact')
+        $filesystemCalls = @()
+        $validationCalls = @()
         foreach ($call in $invokeCargoCalls) {
             if ($call.CommandElements.Count -ne 2) {
                 Add-Failure "Invoke-Cargo call is not an explicit array: $($call.Extent.Text)"
@@ -511,6 +552,74 @@ if ($failures.Count -eq 0) {
             if ($targetIndex + 1 -ge $values.Count -or $values[$targetIndex + 1] -ne '$Target') {
                 Add-Failure "cargo call does not use `$Target after --target: $($call.Extent.Text)"
             }
+
+            $isTest = $values.Count -gt 0 -and $values[0] -eq 'test'
+            $mentionsFilesystem = $false
+            for ($index = 0; $index -lt $values.Count - 3; $index++) {
+                if ($values[$index] -eq '-p' -and
+                    $values[$index + 1] -eq 'neojs-core' -and
+                    $values[$index + 2] -eq '--test' -and
+                    $values[$index + 3] -eq 'fs') {
+                    $mentionsFilesystem = $true
+                }
+            }
+            $mentionsFilesystem = $isTest -and $mentionsFilesystem
+            $mentionsValidation = $isTest -and ($values -contains '--lib')
+            if ($mentionsFilesystem -or $mentionsValidation) {
+                $candidateKind = if ($mentionsFilesystem) { 'filesystem suite' } else { 'validation unit test' }
+                if ($values -contains '--list') {
+                    Add-Failure "$candidateKind invocation must not use --list: $($call.Extent.Text)"
+                }
+                if ($values -contains '--no-run') {
+                    Add-Failure "$candidateKind invocation must not use --no-run: $($call.Extent.Text)"
+                }
+            }
+
+            $isFilesystem = $isTest -and (Test-ArgumentShape -Actual $values -Expected $filesystemShape)
+            $isValidation = $isTest -and (Test-ArgumentShape -Actual $values -Expected $validationShape)
+            if (-not $isFilesystem -and -not $isValidation) {
+                continue
+            }
+
+            $kind = if ($isFilesystem) { 'filesystem suite' } else { 'validation unit test' }
+            $pipeline = $call.Parent
+            $block = if ($null -ne $pipeline) { $pipeline.Parent } else { $null }
+            if ($null -eq $checkOnlyElse -or
+                $block -isnot [System.Management.Automation.Language.StatementBlockAst] -or
+                -not [object]::ReferenceEquals($block, $checkOnlyElse)) {
+                Add-Failure "$kind invocation must be a direct statement in the CheckOnly else block: $($call.Extent.Text)"
+            }
+            $ancestor = $call.Parent
+            while ($null -ne $ancestor) {
+                if ($ancestor -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+                    Add-Failure "$kind invocation must not be inside a function: $($call.Extent.Text)"
+                }
+                if ($ancestor -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+                    Add-Failure "$kind invocation must not be inside a script block: $($call.Extent.Text)"
+                }
+                if ($ancestor -is [System.Management.Automation.Language.LoopStatementAst]) {
+                    Add-Failure "$kind invocation must not be inside a loop: $($call.Extent.Text)"
+                }
+                if ($ancestor -is [System.Management.Automation.Language.IfStatementAst]) {
+                    $condition = $ancestor.Clauses[0].Item1.Extent.Text.Trim()
+                    if ($condition -ne '$CheckOnly') {
+                        Add-Failure "$kind invocation must not be conditional (found if $condition): $($call.Extent.Text)"
+                    }
+                }
+                $ancestor = $ancestor.Parent
+            }
+            if ($isFilesystem) {
+                $filesystemCalls += $call
+            }
+            if ($isValidation) {
+                $validationCalls += $call
+            }
+        }
+        if ($filesystemCalls.Count -ne 1) {
+            Add-Failure "expected exactly one unconditional test -p neojs-core --test fs invocation with the exact argument shape, found $($filesystemCalls.Count)"
+        }
+        if ($validationCalls.Count -ne 1) {
+            Add-Failure "expected exactly one exact validation unit test invocation, found $($validationCalls.Count)"
         }
     }
 }

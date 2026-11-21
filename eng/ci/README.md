@@ -7,20 +7,29 @@ is `.github/workflows/windows-native.yml`; the script it calls is
 `eng/ci/test-windows-ci-check.ps1`. The same checks can be reproduced on a
 Windows machine without GitHub Actions.
 
-> **Status: dispatched, not yet passing.** Two dispatches are recorded and both
-> failed; no native gate has passed. Run
+> **Status: the 58-test targeted gate passed; the filesystem extension is
+> unverified.** Run
+> [44845110559](https://github.com/neotales/neo-js/actions/runs/44845110559) at
+> `51f3994` passed the targeted gate: the two registry suites (`8` and `9`
+> tests), `neojs-core --test process` (`9`), `neojs --test process` (`19`),
+> `neojs --test process_stdio` (`6`), and `neojs-os --test os` (`7`), followed
+> by the workspace `--no-run` compile. The full workspace test execution was
+> not enabled.
+>
+> The earlier runs
 > [44841666909](https://github.com/neotales/neo-js/actions/runs/44841666909) at
-> `72ed60b` ran the registry suites (`8` and `9` tests),
-> `neojs-core --test process` (`9`), and `neojs --test process` (`19`) green,
-> then failed `neojs/tests/process_stdio.rs` with `4 passed, 1 failed`:
-> `cwd_and_chdir_are_runtime_local_and_coordinate_with_filesystem` compared the
-> initial `cwd()` text to `std::fs::canonicalize` of the working directory. The
-> gate stopped there, so the `neojs-os` suite and the workspace `--no-run`
-> compile were not reached. The earlier run
+> `72ed60b` and
 > [44836480297](https://github.com/neotales/neo-js/actions/runs/44836480297)
-> also failed. The current correction for the `process_stdio` failure has not
-> run on Windows. Nothing here is evidence that the Windows build or runtime
-> passes.
+> failed before that pass. In `44841666909`,
+> `neojs/tests/process_stdio.rs` failed on the initial-cwd comparison, which
+> `51f3994` corrected. Reaching a hosted runner does not establish organization
+> eligibility or billing beyond the runs recorded here.
+>
+> This branch adds the `neojs-core --test fs` suite to the targeted gate: `35`
+> Windows-selected integration tests, plus one filtered pure validation unit
+> test (`94` selected in total). That extension has not been dispatched, so it
+> is not evidence that the filesystem path passes on Windows. The previous
+> 58-test result remains the only native Windows evidence.
 
 ## Runner environment
 
@@ -29,18 +38,17 @@ The repository is public (`neotales/neo-js`). The workflow targets
 self-hosted or Linux runner label.
 
 The only trigger is `workflow_dispatch`. A `pull_request` trigger is
-deliberately not active yet: a hosted Windows runner was reached in both
-recorded dispatches, but no dispatch has passed the gate, so a PR trigger would
-queue a job on every pull request before one has. Enable it after one
-successful manual dispatch, in a reviewed change.
+deliberately not active yet: one manual dispatch has passed the 58-test gate,
+but this branch's filesystem extension has not run, so a PR trigger would queue
+the extended gate on every pull request before it has. Enable it after the
+extended gate has one successful manual dispatch, in a reviewed change.
 
 Public repositories are normally eligible for GitHub-hosted standard runners,
 but eligibility for this organization, Actions enablement, spending limits, and
-concurrency limits are all outside the repository checkout. Both recorded
+concurrency limits are all outside the repository checkout. All three recorded
 dispatches reached a hosted Windows runner; that does not establish eligibility
-or billing beyond those runs, and neither passed the gate. If hosted Windows
-becomes unavailable, the manual run will queue or fail; it will not silently
-fall back to a Linux runner.
+or billing beyond those runs. If hosted Windows becomes unavailable, the manual
+run will queue or fail; it will not silently fall back to a Linux runner.
 
 The separate self-hosted runner pool advertises only `linux-amd64` and
 `ubuntu-latest`. It is not used by this workflow.
@@ -101,15 +109,36 @@ It then runs, in order. Every command includes the explicit target:
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test winregistry -- --test-threads=1`              | 8             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test winregistry_windows -- --test-threads=1`      | 9             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test process`                                      | 9             |
+| `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test fs`                                           | 35            |
+| `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --lib -- fs::tests::windows_copy_paths_are_rejected_before_io --exact` | 1 selected    |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs --test process`                                           | 19            |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs --test process_stdio`                                     | 6             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-os --test os`                                             | 7             |
 | `cargo +1.87.0 test --workspace --locked --target x86_64-pc-windows-msvc --no-run`                                              | compiles all workspace test targets, runs none |
 
+The filtered validation row is not accepted just because Cargo exits zero: the
+script captures its output and requires the libtest summary `running 1 test`
+and `1 passed; 0 failed`. A filter that selects zero tests, or more than one,
+fails the gate.
+
 The counts are source-level counts after applying `cfg` gates; they are not a
 claim that those tests passed. `neojs/tests/process.rs` contains 22 tests, of
-which three are `#[cfg(unix)]`, so 19 run on Windows. The targeted suites total
-58 Windows tests.
+which three are `#[cfg(unix)]`, so 19 run on Windows. `neojs-core/tests/fs.rs`
+contains 45 tests; ten are `#[cfg(unix)]`, so 35 are selected on Windows. The
+35 include two Windows-only integration tests added on this branch: one uses
+only owned `tempfile` fixtures to check `stat`, `lstat`, `readDir`, and their
+sync forms for regular files and directories; the other creates a final file
+symlink (a reparse point), verifies that `stat` follows it while `lstat` and
+`readDir` report the entry as a link, and fails closed if the process lacks
+`SeCreateSymbolicLinkPrivilege` or Developer Mode. The previous Windows-only
+integration test that passed root, namespace, UNC, device, and stream names to
+`copyFile` was removed; those cases now run in a pure validation unit test
+(`fs::tests::windows_copy_paths_are_rejected_before_io`) selected with
+`--lib -- ... --exact`. It calls `validate_entry_path` and
+`validate_copy_disk_path` directly and performs no I/O. No junction is created
+and no privileged directory link or host path outside the temp directory is
+touched. The targeted suites total 94 Windows-selected tests when this branch's
+filesystem suite and validation unit test are included.
 
 The full workspace suite is opt-in:
 
@@ -119,11 +148,11 @@ pwsh -File eng/ci/windows-native.ps1 -FullWorkspace
 
 It is also available from the workflow's `workflow_dispatch` input
 `full_workspace_tests`. It is off by default because the full workspace suite
-has never run on Windows, and only some targeted suites have: the observed run
-stopped before the `neojs-os` suite, which neither observed run reached. The
-first full run is expected to expose further failures, and turning that on for
-every pull request would conflate "the native build works" with "every
-unverified Windows behavior is correct".
+has never run on Windows; only the 58-test targeted set has passed, and this
+branch's filesystem extension has not run. The first full run is expected to
+expose further failures, and turning that on for every pull request would
+conflate "the native build works" with "every unverified Windows behavior is
+correct".
 
 Compiling the workspace compiles the native MSVC dependencies, including the
 bundled QuickJS C sources used by `rquickjs`, the bundled SQLite C sources used
@@ -164,7 +193,16 @@ checks:
   aliases or functions are rejected. A path-qualified cargo is rejected even
   when it replaces the wrapper;
 - every `Invoke-Cargo` call must contain exactly one `--target` followed by
-  `$Target`;
+  `$Target`; exactly ten calls must exist. Exactly one call must have the
+  complete `test --locked --target $Target -p neojs-core --test fs` argument
+  shape, with no extra arguments such as `--list`, `--no-run`, or a filter.
+  Exactly one corresponding call must have the complete
+  `test --locked --target $Target -p neojs-core --lib -- fs::tests::windows_copy_paths_are_rejected_before_io --exact`
+  shape. Both must be direct statements in the `else` block of the
+  `-CheckOnly` guard and must not be inside a function, script block, `if`, or
+  loop. At runtime, the validator's captured output must report `running 1
+  test` and `1 passed; 0 failed`; a zero-test or multi-test match fails the
+  gate;
 - `neojs-core/tests/winregistry_windows.rs` exists, still reserves
   `HKCU\Software\neo-js-tests-*`, and does not mention `HKLM`,
   `HKEY_LOCAL_MACHINE`, or `HKEY_USERS`. This is the platform-independent
@@ -177,11 +215,12 @@ toolchain `1.87.0` and the `x86_64-pc-windows-msvc` standard library installed.
 Without them it fails closed. The self-test baseline on Windows therefore
 needs the same toolchain as the workflow.
 
-The guarantee is source-level. The YAML checks are a strict contract for this
-workflow's block structure, not a general YAML parser; they do not handle every
-legal YAML form. The guard also does not attest which `cargo` binary is found on
+The AST/YAML guarantee is source-level. The YAML checks are a strict contract
+for this workflow's block structure, not a general YAML parser; they do not
+handle every legal YAML form. The native gate separately checks the validator's
+libtest summary, but neither check attests which `cargo` binary is found on
 `PATH`, what that binary or its build scripts do, or code generated at run time.
-It is not a sandbox.
+They are not a sandbox.
 
 Run it locally with:
 
@@ -207,6 +246,23 @@ dependency. Rejected mutations:
 - environment-expanded cargo (`& "$env:CARGO"`);
 - a path-qualified cargo replacing the wrapper command;
 - a removed `--target`;
+- a removed `neojs-core --test fs` invocation;
+- a duplicate `neojs-core --test fs` invocation;
+- a `neojs-core --test fs` invocation with `--no-run`;
+- a `neojs-core --test fs` invocation with `--list`;
+- a `neojs-core --test fs` invocation with the wrong package;
+- a `neojs-core --test fs` invocation under `if ($false)`;
+- a `neojs-core --test fs` invocation moved outside the `CheckOnly` else;
+- a `neojs-core --test fs` invocation inside an uninvoked function;
+- a missing validation unit test invocation;
+- a duplicate validation unit test invocation;
+- a validation unit test invocation with `--no-run`;
+- a validation unit test invocation with `--list`;
+- a validation unit test invocation with a bogus filter;
+- a validation unit test invocation with the wrong package;
+- a validation unit test invocation under `if ($false)`;
+- a validation unit test invocation moved outside the `CheckOnly` else;
+- a validation unit test invocation inside an uninvoked function;
 - a cargo alias;
 - a floating action ref;
 - a policy-rejected block `with: toolchain: 1.87.0` on
@@ -233,6 +289,30 @@ Run it with:
 ```powershell
 pwsh -File eng/ci/test-windows-ci-check.ps1
 ```
+
+## Filesystem fixture safety
+
+The filesystem integration tests that use fixtures create a fresh
+`tempfile::TempDir` for each such test; a test that needs no fixture, such as
+the permission/allowlist test, performs no filesystem operation and creates no
+temp directory. Fixture tests operate only on paths below their own temp
+directory. They do not write to the repository, the host's home directory, a
+drive root, or an existing user file. Tests that use relative paths set the
+runtime cwd to their own temp directory first; outside-managed-turn probes pass
+absolute owned paths. Invalid-path operations therefore stay under an owned cwd
+even if validation regresses. The Windows-only reparse test creates one final
+file symlink inside its own temp directory. If the process lacks `SeCreateSymbolicLinkPrivilege` /
+Developer Mode (Windows error 1314), or the filesystem does not support
+symlinks, the test fails with that specific message; it does not print a
+skipped result that could be mistaken for coverage. It never creates a
+junction, an elevated directory link, or a link to an unowned path.
+
+`tempfile::TempDir` attempts to remove its owned tree on `Drop`, but its `Drop`
+implementation discards cleanup errors. A failed assertion therefore still
+unwinds and attempts cleanup, and any cleanup failure can leave files only
+under that test's own temp root. Nothing outside that root is deleted, and the
+suite does not reuse a path after a cleanup failure. On a GitHub-hosted runner
+the VM is discarded after the job.
 
 ## Registry safety
 
@@ -262,8 +342,8 @@ PR trigger is enabled later, because that code is untrusted.
 
 ## Enabling pull requests
 
-After one successful manual dispatch has confirmed that the hosted Windows
-runner exists, add the PR trigger in a separate reviewed change:
+After the extended gate has one successful manual dispatch, add the PR trigger
+in a separate reviewed change:
 
 ```yaml
 on:
@@ -281,9 +361,10 @@ pull request into a stuck check.
   distinguished from a slow runner without repository administration access.
 - **Actions disabled or over budget:** the workflow does not start. There is no
   fallback to the Linux self-hosted pool.
-- **`windows-latest` image drift:** the label floats. Once the first run
-  succeeds, pin the runner image (`windows-2025` or the then-current stable
-  image) in a separate change.
+- **`windows-latest` image drift:** the label floats. The 58-test run succeeded
+  on the floating image, but the image is not pinned. Pin it
+  (`windows-2025` or the then-current stable image) in a separate change before
+  treating a later result as comparable.
 - **MSRV drift:** `Cargo.lock` and `Cargo.toml` are pinned, but a transitive
   crate can still declare a newer `rust-version` when the lock is regenerated.
   The `rustc -vV` guard catches the toolchain, not a bad lock.
@@ -293,12 +374,16 @@ pull request into a stuck check.
 - **Wrong OS/process architecture:** the `RuntimeInformation` checks reject a
   32-bit process and an x64 process emulated on a non-x64 OS before any test
   runs. They do not assert the physical CPU model.
+- **Symlink capability missing:** the Windows reparse-point test fails closed
+  with the `SeCreateSymbolicLinkPrivilege`/Developer Mode or unsupported-
+  filesystem message. It does not skip silently and does not count a skipped
+  test as coverage. No junction is created.
 - **Full workspace failures:** expected on the first opt-in run. They are
   findings about Windows behavior, not evidence that the targeted gate is
   wrong.
 - **No formatting, clippy, or docs gate:** this workflow is deliberately
   scoped to native build and runtime verification. Adding a Windows clippy gate
-  before the first successful run would mix new lint findings with unknown
+  before the extended gate passes would mix new lint findings with unknown
   runtime failures.
 - **No native MSVC build or run was possible on the Linux development host,
   and the Rust 1.87 Windows target is not installed there.** The workflow and
