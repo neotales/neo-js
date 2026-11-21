@@ -47,6 +47,24 @@ fn assert_cli_ok(output: &Output) {
     );
 }
 
+/// Run `source` in `dir` and decode the initial `cwd()` it reports as a JSON
+/// string on the first line of stdout.
+///
+/// The string is compared by path identity, not text: Windows may name one
+/// directory with short (8.3) components, a verbatim `\\?\` prefix, or another
+/// alias, and `cwd()` reports the spelling the host process was started with,
+/// which is not guaranteed to equal the exact input.
+fn run_cli_cwd_report(dir: &Path, permissions: &[&str], source: &str) -> (String, String) {
+    let output = run_cli(dir, permissions, source);
+    assert_cli_ok(&output);
+    let stdout = std::str::from_utf8(&output.stdout).unwrap();
+    let (reported, rest) = stdout
+        .split_once('\n')
+        .unwrap_or_else(|| panic!("stdout has no reported cwd line: {stdout:?}"));
+    let reported = serde_json::from_str(reported).unwrap();
+    (reported, rest.to_owned())
+}
+
 #[test]
 fn streams_copy_binary_stdin_to_separate_stdout_and_stderr() {
     let dir = tempfile::tempdir().unwrap();
@@ -159,14 +177,23 @@ fn cwd_and_chdir_are_runtime_local_and_coordinate_with_filesystem() {
     std::fs::create_dir(dir.path().join("b")).unwrap();
     std::fs::write(dir.path().join("a/data.txt"), "A").unwrap();
     std::fs::write(dir.path().join("b/data.txt"), "B").unwrap();
+    std::fs::write(dir.path().join("marker.txt"), "initial").unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let a = std::fs::canonicalize(dir.path().join("a")).unwrap();
     let b = std::fs::canonicalize(dir.path().join("b")).unwrap();
 
     let source = format!(
-        r#"import {{cwd, chdir, ChangeDirectoryError}} from 'neo:process';
+        r#"import {{cwd, chdir, ChangeDirectoryError, stdout}} from 'neo:process';
 import {{readText}} from 'neo:fs';
-if (cwd() !== {root}) throw Error('initial cwd ' + cwd());
+// The initial cwd() is the host-reported spelling of the process directory: on
+// Windows it may use short (8.3) components while canonicalize() returns a
+// verbatim path, and the OS may normalize it, so it is not guaranteed to equal
+// the exact path supplied to the process. The initial value is therefore
+// checked by resolving a relative read here and by path identity in the
+// parent. chdir() stores a canonical path, so the comparisons after it remain
+// exact.
+if (readText('marker.txt') !== 'initial') throw Error('initial cwd ' + cwd());
+stdout.writeSync(JSON.stringify(cwd()) + '\n');
 chdir('a');
 if (cwd() !== {a}) throw Error('a cwd ' + cwd());
 if (readText('data.txt') !== 'A') throw Error('a data');
@@ -186,13 +213,59 @@ chdir({root});
 if (readText('a/data.txt') !== 'A') throw Error('root data');
 console.log('ok');
 "#,
-        root = serde_json::to_string(root.to_str().unwrap()).unwrap(),
         a = serde_json::to_string(a.to_str().unwrap()).unwrap(),
         b = serde_json::to_string(b.to_str().unwrap()).unwrap(),
+        root = serde_json::to_string(root.to_str().unwrap()).unwrap(),
     );
-    let output = run_cli(dir.path(), &["--allow-fs", "--allow-stdio"], &source);
-    assert_cli_ok(&output);
-    assert_eq!(output.stdout, b"ok\n");
+    let (initial, rest) = run_cli_cwd_report(dir.path(), &["--allow-fs", "--allow-stdio"], &source);
+    assert!(
+        Path::new(&initial).is_absolute(),
+        "initial cwd is not absolute: {initial:?}"
+    );
+    assert!(
+        same_file::is_same_file(&initial, dir.path()).unwrap(),
+        "initial cwd {initial:?} does not name the host directory {:?}",
+        dir.path()
+    );
+    assert_eq!(rest, "ok\n");
+}
+
+/// Windows can spell one directory with short (8.3) components, with a
+/// verbatim `\\?\` prefix, or with the long components the environment
+/// normally uses. `cwd()` reports the spelling the host process was started
+/// with, and the OS may normalize that spelling, so it is not guaranteed to
+/// equal the exact input. This starts the CLI from the temporary directory as
+/// the environment spells it (short when the host's `TEMP` uses 8.3 names;
+/// this test neither requires nor constructs one) and from its canonical
+/// verbatim spelling. Both runs are compared by directory identity.
+#[cfg(windows)]
+#[test]
+fn cwd_names_the_host_directory_for_host_reported_and_verbatim_spellings() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("marker.txt"), "initial").unwrap();
+    let verbatim = std::fs::canonicalize(dir.path()).unwrap();
+    assert!(
+        verbatim.to_str().is_some(),
+        "the canonical temporary path is not Unicode"
+    );
+
+    let source = "import {cwd, stdout} from 'neo:process';\n\
+                  import {readText} from 'neo:fs';\n\
+                  if (readText('marker.txt') !== 'initial') throw Error('initial cwd');\n\
+                  stdout.writeSync(JSON.stringify(cwd()) + '\\n');";
+    for (spelling, working) in [
+        ("host-reported", dir.path().to_path_buf()),
+        ("verbatim", verbatim),
+    ] {
+        let (reported, rest) =
+            run_cli_cwd_report(&working, &["--allow-fs", "--allow-stdio"], source);
+        assert_eq!(rest, "");
+        assert!(
+            same_file::is_same_file(&reported, dir.path()).unwrap(),
+            "{spelling} cwd {reported:?} from {working:?} does not name {:?}",
+            dir.path()
+        );
+    }
 }
 
 #[cfg(unix)]

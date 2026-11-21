@@ -7,28 +7,40 @@ is `.github/workflows/windows-native.yml`; the script it calls is
 `eng/ci/test-windows-ci-check.ps1`. The same checks can be reproduced on a
 Windows machine without GitHub Actions.
 
-> **Status: prepared, not executed.** No workflow has run in
-> `neotales/neo-js`. The repository had no `.github/workflows` history before
-> this change. Nothing here is evidence that the Windows build or runtime
+> **Status: dispatched, not yet passing.** Two dispatches are recorded and both
+> failed; no native gate has passed. Run
+> [44841666909](https://github.com/neotales/neo-js/actions/runs/44841666909) at
+> `72ed60b` ran the registry suites (`8` and `9` tests),
+> `neojs-core --test process` (`9`), and `neojs --test process` (`19`) green,
+> then failed `neojs/tests/process_stdio.rs` with `4 passed, 1 failed`:
+> `cwd_and_chdir_are_runtime_local_and_coordinate_with_filesystem` compared the
+> initial `cwd()` text to `std::fs::canonicalize` of the working directory. The
+> gate stopped there, so the `neojs-os` suite and the workspace `--no-run`
+> compile were not reached. The earlier run
+> [44836480297](https://github.com/neotales/neo-js/actions/runs/44836480297)
+> also failed. The current correction for the `process_stdio` failure has not
+> run on Windows. Nothing here is evidence that the Windows build or runtime
 > passes.
 
 ## Runner environment
 
-The repository is public (`neotales/neo-js`) and has no existing GitHub Actions
-workflow. The workflow targets `windows-latest`, a GitHub-hosted standard
-runner, and does not use a self-hosted or Linux runner label.
+The repository is public (`neotales/neo-js`). The workflow targets
+`windows-latest`, a GitHub-hosted standard runner, and does not use a
+self-hosted or Linux runner label.
 
 The only trigger is `workflow_dispatch`. A `pull_request` trigger is
-deliberately not active yet: before hosted Windows availability is proven, a
-PR trigger would queue or fail a job on every pull request. Enable it after one
+deliberately not active yet: a hosted Windows runner was reached in both
+recorded dispatches, but no dispatch has passed the gate, so a PR trigger would
+queue a job on every pull request before one has. Enable it after one
 successful manual dispatch, in a reviewed change.
 
 Public repositories are normally eligible for GitHub-hosted standard runners,
-but eligibility and availability for this organization were not verified:
-Actions enablement, organization policy, spending limits, and concurrency
-limits are all outside the repository checkout. No workflow was dispatched. If
-hosted Windows is unavailable, the manual run will queue or fail; it will not
-silently fall back to a Linux runner.
+but eligibility for this organization, Actions enablement, spending limits, and
+concurrency limits are all outside the repository checkout. Both recorded
+dispatches reached a hosted Windows runner; that does not establish eligibility
+or billing beyond those runs, and neither passed the gate. If hosted Windows
+becomes unavailable, the manual run will queue or fail; it will not silently
+fall back to a Linux runner.
 
 The separate self-hosted runner pool advertises only `linux-amd64` and
 `ubuntu-latest`. It is not used by this workflow.
@@ -86,18 +98,18 @@ It then runs, in order. Every command includes the explicit target:
 
 | Command                                                                                                                        | Windows tests |
 | ------------------------------------------------------------------------------------------------------------------------------ | ------------- |
-| `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test winregistry -- --test-threads=1`              | 7             |
+| `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test winregistry -- --test-threads=1`              | 8             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test winregistry_windows -- --test-threads=1`      | 9             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test process`                                      | 9             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs --test process`                                           | 19            |
-| `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs --test process_stdio`                                     | 5             |
+| `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs --test process_stdio`                                     | 6             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-os --test os`                                             | 7             |
 | `cargo +1.87.0 test --workspace --locked --target x86_64-pc-windows-msvc --no-run`                                              | compiles all workspace test targets, runs none |
 
 The counts are source-level counts after applying `cfg` gates; they are not a
 claim that those tests passed. `neojs/tests/process.rs` contains 22 tests, of
 which three are `#[cfg(unix)]`, so 19 run on Windows. The targeted suites total
-56 Windows tests.
+58 Windows tests.
 
 The full workspace suite is opt-in:
 
@@ -106,10 +118,12 @@ pwsh -File eng/ci/windows-native.ps1 -FullWorkspace
 ```
 
 It is also available from the workflow's `workflow_dispatch` input
-`full_workspace_tests`. It is off by default because Windows-only tests have
-never been executed; the first full run is expected to expose failures, and
-turning that on for every pull request would conflate "the native build works"
-with "every unverified Windows behavior is correct".
+`full_workspace_tests`. It is off by default because the full workspace suite
+has never run on Windows, and only some targeted suites have: the observed run
+stopped before the `neojs-os` suite, which neither observed run reached. The
+first full run is expected to expose further failures, and turning that on for
+every pull request would conflate "the native build works" with "every
+unverified Windows behavior is correct".
 
 Compiling the workspace compiles the native MSVC dependencies, including the
 bundled QuickJS C sources used by `rquickjs`, the bundled SQLite C sources used
