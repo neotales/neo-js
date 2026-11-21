@@ -20,7 +20,7 @@ declare const env: {
  * The `neo:fs` API. Available only with `--allow-fs` and when the runtime's
  * module allowlist admits `neo:fs`. Relative paths use the runtime's working
  * directory, not the host process's. `readFile`, `writeFile`, `writeText`,
- * `stat`, `lstat`, `readDir`, `mkdir`, `remove`, and `rename` are
+ * `stat`, `lstat`, `readDir`, `mkdir`, `remove`, `rename`, and `copyFile` are
  * asynchronous; their `Sync` counterparts and every other operation block.
  *
  * This is not a sandbox: a script with this object has the host user's
@@ -139,8 +139,16 @@ declare const fs: {
   rename(source: string, destination: string): Promise<void>;
   /** Same entry and replacement rules as `neo:fs.renameSync`. */
   renameSync(source: string, destination: string): void;
-  /** Same bounded, no-clobber copy as `neo:fs.copyFile`. */
-  copyFile: typeof import("neo:fs").copyFile;
+  /**
+   * Copy a file on a worker during managed module evaluation. Invalid
+   * arguments and filesystem failures reject the Promise; outside a managed
+   * turn, this throws `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. It
+   * uses the same outstanding-operation and worker limits as `readFile`. See
+   * `neo:fs.copyFile` for the entry, permission, and no-clobber rules.
+   */
+  copyFile(source: string, destination: string): Promise<void>;
+  /** Same entry, no-clobber, and permission rules as `neo:fs.copyFileSync`. */
+  copyFileSync(source: string, destination: string): void;
   FsError: typeof import("neo:fs").FsError;
   MAX_PATH_BYTES: number;
   MAX_READ_BYTES: number;
@@ -169,11 +177,12 @@ declare module "neo:env" {
  *
  * During managed module evaluation, `readFile` reads, `writeFile` and
  * `writeText` write, `stat` and `lstat` read metadata, `readDir` lists a
- * directory, `mkdir` creates a directory, `remove` deletes an entry, and
- * `rename` moves an entry on a worker. Those nine return Promises.
+ * directory, `mkdir` creates a directory, `remove` deletes an entry,
+ * `rename` moves an entry, and `copyFile` copies an entry on a worker. Those
+ * ten return Promises.
  * `readFileSync`, `writeFileSync`, `writeTextSync`, `statSync`, `lstatSync`,
- * `readDirSync`, `mkdirSync`, `removeSync`, `renameSync`, and the other
- * operations block the JavaScript thread. Relative
+ * `readDirSync`, `mkdirSync`, `removeSync`, `renameSync`, `copyFileSync`, and
+ * the other operations block the JavaScript thread. Relative
  * paths resolve
  * against the runtime's working directory, with no fallback to the host
  * directory. If that directory is unavailable, the asynchronous forms reject
@@ -224,8 +233,10 @@ declare module "neo:env" {
  * `writeText`, and `writeTextSync` truncate before writing and are not atomic;
  * a failure can leave a partial file. No write is durable on return, and concurrent writes
  * have no ordering guarantee. A started asynchronous write may complete its
- * side effects after a failed turn; cancellation does not roll back. No file
- * locking is performed. The opened descriptor is verified
+ * side effects after a failed turn; cancellation does not roll back.
+ * `copyFile` and `copyFileSync` also create before copying: an error,
+ * cancellation, or teardown can leave a partial destination, and permission
+ * copying happens last. No file locking is performed. The opened descriptor is verified
  * before truncation. Unix data opens (including copy) use `O_NONBLOCK` to
  * avoid waiting for a FIFO peer and `O_NOCTTY` to avoid acquiring a controlling
  * terminal. Other device-open side effects remain possible, and device and
@@ -241,8 +252,8 @@ declare module "neo:fs" {
   /**
    * Stable failure codes reported by `FsError.code`. `FS_PATH` includes
    * invalid or unsupported path syntax and, for `remove`, `removeSync`,
-   * `rename`, `renameSync`, and `copyFile`, parsed roots, trailing separators,
-   * and final `.` or `..` components.
+   * `rename`, `renameSync`, `copyFile`, and `copyFileSync`, parsed roots,
+   * trailing separators, and final `.` or `..` components.
    */
   export type FsErrorCode =
     | "FS_PATH"
@@ -438,25 +449,58 @@ declare module "neo:fs" {
   export function readFileSync(path: string): Uint8Array;
 
   /**
-   * Synchronously stream bytes from a regular file into a new regular file.
-   * Both relative paths use the same runtime cwd. Roots, trailing separators,
-   * and final `.` or `..` components throw `FS_PATH`. On Windows, copy rejects
-   * UNC, device, drive-relative and drive-less rooted paths, reserved device names, alternate
-   * data streams, and ambiguous trailing dots or spaces in components.
+   * Copy a regular file into a new regular file on a worker.
    *
-   * Unlike the reference copy API, this never overwrites or copies metadata.
-   * The source may be a symlink to a regular file; exclusive creation
-   * refuses an existing destination (`FS_ALREADY_EXISTS` when reported by
-   * the OS), including aliases and dangling links. Parents are not created.
-   * Copy can span filesystems. The limit is `MAX_READ_BYTES`; an oversize
-   * source detected at open throws `FS_LIMIT` before creating anything.
+   * **Breaking change:** this function was synchronous. Use
+   * `await copyFile(source, destination)` during managed module evaluation, or
+   * `copyFileSync(source, destination)` in synchronous code. During managed
+   * evaluation, invalid arguments and filesystem failures reject the Promise.
+   * Outside a managed turn it throws `FS_ASYNC_OUTSIDE_TURN` synchronously
+   * before any I/O.
    *
-   * This is not atomic or durable. A failure after creation (including
-   * growth past the limit) can leave a partial file, which is not removed.
-   * Concurrent renames or writes can change which paths or bytes are seen.
-   * No-clobber depends on the filesystem honoring exclusive creation.
+   * Both relative paths use the same runtime working directory captured at
+   * the call. Both original operands are validated before either is resolved,
+   * and both resolved operands are validated again. Roots, trailing
+   * separators, and final `.` or `..` components reject with `FS_PATH`.
+   * On Windows, copy rejects UNC, device, drive-relative and drive-less rooted
+   * paths, reserved device names, alternate data streams, and ambiguous
+   * trailing dots or spaces in components. Outside a managed turn,
+   * `FS_ASYNC_OUTSIDE_TURN` takes precedence because the call throws before
+   * path validation or I/O.
+   *
+   * The source may be a symlink to a regular file; exclusive creation refuses
+   * an existing destination (`FS_ALREADY_EXISTS` when reported by the OS),
+   * including aliases and dangling links. Parents are not created. Copy can
+   * span filesystems. The limit is `MAX_READ_BYTES`; an oversize source
+   * detected at open rejects with `FS_LIMIT` before creating anything.
+   *
+   * Bytes are copied first and then the source's permission bits are applied
+   * through the destination descriptor: Unix mode bits or the Windows
+   * read-only attribute. Ownership, ACLs, timestamps, and other metadata are
+   * not copied. If applying permissions fails, the copied bytes remain.
+   *
+   * This is not atomic or durable. A failure or cancellation after creation
+   * (including growth past the limit) can leave an empty or partial file with
+   * the creation-time permissions, which is not removed. Concurrent renames
+   * or writes can change which paths or bytes are seen. No-clobber depends on
+   * the filesystem honoring exclusive creation. A copy shares the
+   * four-operation outstanding bound and two-worker pool with the other
+   * asynchronous filesystem operations and charges both resolved paths
+   * against the same turn budget. Excess work rejects with `FS_LIMIT`. A
+   * started asynchronous copy checks cancellation between bounded chunks and
+   * cannot be interrupted inside an OS call; cancellation restores nothing.
    */
-  export function copyFile(source: string, destination: string): void;
+  export function copyFile(source: string, destination: string): Promise<void>;
+
+  /**
+   * Copy a regular file into a new regular file, blocking the JavaScript
+   * thread.
+   *
+   * The same entry, no-clobber, permission, limit, error, and no-rollback
+   * rules as `copyFile` apply, except that invalid paths and every other
+   * failure throw instead of rejecting and the call returns `undefined`.
+   */
+  export function copyFileSync(source: string, destination: string): void;
 
   /**
    * Write bytes to a regular file on a worker, using the runtime directory

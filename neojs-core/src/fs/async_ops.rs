@@ -16,10 +16,11 @@ use rquickjs::{
 use super::{
     Code, DirEntryInfo, FileInfo, FsError, JsError, JsResult, JsString, MAX_LIST_ENTRIES,
     MAX_LIST_NAME_BYTES, MAX_LIST_TOTAL_BYTES, MAX_PATH_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES,
-    WorkingDirectory, bounded_copy, checked_js_path, entries_json, file_info_at, file_info_value,
-    mkdir_at, open_regular_source, read_bounded_until, read_dir_at_until, remove_at, rename_at,
-    resolve, resolve_pair, resolve_path, snapshot_write_text, validate_entry_path, validate_path,
-    worker, write_bytes_at,
+    WorkingDirectory, bounded_copy, checked_js_path, copy_file_at_until, entries_json,
+    file_info_at, file_info_value, mkdir_at, open_regular_source, read_bounded_until,
+    read_dir_at_until, remove_at, rename_at, resolve, resolve_pair, resolve_path,
+    snapshot_copy_paths, snapshot_write_text, validate_entry_path, validate_path, worker,
+    write_bytes_at,
 };
 
 /// Maximum outstanding filesystem operations, including undelivered
@@ -64,6 +65,8 @@ struct Job {
     write_text_gate: Option<WriteTextGate>,
     #[cfg(test)]
     rename_gate: Option<RenameGate>,
+    #[cfg(test)]
+    copy_gate: Option<CopyGate>,
 }
 
 enum JobKind {
@@ -98,6 +101,10 @@ enum JobKind {
         source: PathBuf,
         destination: PathBuf,
     },
+    Copy {
+        source: PathBuf,
+        destination: PathBuf,
+    },
 }
 
 /// A worker result that still needs an owner-side settlement.
@@ -109,6 +116,7 @@ enum Output {
     Mkdir,
     Remove,
     Rename,
+    Copy,
 }
 
 type OperationResult = Result<Output, FsError>;
@@ -196,6 +204,20 @@ fn execute(job: Job, cancellation: &worker::Cancellation) -> OperationResult {
             }
             Ok(Output::Rename)
         }
+        JobKind::Copy {
+            source,
+            destination,
+        } => {
+            copy_file_at_until(&source, &destination, || cancellation.requested())?;
+            // Test-only point after the copy effect. A turn failure here
+            // proves teardown joins a worker that has already created and
+            // filled the destination, so nothing is rolled back.
+            #[cfg(test)]
+            if let Some(CopyGate(gate)) = job.copy_gate {
+                gate(cancellation)?;
+            }
+            Ok(Output::Copy)
+        }
     }
 }
 
@@ -210,6 +232,7 @@ enum SettlementKind {
     Mkdir,
     Remove,
     Rename,
+    Copy,
 }
 
 struct Settlement {
@@ -244,6 +267,7 @@ impl Settlement {
             (SettlementKind::Mkdir, Output::Mkdir) => self.finish_void(ctx),
             (SettlementKind::Remove, Output::Remove) => self.finish_void(ctx),
             (SettlementKind::Rename, Output::Rename) => self.finish_void(ctx),
+            (SettlementKind::Copy, Output::Copy) => self.finish_void(ctx),
             (SettlementKind::Stat, Output::Stat(info)) => self.finish_stat(ctx, info),
             (SettlementKind::ReadDir, Output::ReadDir(entries)) => {
                 self.finish_read_dir(ctx, entries)
@@ -345,6 +369,8 @@ pub(crate) struct FsDriver {
     write_text_gates: Rc<RefCell<std::collections::VecDeque<WriteTextGate>>>,
     #[cfg(test)]
     rename_gates: Rc<RefCell<std::collections::VecDeque<RenameGate>>>,
+    #[cfg(test)]
+    copy_gates: Rc<RefCell<std::collections::VecDeque<CopyGate>>>,
 }
 
 impl FsDriver {
@@ -499,6 +525,24 @@ impl FsDriver {
         })
     }
 
+    fn submit_copy<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        source: PathBuf,
+        destination: PathBuf,
+        make_error: Function<'js>,
+    ) -> JsResult<Promise<'js>> {
+        // Charge both resolved paths; a copy owns two pathnames.
+        let bytes = source.as_os_str().as_encoded_bytes().len()
+            + destination.as_os_str().as_encoded_bytes().len();
+        self.submit(ctx, bytes, SettlementKind::Copy, make_error, move || {
+            Ok(JobKind::Copy {
+                source,
+                destination,
+            })
+        })
+    }
+
     fn dispatch(
         &self,
         bytes: usize,
@@ -556,6 +600,12 @@ impl FsDriver {
         } else {
             None
         };
+        #[cfg(test)]
+        let copy_gate = if matches!(kind, JobKind::Copy { .. }) {
+            self.copy_gates.borrow_mut().pop_front()
+        } else {
+            None
+        };
         admission.send(
             id,
             Job {
@@ -570,6 +620,8 @@ impl FsDriver {
                 write_text_gate,
                 #[cfg(test)]
                 rename_gate,
+                #[cfg(test)]
+                copy_gate,
             },
         );
         Ok(())
@@ -688,6 +740,21 @@ fn snapshot_absolute_entry_pair(
         return Err(FsError::new(Code::Path));
     }
     Ok((source, destination))
+}
+
+/// Snapshot a copy pair through the same pure path helper as the synchronous
+/// form. Entry validation and cwd resolution stay in production code, so the
+/// tests exercise this exact ordering rather than a copy of it.
+fn snapshot_absolute_copy_pair(
+    cwd: &Rc<RefCell<WorkingDirectory>>,
+    source: JsString<'_>,
+    destination: JsString<'_>,
+) -> Result<(PathBuf, PathBuf), FsError> {
+    let source = checked_js_path(source, MAX_PATH_BYTES)?;
+    let source = validate_entry_path(&source)?;
+    let destination = checked_js_path(destination, MAX_PATH_BYTES)?;
+    let destination = validate_entry_path(&destination)?;
+    snapshot_copy_paths(&cwd.borrow(), source, destination)
 }
 
 fn throw_argument<'js>(
@@ -854,6 +921,26 @@ pub(super) fn install<'js>(
         )?,
     )?;
 
+    let copy_driver = driver.clone();
+    let copy_cwd = Rc::clone(&stat_base_cwd);
+    native.set(
+        "copyFile",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  source: JsString<'js>,
+                  destination: JsString<'js>,
+                  make_error: Function<'js>| {
+                match snapshot_absolute_copy_pair(&copy_cwd, source, destination) {
+                    Ok((source, destination)) => {
+                        copy_driver.submit_copy(&ctx, source, destination, make_error)
+                    }
+                    Err(error) => throw_argument(&ctx, error, make_error),
+                }
+            },
+        )?,
+    )?;
+
     let remove_driver = driver;
     let remove_cwd = stat_base_cwd;
     native.set(
@@ -912,6 +999,15 @@ struct RenameGate(Box<RenameGateFn>);
 
 #[cfg(test)]
 type RenameGateFn = dyn FnOnce(&worker::Cancellation) -> Result<(), FsError> + Send;
+
+/// Test-only pause after `copy_file_at_until` has returned, so the copied
+/// destination and its permissions are real before the gate blocks.
+/// Production builds have no such field or call.
+#[cfg(test)]
+struct CopyGate(Box<CopyGateFn>);
+
+#[cfg(test)]
+type CopyGateFn = dyn FnOnce(&worker::Cancellation) -> Result<(), FsError> + Send;
 
 #[cfg(test)]
 mod tests;

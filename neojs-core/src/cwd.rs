@@ -92,7 +92,7 @@ impl WorkingDirectory {
     }
 
     /// Inject a path for deterministic unit tests, including a non-Unicode one.
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn injected(path: Option<PathBuf>) -> Self {
         Self { current: path }
     }

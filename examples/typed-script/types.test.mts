@@ -1,5 +1,5 @@
 import process, { ElevationError, isElevated, stdout } from "neo:process";
-import { readFile, readFileSync, writeFile, writeFileSync, writeText, writeTextSync, stat, statSync, lstat, lstatSync, readDir, readDirSync, mkdir, mkdirSync, remove, removeSync, rename, renameSync } from "neo:fs";
+import { readFile, readFileSync, writeFile, writeFileSync, writeText, writeTextSync, stat, statSync, lstat, lstatSync, readDir, readDirSync, mkdir, mkdirSync, remove, removeSync, rename, renameSync, copyFile, copyFileSync } from "neo:fs";
 import type { DirEntry, FileInfo } from "neo:fs";
 
 const elevated: boolean = isElevated();
@@ -62,6 +62,16 @@ const globalSyncedRename: void = fs.renameSync("before.txt", "after.txt");
 const notRenamed: void = rename("before.txt", "after.txt");
 // @ts-expect-error The unsuffixed global rename now completes asynchronously.
 const notGlobalRenamed: void = fs.rename("before.txt", "after.txt");
+
+const pendingCopy: Promise<void> = copyFile("before.bin", "after.bin");
+const syncedCopy: void = copyFileSync("before.bin", "after.bin");
+const globalPendingCopy: Promise<void> = fs.copyFile("before.bin", "after.bin");
+const globalSyncedCopy: void = fs.copyFileSync("before.bin", "after.bin");
+
+// @ts-expect-error The unsuffixed copy now completes asynchronously.
+const notCopied: void = copyFile("before.bin", "after.bin");
+// @ts-expect-error The unsuffixed global copy now completes asynchronously.
+const notGlobalCopied: void = fs.copyFile("before.bin", "after.bin");
 
 // @ts-expect-error The unsuffixed method no longer returns metadata synchronously.
 const notMetadata: FileInfo = stat("data.bin");

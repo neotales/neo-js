@@ -53,7 +53,7 @@ declare const env: {
  * The `neo:fs` API. Available only with `--allow-fs` and when the runtime's
  * module allowlist admits `neo:fs`. Relative paths use the runtime's working
  * directory, not the host process's. `readFile`, `writeFile`, `writeText`,
- * `stat`, `lstat`, `readDir`, `mkdir`, `remove`, and `rename` are
+ * `stat`, `lstat`, `readDir`, `mkdir`, `remove`, `rename`, and `copyFile` are
  * asynchronous; their `Sync` counterparts and every other operation block.
  *
  * This is not a sandbox: a script with this object has the host user's
@@ -172,8 +172,16 @@ declare const fs: {
   rename(source: string, destination: string): Promise<void>;
   /** Same entry and replacement rules as `neo:fs.renameSync`. */
   renameSync(source: string, destination: string): void;
-  /** Same bounded, no-clobber copy as `neo:fs.copyFile`. */
-  copyFile: typeof import("neo:fs").copyFile;
+  /**
+   * Copy a file on a worker during managed module evaluation. Invalid
+   * arguments and filesystem failures reject the Promise; outside a managed
+   * turn, this throws `FS_ASYNC_OUTSIDE_TURN` synchronously before I/O. It
+   * uses the same outstanding-operation and worker limits as `readFile`. See
+   * `neo:fs.copyFile` for the entry, permission, and no-clobber rules.
+   */
+  copyFile(source: string, destination: string): Promise<void>;
+  /** Same entry, no-clobber, and permission rules as `neo:fs.copyFileSync`. */
+  copyFileSync(source: string, destination: string): void;
   FsError: typeof import("neo:fs").FsError;
   MAX_PATH_BYTES: number;
   MAX_READ_BYTES: number;

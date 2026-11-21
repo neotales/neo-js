@@ -401,11 +401,29 @@
     }
 
     function copyFile(source, destination) {
+      // Outside a managed turn there is no owner to deliver a rejection.
+      if (!native.canAsync()) throw makeError('FS_ASYNC_OUTSIDE_TURN');
+      try {
+        // Keep the synchronous form's TypeError precedence: both operands
+        // must be strings before either path is validated.
+        requireString(source, 'source');
+        requireString(destination, 'destination');
+        requirePath(source, makeError);
+        requirePath(destination, makeError);
+        // Native code validates both entries and resolves them against one
+        // cwd snapshot before dispatch.
+        return native.copyFile(source, destination, makeError);
+      } catch (error) {
+        return rejectPromise(error);
+      }
+    }
+
+    function copyFileSync(source, destination) {
       requireString(source, 'source');
       requireString(destination, 'destination');
       requirePath(source);
       requirePath(destination);
-      unwrap(native.copyFile(source, destination));
+      unwrap(native.copyFileSync(source, destination));
     }
 
     const api = createObject(null);
@@ -430,6 +448,7 @@
     defineValue(api, 'rename', rename);
     defineValue(api, 'renameSync', renameSync);
     defineValue(api, 'copyFile', copyFile);
+    defineValue(api, 'copyFileSync', copyFileSync);
     defineValue(api, 'FsError', FsError);
     defineValue(api, 'MAX_PATH_BYTES', limits.MAX_PATH_BYTES);
     defineValue(api, 'MAX_READ_BYTES', limits.MAX_READ_BYTES);

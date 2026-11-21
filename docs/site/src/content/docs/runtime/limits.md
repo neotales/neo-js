@@ -11,8 +11,8 @@ It has no general external event loop. TypeScript support erases types
 without checking them or producing source maps. The loader rejects constructs
 that need a transform. Asynchronous filesystem work is the `neo:fs` worker
 operations: `readFile`, `writeFile`, `writeText`, `stat`, `lstat`, `readDir`,
-`mkdir`, `remove`, and `rename` run on the bounded worker pool during managed
-module evaluation; their `Sync` counterparts and `readText`, `copyFile`, and
+`mkdir`, `remove`, `rename`, and `copyFile` run on the bounded worker pool
+during managed module evaluation; their `Sync` counterparts and `readText` and
 `exists` block. The [filesystem guide](/guides/modules/fs/#migrate-asynchronous-operations)
 owns the current list, outstanding-operation limit, and cancellation rules.
 A started operation may outlive a failed turn and its side effects are not

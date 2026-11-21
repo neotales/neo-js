@@ -18,7 +18,8 @@ functions and `FsError` class.
 | `readFileSync(path)`                  | Read a regular file as a `Uint8Array`, blocking the JavaScript thread.  |
 | `writeFile(path, data, options?)`     | Write a `Uint8Array` on a worker. Returns `Promise<void>`.              |
 | `writeFileSync(path, data, options?)` | Write a `Uint8Array`, blocking the JavaScript thread.                   |
-| `copyFile(source, destination)`       | Stream a regular file into a new file; never overwrite.                 |
+| `copyFile(source, destination)`       | Copy a regular file on a worker. Returns `Promise<void>`.               |
+| `copyFileSync(source, destination)`   | Copy a regular file, blocking the JavaScript thread.                    |
 | `stat(path)`                          | Metadata on a worker, following a final symlink. `Promise<FileInfo>`.   |
 | `statSync(path)`                      | Metadata, following a final symlink, blocking the JavaScript thread.    |
 | `lstat(path)`                         | Metadata on a worker without following a final symlink.                 |
@@ -49,10 +50,11 @@ if (entries.some((entry) => entry.name === "README.md")) {
 Relative paths use the runtime's working directory, not the host process's
 mutable directory. `neo:process.chdir` changes only that runtime. If the
 runtime directory is unavailable, `readFile`, `writeFile`, `writeText`, `stat`,
-`lstat`, `readDir`, `mkdir`, `remove`, and `rename` reject with `FS_CWD` during
-a managed turn, and synchronous operations such as `readFileSync`,
-`writeFileSync`, `writeTextSync`, `statSync`, `readDirSync`, `mkdirSync`,
-`removeSync`, and `renameSync` throw `FS_CWD`. None falls back to
+`lstat`, `readDir`, `mkdir`, `remove`, `rename`, and `copyFile` reject with
+`FS_CWD` during a managed turn, and synchronous operations such as
+`readFileSync`, `writeFileSync`, `writeTextSync`, `statSync`, `readDirSync`,
+`mkdirSync`, `removeSync`, `renameSync`, and `copyFileSync` throw `FS_CWD`.
+None falls back to
 the host directory. Absolute paths and `..` components still reach everything
 the host user can reach; the working directory is coordination, not
 confinement.
@@ -60,11 +62,11 @@ confinement.
 ## Migrate asynchronous operations
 
 `readFile`, `writeFile`, `writeText`, `stat`, `lstat`, `readDir`, `mkdir`,
-`remove`, and `rename` return Promises on both `fs` and `neo:fs`. Rename an
-existing blocking call to its `Sync` counterpart, or await the asynchronous
-form in a module. `readText`, `copyFile`, and `exists` are still synchronous.
-`rename` has no options object, so there is no reflection step between path
-capture and dispatch.
+`remove`, `rename`, and `copyFile` return Promises on both `fs` and `neo:fs`.
+Rename an existing blocking call to its `Sync` counterpart, or await the
+asynchronous form in a module. `readText` and `exists` are still synchronous.
+`rename` and `copyFile` have no options object, so there is no reflection step
+between path capture and dispatch.
 During managed module evaluation, invalid arguments and filesystem errors
 reject the Promise. The `Sync` forms still throw. Outside a managed turn, the
 asynchronous forms throw `FS_ASYNC_OUTSIDE_TURN` before any I/O. This includes
@@ -112,6 +114,19 @@ on a worker and returns `Promise<void>`. In a managed module, write
 `renameSync(source, destination)`. Calling `rename` outside a managed turn
 throws `FS_ASYNC_OUTSIDE_TURN` before any I/O. There is no options object and
 both resolved paths are captured against one working-directory snapshot.
+
+### Breaking change: copyFile
+
+`copyFile(source, destination)` used to return `void` synchronously. It now
+runs on a worker and returns `Promise<void>`. In a managed module, write
+`await copyFile(source, destination)`; in synchronous code use
+`copyFileSync(source, destination)`. During managed module evaluation, invalid
+arguments and filesystem failures reject the Promise. Calling `copyFile`
+outside a managed turn throws `FS_ASYNC_OUTSIDE_TURN` synchronously before any
+path validation or I/O; `copyFileSync` throws its failures. There is no options
+object and both resolved paths are captured against one working-directory
+snapshot. The copy still never overwrites an existing destination, and now
+applies the source's permission bits after the bytes are copied.
 
 ```js
 import { mkdir, readDir, readFile, remove, rename, stat, writeFile, writeText } from "neo:fs";
@@ -220,9 +235,9 @@ The rules are explicit:
   inside the link target, outside the apparent tree.
 - `mkdir` follows the operating system's rules for existing components.
 - `rename` acts on the final entries without following either final symlink.
-- `copyFile` follows a final source symlink to a regular file. A final
-  destination symlink, even a dangling one, is an existing entry and is not
-  followed.
+- `copyFile` and `copyFileSync` follow a final source symlink to a regular
+  file. A final destination symlink, even a dangling one, is an existing entry
+  and is not followed.
 
 A dangling symlink is reported by `lstat` and `lstatSync` but `exists` follows
 it and returns `false`. On Windows, `remove` rejects directory symlinks named directly as
@@ -322,30 +337,39 @@ failed turn, and cancellation restores neither path.
 
 ## Copy
 
-`copyFile(source, destination)` is synchronous and takes two primitive path
-strings and no options. It checks both paths before I/O and resolves them
-against the same runtime working directory. As for `rename`, roots, trailing
-separators, final `.` or `..` components, and Windows drive-relative paths
-throw `FS_PATH`. On Windows, copy accepts only ordinary local-drive path
-syntax (including verbatim drive paths); it rejects UNC and device
-namespaces, reserved device names, alternate data streams, drive-less rooted
-paths, and ambiguous trailing dots or spaces in components. These syntax
-checks do not guarantee that the underlying storage is local.
+`copyFile` runs on a worker; `copyFileSync` blocks. Both take two primitive
+path strings and no options. They validate both original operands before
+either is resolved, then validate both resolved operands again, and resolve
+them against the same runtime working directory. As for `rename`, roots,
+trailing separators, final `.` or `..` components, and Windows drive-relative
+paths are invalid. The asynchronous form rejects them with `FS_PATH`;
+`copyFileSync` throws `FS_PATH`. On Windows, copy accepts only ordinary
+local-drive path syntax (including verbatim drive paths); it rejects UNC and
+device namespaces, reserved device names, alternate data streams, drive-less
+rooted paths, and ambiguous trailing dots or spaces in components. Validating
+the original operand prevents a drive-less rooted or verbatim path from
+bypassing the checks when joined to the runtime cwd, and the resolved-path
+check catches restricted components in that joined path. Outside a managed
+turn, `copyFile` throws `FS_ASYNC_OUTSIDE_TURN` before path validation or I/O.
+These syntax checks do not guarantee that the underlying storage is local.
 
-Unlike the reference copy API, `copyFile` is **no-clobber** and copies only
-bytes, not permissions or other metadata. Once the source has been opened
-and checked, the OS creates the destination exclusively. An existing
-destination (including the source itself, a hardlink, or a dangling
-symlink) is not modified; an OS existing-entry refusal is `FS_ALREADY_EXISTS`.
-The function does not create parents. New files use mode `0600` subject to
-umask on Unix and the OS default security on Windows. Copy can span
-filesystems; it does not use a cross-device rename or a copy/delete fallback.
+Both forms are **no-clobber**. Once the source has been opened and checked,
+the OS creates the destination exclusively. An existing destination
+(including the source itself, a hardlink, or a dangling symlink) is not
+modified; an OS existing-entry refusal is `FS_ALREADY_EXISTS`. Neither form
+creates parents. New files use mode `0600` subject to umask on Unix and the
+OS default security on Windows, then the source's permission bits are applied
+through the destination descriptor. That copies Unix mode bits or the Windows
+read-only attribute; ownership, timestamps, ACLs, and other metadata are not
+copied. If applying permissions fails, the copied bytes remain with the
+creation-time permissions. Copy can span filesystems; it does not use a
+cross-device rename or a copy/delete fallback.
 
 ```js
 import { copyFile, FsError } from "neo:fs";
 
 try {
-	copyFile("README.md", "README-copy.md");
+	await copyFile("README.md", "README-copy.md");
 } catch (error) {
 	if (!(error instanceof FsError) || error.code !== "FS_ALREADY_EXISTS") throw error;
 	console.log("The backup already exists; nothing was overwritten.");
@@ -361,26 +385,34 @@ to avoid acquiring a controlling terminal. Other device-open side effects
 are possible before rejection. Disk and network-filesystem I/O have no
 deadline.
 
-The new destination is visible while it is being written. An error after
-creation, including source growth past the limit, can leave an empty or
-partial file. There is no lock, temporary path, rename, automatic unlink,
-or durability guarantee. Inspect the destination before retrying. A parent
-directory or symlink can change before either open; once opened, I/O uses
-the handles, but their paths may no longer name the same files. Concurrent
-source writes can produce a mixed copy. No-clobber relies on the filesystem
-honoring exclusive creation; network or unusual filesystems can weaken
-that guarantee or make the result of an error uncertain.
+An asynchronous copy shares the four-operation outstanding bound and
+two-worker pool with the other asynchronous filesystem operations and charges
+both resolved paths against the turn budget. Excess work rejects with
+`FS_LIMIT`. It checks cancellation between bounded chunks. A teardown request
+does not stop an OS call already running, and neither cancellation nor an
+error removes the destination.
+
+The new destination is visible while it is being written. An error or
+cancellation after creation, including source growth past the limit, can
+leave an empty or partial file with the creation-time permissions. There is
+no lock, temporary path, rename, automatic unlink, or durability guarantee.
+Inspect the destination before retrying. A parent directory or symlink can
+change before either open; once opened, I/O uses the handles, but their paths
+may no longer name the same files. Concurrent source writes can produce a
+mixed copy. No-clobber relies on the filesystem honoring exclusive creation;
+network or unusual filesystems can weaken that guarantee or make the result
+of an error uncertain.
 
 ## Limits
 
-| Constant               |   Value | Applies to                                                      |
-| ---------------------- | ------: | --------------------------------------------------------------- |
-| `MAX_PATH_BYTES`       |  32 KiB | Every path argument.                                            |
-| `MAX_READ_BYTES`       |  64 MiB | `readText`, `readFile`, `readFileSync`, and `copyFile`.         |
-| `MAX_WRITE_BYTES`      |  64 MiB | `writeText`, `writeTextSync`, `writeFile`, and `writeFileSync`. |
-| `MAX_LIST_ENTRIES`     | 100,000 | Entries returned by `readDir` or `readDirSync`.                 |
-| `MAX_LIST_NAME_BYTES`  |   1 KiB | One directory-entry name.                                       |
-| `MAX_LIST_TOTAL_BYTES` |  16 MiB | Sum of all names a listing returns.                             |
+| Constant               |   Value | Applies to                                                              |
+| ---------------------- | ------: | ----------------------------------------------------------------------- |
+| `MAX_PATH_BYTES`       |  32 KiB | Every path argument.                                                    |
+| `MAX_READ_BYTES`       |  64 MiB | `readText`, `readFile`, `readFileSync`, `copyFile`, and `copyFileSync`. |
+| `MAX_WRITE_BYTES`      |  64 MiB | `writeText`, `writeTextSync`, `writeFile`, and `writeFileSync`.         |
+| `MAX_LIST_ENTRIES`     | 100,000 | Entries returned by `readDir` or `readDirSync`.                         |
+| `MAX_LIST_NAME_BYTES`  |   1 KiB | One directory-entry name.                                               |
+| `MAX_LIST_TOTAL_BYTES` |  16 MiB | Sum of all names a listing returns.                                     |
 
 Reads inspect the opened descriptor and its metadata before allocating, then
 read in bounded chunks with fallible reservation. A separate one-byte probe
@@ -407,26 +439,26 @@ contents. Argument type errors are `TypeError` (thrown by synchronous
 operations, used to reject asynchronous ones), and exceptions thrown by
 option proxy traps can propagate or reject likewise.
 
-| Code                    | Meaning                                                                                                                                                                                                                            |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `FS_PATH`               | Invalid or unsupported path syntax, including empty paths, embedded NULs, and on Windows, drive-relative paths; also a parsed root, trailing separator, or final `.` or `..` for `remove`, `rename`, `renameSync`, and `copyFile`. |
-| `FS_NOT_FOUND`          | The path does not exist (or a parent does not).                                                                                                                                                                                    |
-| `FS_NOT_DIRECTORY`      | An intermediate path component, or a listed path, is not a directory.                                                                                                                                                              |
-| `FS_IS_DIRECTORY`       | A file operation was given a directory.                                                                                                                                                                                            |
-| `FS_ALREADY_EXISTS`     | The OS reported an existing path, e.g. for `copyFile`, non-recursive `mkdir`, a write with `{overwrite: false}`, or a `rename` rejected because the destination directory is non-empty.                                            |
-| `FS_NOT_EMPTY`          | The OS required an empty directory, e.g. for non-recursive `remove` or some `rename` replacements.                                                                                                                                 |
-| `FS_CROSS_DEVICE`       | The OS reported that the rename crossed filesystems.                                                                                                                                                                               |
-| `FS_DENIED`             | The operating system denied access.                                                                                                                                                                                                |
-| `FS_LIMIT`              | A path, read, write, or listing exceeded a documented bound, or a filesystem quota, storage, or fallible allocation resource was unavailable.                                                                                      |
-| `FS_ENCODING`           | Text or a directory-entry name is not valid UTF-8.                                                                                                                                                                                 |
-| `FS_DETACHED`           | A `Uint8Array` buffer was detached.                                                                                                                                                                                                |
-| `FS_OUT_OF_BOUNDS`      | A `Uint8Array` view is out of bounds after its resizable buffer shrank.                                                                                                                                                            |
-| `FS_CWD`                | A relative operation needs an unavailable runtime working directory.                                                                                                                                                               |
-| `FS_TYPE`               | The path is not a regular file.                                                                                                                                                                                                    |
-| `FS_UNSUPPORTED`        | The operation or input is unsupported, e.g. direct removal of a Windows directory symlink or writing from a `SharedArrayBuffer` view.                                                                                              |
-| `FS_ASYNC_OUTSIDE_TURN` | An asynchronous filesystem operation was called outside managed module evaluation.                                                                                                                                                 |
-| `FS_CANCELLED`          | An outstanding asynchronous filesystem operation was cancelled after module evaluation failed.                                                                                                                                     |
-| `FS_IO`                 | Any other filesystem failure.                                                                                                                                                                                                      |
+| Code                    | Meaning                                                                                                                                                                                                                                            |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FS_PATH`               | Invalid or unsupported path syntax, including empty paths, embedded NULs, and on Windows, drive-relative paths; also a parsed root, trailing separator, or final `.` or `..` for `remove`, `rename`, `renameSync`, `copyFile`, and `copyFileSync`. |
+| `FS_NOT_FOUND`          | The path does not exist (or a parent does not).                                                                                                                                                                                                    |
+| `FS_NOT_DIRECTORY`      | An intermediate path component, or a listed path, is not a directory.                                                                                                                                                                              |
+| `FS_IS_DIRECTORY`       | A file operation was given a directory.                                                                                                                                                                                                            |
+| `FS_ALREADY_EXISTS`     | The OS reported an existing path, e.g. for `copyFile`, `copyFileSync`, non-recursive `mkdir`, a write with `{overwrite: false}`, or a `rename` rejected because the destination directory is non-empty.                                            |
+| `FS_NOT_EMPTY`          | The OS required an empty directory, e.g. for non-recursive `remove` or some `rename` replacements.                                                                                                                                                 |
+| `FS_CROSS_DEVICE`       | The OS reported that the rename crossed filesystems.                                                                                                                                                                                               |
+| `FS_DENIED`             | The operating system denied access.                                                                                                                                                                                                                |
+| `FS_LIMIT`              | A path, read, write, or listing exceeded a documented bound, or a filesystem quota, storage, or fallible allocation resource was unavailable.                                                                                                      |
+| `FS_ENCODING`           | Text or a directory-entry name is not valid UTF-8.                                                                                                                                                                                                 |
+| `FS_DETACHED`           | A `Uint8Array` buffer was detached.                                                                                                                                                                                                                |
+| `FS_OUT_OF_BOUNDS`      | A `Uint8Array` view is out of bounds after its resizable buffer shrank.                                                                                                                                                                            |
+| `FS_CWD`                | A relative operation needs an unavailable runtime working directory.                                                                                                                                                                               |
+| `FS_TYPE`               | The path is not a regular file.                                                                                                                                                                                                                    |
+| `FS_UNSUPPORTED`        | The operation or input is unsupported, e.g. direct removal of a Windows directory symlink or writing from a `SharedArrayBuffer` view.                                                                                                              |
+| `FS_ASYNC_OUTSIDE_TURN` | An asynchronous filesystem operation was called outside managed module evaluation.                                                                                                                                                                 |
+| `FS_CANCELLED`          | An outstanding asynchronous filesystem operation was cancelled after module evaluation failed.                                                                                                                                                     |
+| `FS_IO`                 | Any other filesystem failure.                                                                                                                                                                                                                      |
 
 ## Authority and races
 

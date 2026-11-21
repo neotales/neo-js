@@ -207,8 +207,14 @@ fn permission_and_allowlist_gate_the_global_and_the_module() {
          if (module.rename !== fs.rename || module.renameSync !== fs.renameSync) {
            throw Error('rename module and global differ');
          }
-         if (typeof module.copyFile !== 'function' || module.copyFile !== fs.copyFile) {
-           throw Error('missing or mismatched copyFile');
+         if (typeof fs.copyFile !== 'function' || typeof module.copyFile !== 'function') {
+           throw Error('missing async copyFile');
+         }
+         if (typeof fs.copyFileSync !== 'function' || typeof module.copyFileSync !== 'function') {
+           throw Error('missing sync copyFile');
+         }
+         if (module.copyFile !== fs.copyFile || module.copyFileSync !== fs.copyFileSync) {
+           throw Error('copyFile module and global differ');
          }
          if (module.FsError !== fs.FsError) throw Error('error class differs');
          if (Object.getPrototypeOf(fs) !== null) throw Error('fs is not a null-prototype object');
@@ -2523,11 +2529,16 @@ fn copy_file_copies_binary_data_using_the_runtime_cwd() {
     let host_before = std::env::current_dir().unwrap();
     let script = r#"
         import {chdir} from 'neo:process';
-        import {copyFile} from 'neo:fs';
+        import {copyFile, copyFileSync} from 'neo:fs';
         chdir(__DIR__);
-        if (fs.copyFile('entrée.bin', __OUTPUT__) !== undefined) throw Error('copy must be sync');
+        if ((await fs.copyFile('entrée.bin', __OUTPUT__)) !== undefined) {
+            throw Error('async copy return');
+        }
         fs.copyFile = () => { throw Error('mutated global copy ran'); };
-        copyFile(__ORIGINAL__, 'second.bin');
+        copyFileSync(__ORIGINAL__, 'second.bin');
+        await copyFile(__ORIGINAL__, 'third.bin', new Proxy({}, {
+            ownKeys() { throw Error('copy reflected on an extra argument'); },
+        }));
     "#
     .replace("__DIR__", &literal(dir.path()))
     .replace("__OUTPUT__", &literal(&output))
@@ -2537,6 +2548,7 @@ fn copy_file_copies_binary_data_using_the_runtime_cwd() {
     assert_eq!(fs::read(original).unwrap(), bytes);
     assert_eq!(fs::read(output).unwrap(), bytes);
     assert_eq!(fs::read(dir.path().join("second.bin")).unwrap(), bytes);
+    assert_eq!(fs::read(dir.path().join("third.bin")).unwrap(), bytes);
     assert_eq!(std::env::current_dir().unwrap(), host_before);
 }
 
@@ -2552,8 +2564,22 @@ fn copy_file_never_clobbers_existing_destinations_or_hardlinks() {
 
     let script = r#"
         import {chdir} from 'neo:process';
-        import {copyFile, FsError} from 'neo:fs';
+        import {copyFile, copyFileSync, FsError} from 'neo:fs';
         chdir(__DIR__);
+        function check(code, error) {
+            if (!(error instanceof FsError) || error.code !== code) throw error;
+            if (error.message !== new FsError(code).message) throw Error('unexpected message');
+        }
+        async function rejects(from, to, code) {
+            try { await copyFile(from, to); }
+            catch (error) { return check(code, error); }
+            throw Error('async copy unexpectedly succeeded');
+        }
+        function rejectsSync(from, to, code) {
+            try { copyFileSync(from, to); }
+            catch (error) { return check(code, error); }
+            throw Error('sync copy unexpectedly succeeded');
+        }
         for (const [from, to, code] of [
             ['original', 'original', 'FS_ALREADY_EXISTS'],
             ['original', './original', 'FS_ALREADY_EXISTS'],
@@ -2562,13 +2588,8 @@ fn copy_file_never_clobbers_existing_destinations_or_hardlinks() {
             ['original', 'existing', 'FS_ALREADY_EXISTS'],
             ['missing', 'existing', 'FS_NOT_FOUND'],
         ]) {
-            try { copyFile(from, to); }
-            catch (error) {
-                if (!(error instanceof FsError) || error.code !== code) throw error;
-                if (error.message !== new FsError(code).message) throw Error('unexpected message');
-                continue;
-            }
-            throw Error('copy unexpectedly succeeded');
+            await rejects(from, to, code);
+            rejectsSync(from, to, code);
         }
     "#
     .replace("__DIR__", &literal(dir.path()));
@@ -2586,35 +2607,55 @@ fn copy_file_validates_both_primitive_entry_paths_before_opening() {
     fs::create_dir(dir.path().join("directory")).unwrap();
     let script = r#"
         import {chdir} from 'neo:process';
-        import {copyFile, FsError, MAX_PATH_BYTES} from 'neo:fs';
+        import {copyFile, copyFileSync, FsError, MAX_PATH_BYTES} from 'neo:fs';
         chdir(__DIR__);
-        function rejects(code, from, to) {
-            try { copyFile(from, to); }
-            catch (error) {
-                if (code === 'TypeError' && error instanceof TypeError) return;
-                if (!(error instanceof FsError) || error.code !== code) throw error;
-                if (error.message !== new FsError(code).message) throw Error('unexpected message');
-                return;
-            }
-            throw Error('copy unexpectedly succeeded');
+        function check(code, error) {
+            if (code === 'TypeError' && error instanceof TypeError) return;
+            if (!(error instanceof FsError) || error.code !== code) throw error;
+            if (error.message !== new FsError(code).message) throw Error('unexpected message');
+        }
+        async function rejects(code, from, to) {
+            try { await copyFile(from, to); }
+            catch (error) { return check(code, error); }
+            throw Error('async copy unexpectedly succeeded');
+        }
+        function rejectsSync(code, from, to) {
+            try { copyFileSync(from, to); }
+            catch (error) { return check(code, error); }
+            throw Error('sync copy unexpectedly succeeded');
         }
         const hostile = new Proxy({}, {get() { throw Error('copy tried to coerce'); }});
-        rejects('TypeError', hostile, 'output');
-        rejects('TypeError', '', hostile);
+        await rejects('TypeError', hostile, 'output');
+        await rejects('TypeError', '', hostile);
         for (const [code, path] of [
             ['FS_PATH', ''], ['FS_PATH', 'bad\0path'],
             ['FS_PATH', 'directory/'], ['FS_PATH', 'directory/.'], ['FS_PATH', 'directory/..'],
             ['FS_ENCODING', 'bad-\uD800'], ['FS_LIMIT', 'a'.repeat(MAX_PATH_BYTES + 1)],
         ]) {
-            rejects(code, path, 'output');
-            rejects(code, 'source', path);
+            await rejects(code, path, 'output');
+            await rejects(code, 'source', path);
+            rejectsSync(code, path, 'output');
+            rejectsSync(code, 'source', path);
         }
-        rejects('FS_PATH', 'missing', 'directory/.');
-        rejects('FS_IS_DIRECTORY', 'directory', 'output');
-        rejects('FS_NOT_FOUND', 'source', 'missing/child');
+        await rejects('FS_PATH', 'missing', 'directory/.');
+        await rejects('FS_IS_DIRECTORY', 'directory', 'output');
+        await rejects('FS_NOT_FOUND', 'source', 'missing/child');
+        rejectsSync('FS_PATH', 'missing', 'directory/.');
+        rejectsSync('FS_IS_DIRECTORY', 'directory', 'output');
+        rejectsSync('FS_NOT_FOUND', 'source', 'missing/child');
     "#
     .replace("__DIR__", &literal(dir.path()));
-    run(&chunked_runtime(), &script);
+    let js = chunked_runtime();
+    run(&js, &script);
+    js.run(&format!(
+        "try {{ fs.copyFile({source}, {output}); throw Error('dispatched outside managed turn'); }}
+         catch (error) {{
+           if (error.code !== 'FS_ASYNC_OUTSIDE_TURN') throw error;
+         }}",
+        source = literal(&dir.path().join("source")),
+        output = literal(&dir.path().join("output")),
+    ))
+    .unwrap();
     assert_eq!(fs::read(dir.path().join("source")).unwrap(), b"unchanged");
     assert!(!dir.path().join("output").exists());
     assert!(!dir.path().join("missing").exists());
@@ -2631,26 +2672,37 @@ fn copy_file_follows_source_symlinks_but_never_follows_destination_symlinks() {
     symlink("absent", dir.path().join("dangling")).unwrap();
     let script = r#"
         import {chdir} from 'neo:process';
-        import {copyFile, FsError} from 'neo:fs';
+        import {copyFile, copyFileSync, FsError} from 'neo:fs';
         chdir(__DIR__);
-        copyFile('linked', 'copy');
+        await copyFile('linked', 'copy');
+        copyFileSync('linked', 'copy-sync');
+        function check(code, error) {
+            if (!(error instanceof FsError) || error.code !== code) throw error;
+        }
+        async function rejects(from, to, code) {
+            try { await copyFile(from, to); }
+            catch (error) { return check(code, error); }
+            throw Error('async copy unexpectedly succeeded');
+        }
+        function rejectsSync(from, to, code) {
+            try { copyFileSync(from, to); }
+            catch (error) { return check(code, error); }
+            throw Error('sync copy unexpectedly succeeded');
+        }
         for (const [from, to, code] of [
             ['source', 'linked', 'FS_ALREADY_EXISTS'],
             ['linked', 'source', 'FS_ALREADY_EXISTS'],
             ['source', 'dangling', 'FS_ALREADY_EXISTS'],
             ['dangling', 'copy', 'FS_NOT_FOUND'],
         ]) {
-            try { copyFile(from, to); }
-            catch (error) {
-                if (!(error instanceof FsError) || error.code !== code) throw error;
-                continue;
-            }
-            throw Error('copy unexpectedly succeeded');
+            await rejects(from, to, code);
+            rejectsSync(from, to, code);
         }
     "#
     .replace("__DIR__", &literal(dir.path()));
     run(&chunked_runtime(), &script);
     assert_eq!(fs::read(dir.path().join("copy")).unwrap(), b"source");
+    assert_eq!(fs::read(dir.path().join("copy-sync")).unwrap(), b"source");
     assert_eq!(fs::read(dir.path().join("source")).unwrap(), b"source");
     assert_eq!(
         fs::read_link(dir.path().join("linked")).unwrap(),
@@ -2686,11 +2738,14 @@ fn copy_file_accepts_exact_limit_and_rejects_oversize_before_creation() {
         .unwrap();
     let script = r#"
         import {chdir} from 'neo:process';
-        import {copyFile, FsError} from 'neo:fs';
+        import {copyFile, copyFileSync, FsError} from 'neo:fs';
         chdir(__DIR__);
-        copyFile('exact', 'copy');
-        for (const to of ['fresh', 'copy']) {
-            try { copyFile('oversize', to); }
+        await copyFile('exact', 'copy');
+        for (const to of ['fresh', 'copy', 'fresh-sync', 'copy-sync']) {
+            try {
+                if (to.endsWith('-sync')) copyFileSync('oversize', to);
+                else await copyFile('oversize', to);
+            }
             catch (error) {
                 if (!(error instanceof FsError) || error.code !== 'FS_LIMIT') throw error;
                 continue;
@@ -2707,6 +2762,36 @@ fn copy_file_accepts_exact_limit_and_rejects_oversize_before_creation() {
     copy.read_exact(&mut tail).unwrap();
     assert_eq!(tail, [0xff]);
     assert!(!dir.path().join("fresh").exists());
+    assert!(!dir.path().join("fresh-sync").exists());
+    assert!(!dir.path().join("copy-sync").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn copy_file_preserves_source_permission_bits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("source");
+    fs::write(&original, b"source").unwrap();
+    fs::set_permissions(&original, fs::Permissions::from_mode(0o640)).unwrap();
+    let script = r#"
+        import {chdir} from 'neo:process';
+        import {copyFile, copyFileSync} from 'neo:fs';
+        chdir(__DIR__);
+        await copyFile('source', 'copy');
+        copyFileSync('source', 'copy-sync');
+    "#
+    .replace("__DIR__", &literal(dir.path()));
+    run(&chunked_runtime(), &script);
+    for name in ["copy", "copy-sync"] {
+        let mode = fs::metadata(dir.path().join(name))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o640, "{name} did not preserve permissions");
+    }
 }
 
 #[cfg(unix)]
@@ -2725,13 +2810,18 @@ fn copy_file_rejects_fifos_without_waiting_for_a_peer() {
     fs::write(dir.path().join("source"), b"source").unwrap();
     let script = r#"
         import {chdir} from 'neo:process';
-        import {copyFile, FsError} from 'neo:fs';
+        import {copyFile, copyFileSync, FsError} from 'neo:fs';
         chdir(__DIR__);
-        for (const [from, to, code] of [
-            ['fifo', 'no-output', 'FS_TYPE'],
-            ['source', 'fifo', 'FS_ALREADY_EXISTS'],
+        for (const [from, to, code, sync] of [
+            ['fifo', 'no-output', 'FS_TYPE', false],
+            ['source', 'fifo', 'FS_ALREADY_EXISTS', false],
+            ['fifo', 'no-output-sync', 'FS_TYPE', true],
+            ['source', 'fifo', 'FS_ALREADY_EXISTS', true],
         ]) {
-            try { copyFile(from, to); }
+            try {
+                if (sync) copyFileSync(from, to);
+                else await copyFile(from, to);
+            }
             catch (error) {
                 if (!(error instanceof FsError) || error.code !== code) throw error;
                 continue;
@@ -2751,6 +2841,7 @@ fn copy_file_rejects_fifos_without_waiting_for_a_peer() {
     worker.join().unwrap();
     assert!(fs::symlink_metadata(fifo).unwrap().file_type().is_fifo());
     assert!(!dir.path().join("no-output").exists());
+    assert!(!dir.path().join("no-output-sync").exists());
 }
 
 #[test]
@@ -3372,4 +3463,43 @@ fn windows_basic_round_trip_is_gated_and_unverified() {
     "#
     .replace("__FILE__", &literal(&file));
     run(&js, &source);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_copy_uses_owned_fixtures_in_both_forms() {
+    // Pure tempfile fixtures and relative paths: no unowned Windows path,
+    // device, UNC share, namespace, or stream is touched.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.bin");
+    fs::write(&source, b"owned").unwrap();
+    let script = r#"
+        import {chdir} from 'neo:process';
+        import {copyFile, copyFileSync, FsError} from 'neo:fs';
+        chdir(__DIR__);
+        if ((await copyFile('source.bin', 'async-copy.bin')) !== undefined) {
+            throw Error('async copy return');
+        }
+        copyFileSync('source.bin', 'sync-copy.bin');
+        for (const name of ['async-copy.bin', 'sync-copy.bin']) {
+            if (fs.statSync(name).size !== '5') throw Error('copied size');
+        }
+        try {
+            await copyFile('source.bin', 'async-copy.bin');
+            throw Error('async copy clobbered');
+        } catch (error) {
+            if (!(error instanceof FsError) || error.code !== 'FS_ALREADY_EXISTS') throw error;
+        }
+    "#
+    .replace("__DIR__", &literal(dir.path()));
+    run(&chunked_runtime(), &script);
+    assert_eq!(fs::read(dir.path().join("source.bin")).unwrap(), b"owned");
+    assert_eq!(
+        fs::read(dir.path().join("async-copy.bin")).unwrap(),
+        b"owned"
+    );
+    assert_eq!(
+        fs::read(dir.path().join("sync-copy.bin")).unwrap(),
+        b"owned"
+    );
 }

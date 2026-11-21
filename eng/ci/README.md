@@ -114,7 +114,7 @@ It then runs, in order. Every command includes the explicit target:
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test winregistry -- --test-threads=1`              | 8             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test winregistry_windows -- --test-threads=1`      | 9             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test process`                                      | 9             |
-| `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test fs`                                           | 41            |
+| `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test fs`                                           | 42            |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --lib -- fs::tests::windows_copy_paths_are_rejected_before_io --exact` | 1 selected    |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs --test process`                                           | 19            |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs --test process_stdio`                                     | 6             |
@@ -129,8 +129,8 @@ fails the gate.
 The counts are source-level counts after applying `cfg` gates; they are not a
 claim that those tests passed. `neojs/tests/process.rs` contains 22 tests, of
 which three are `#[cfg(unix)]`, so 19 run on Windows. `neojs-core/tests/fs.rs`
-contains 55 tests; 14 are `#[cfg(unix)]`, so 41 are selected on Windows. The
-41 include four Windows-only integration tests: one uses only owned
+contains 57 tests; 15 are `#[cfg(unix)]`, so 42 are selected on Windows. The
+42 include five Windows-only integration tests: one uses only owned
 `tempfile` fixtures to check `stat`, `lstat`, `readDir`, and their sync forms
 for regular files and directories; one creates a final file symlink (a reparse
 point), verifies that `stat` follows it while `lstat` and `readDir` report the
@@ -141,16 +141,21 @@ recursive forms and logs the observed missing-parent and intermediate-file
 codes with fixed labels before asserting them; the non-recursive
 intermediate-file result is restricted to `FS_NOT_FOUND` or
 `FS_NOT_DIRECTORY`, and the recursive result also accepts the observed
-`FS_ALREADY_EXISTS`; and one is a gated basic round trip. The previous
-Windows-only integration test that passed
+`FS_ALREADY_EXISTS`; one copies owned tempfile fixtures with both `copyFile`
+and `copyFileSync` and checks no-clobber; and one is a gated basic round trip.
+The previous Windows-only integration test that passed
 root, namespace, UNC, device, and stream names to `copyFile` was removed; those
-cases now run in a pure validation unit test
-(`fs::tests::windows_copy_paths_are_rejected_before_io`) selected with
-`--lib -- ... --exact`. It calls `validate_entry_path` and
-`validate_copy_disk_path` directly and performs no I/O. No junction is created
-and no privileged directory link or host path outside the temp directory is
-touched. The targeted suites total 100 Windows-selected tests when this branch's
-filesystem suite and validation unit test are included.
+cases now run in the pure validation unit test
+`fs::tests::windows_copy_paths_are_rejected_before_io`. That is the exact
+`--lib -- ... --exact` filter the native gate invokes today. A second no-I/O
+test, `fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands`,
+drives the production `snapshot_copy_paths` helper for both original and
+resolved operands. This branch does not add an invocation for that newer test,
+so the existing exact-filtered native gate will not execute it. Both tests
+parse paths only and perform no filesystem I/O. No junction is created and no
+privileged directory link or host path outside the temp directory is touched.
+The targeted suites total 101 Windows-selected tests when this branch's
+filesystem suite and the existing validation unit test are included.
 
 The filesystem suite invocation does not add `--nocapture`. The Windows `mkdir`
 diagnostic writes its sanitized fixed-label codes directly to the process

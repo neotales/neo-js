@@ -4,9 +4,10 @@
 //! granted and the runtime's module allowlist admits [`crate::RuntimeModule::Fs`].
 //! Both gates are checked before the `fs` global or any native callback is
 //! constructed. `readFile`, `writeFile`, `writeText`, `stat`, `lstat`,
-//! `readDir`, `mkdir`, `remove`, and `rename` run on workers; `readFileSync`,
-//! `writeFileSync`, `writeTextSync`, `statSync`, `lstatSync`, `readDirSync`,
-//! `mkdirSync`, `removeSync`, `renameSync`, and all other operations block.
+//! `readDir`, `mkdir`, `remove`, `rename`, and `copyFile` run on workers;
+//! `readFileSync`, `writeFileSync`, `writeTextSync`, `statSync`, `lstatSync`,
+//! `readDirSync`, `mkdirSync`, `removeSync`, `renameSync`, `copyFileSync`,
+//! and all other operations block.
 //! Nothing here starts a shell, a child process, or a network request
 //! directly. The OS may still perform network I/O for network paths and
 //! filesystems.
@@ -178,13 +179,22 @@
 //!
 //! # Copy
 //!
-//! `copyFile(source, destination)` streams up to [`MAX_READ_BYTES`] from a
-//! regular file into an exclusively created regular file. It follows a final
-//! source symlink but never opens an existing destination, including aliases
-//! and dangling links. Both paths use one runtime cwd snapshot. It copies
-//! bytes only and can copy between filesystems. It uses no temporary path,
-//! lock, or rollback: after creation, an error can leave a partial destination.
-//! Namespace changes and concurrent source modifications are not prevented.
+//! `copyFile(source, destination)` runs on a worker; `copyFileSync(source,
+//! destination)` blocks. Both stream up to [`MAX_READ_BYTES`] from a regular
+//! file into an exclusively created regular file and then apply the source's
+//! permission bits to the new file: the Unix mode bits, or the Windows
+//! read-only attribute. Ownership, timestamps, ACLs, and other metadata are
+//! not copied. They follow a final source symlink but never open an existing
+//! destination, including aliases and dangling links. Both original operands
+//! are validated before either is resolved, both resolved operands are
+//! validated again, and both are resolved against one runtime cwd snapshot
+//! before I/O. Copy can span filesystems. It uses no temporary path, lock, or
+//! rollback: after creation,
+//! an error can leave a partial destination with the creation-time
+//! permissions. A started asynchronous copy checks cancellation between
+//! bounded chunks, but an OS call already running cannot be interrupted, and
+//! cancellation restores nothing. Namespace changes and concurrent source
+//! modifications are not prevented.
 //!
 //! # Errors and races
 //!
@@ -210,6 +220,11 @@
 //!   interrupted by teardown and may still create, truncate, or fully write
 //!   the file after a failed turn; cancellation does not roll back those side
 //!   effects.
+//! * `copyFile` and `copyFileSync` create the destination before copying. An
+//!   I/O error, source growth past the limit, cancellation, or teardown after
+//!   creation can leave an empty or partial destination with the
+//!   creation-time permissions. Nothing is removed or restored, and the
+//!   final permission copy may not have run.
 //! * `readDir` and `readDirSync` are not atomic snapshots. Recursive deletion
 //!   can remove some entries before an OS error stops it; there is no rollback.
 //! * `FS_LIMIT` also reports quota, storage-full, and fallible allocation
@@ -261,7 +276,7 @@ pub(crate) const MAX_LIST_NAME_BYTES: usize = 1024;
 /// Largest sum of directory-entry names `readDir` returns, in UTF-8 bytes.
 pub(crate) const MAX_LIST_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
-const EXPORTS: [&str; 28] = [
+const EXPORTS: [&str; 29] = [
     "readText",
     "writeText",
     "writeTextSync",
@@ -283,6 +298,7 @@ const EXPORTS: [&str; 28] = [
     "rename",
     "renameSync",
     "copyFile",
+    "copyFileSync",
     "FsError",
     "MAX_PATH_BYTES",
     "MAX_READ_BYTES",
@@ -1227,31 +1243,80 @@ fn require_disk_handle(file: &File) -> Result<(), FsError> {
     Ok(())
 }
 
-/// Copy without replacing or removing a destination entry, including on error.
-fn copy_file_path(
-    cwd: &RefCell<WorkingDirectory>,
-    source: &str,
-    destination: &str,
-) -> Result<(), FsError> {
-    let source = validate_entry_path(source)?;
-    let destination = validate_entry_path(destination)?;
+/// Apply the Windows copy-only disk path restrictions to both operands.
+fn validate_copy_paths(source: &Path, destination: &Path) -> Result<(), FsError> {
     #[cfg(windows)]
     {
         validate_copy_disk_path(source)?;
         validate_copy_disk_path(destination)?;
     }
-    let (source, destination) = resolve_pair(cwd, source, destination)?;
-    #[cfg(windows)]
-    {
-        validate_copy_disk_path(&source)?;
-        validate_copy_disk_path(&destination)?;
-    }
+    #[cfg(not(windows))]
+    let _ = (source, destination);
+    Ok(())
+}
 
-    let (source, metadata) = open_regular_source(&source)?;
+/// Validate and resolve an entry-checked copy pair against one working
+/// directory, then validate both resolved operands again.
+///
+/// This is the production snapshot shared by the synchronous and asynchronous
+/// forms. It performs path parsing only, never filesystem I/O. Validating the
+/// original operands before resolution is load-bearing on Windows: a
+/// drive-less rooted or verbatim operand must be rejected before joining it to
+/// the runtime cwd, and the resolved check catches restricted components that
+/// the joined cwd contributes.
+fn snapshot_copy_paths(
+    cwd: &WorkingDirectory,
+    source: &Path,
+    destination: &Path,
+) -> Result<(PathBuf, PathBuf), FsError> {
+    snapshot_copy_paths_with(cwd, source, destination, validate_copy_paths)
+}
+
+/// The same snapshot with an explicit validator, so tests can prove the
+/// pre-resolution and post-resolution checks are both load-bearing without
+/// touching a host filesystem or recreating the production path logic.
+fn snapshot_copy_paths_with(
+    cwd: &WorkingDirectory,
+    source: &Path,
+    destination: &Path,
+    validate: impl Fn(&Path, &Path) -> Result<(), FsError>,
+) -> Result<(PathBuf, PathBuf), FsError> {
+    validate(source, destination)?;
+    let source = resolve_path(cwd, source)?;
+    let destination = resolve_path(cwd, destination)?;
+    if !source.is_absolute() || !destination.is_absolute() {
+        return Err(FsError::new(Code::Path));
+    }
+    validate(&source, &destination)?;
+    Ok((source, destination))
+}
+
+/// Copy two validated entries without replacing or removing the destination.
+fn copy_file_at(source: &Path, destination: &Path) -> Result<(), FsError> {
+    copy_file_at_until(source, destination, || false)
+}
+
+/// Stream a bounded copy, checking cancellation between chunks.
+///
+/// The destination is created before the first byte is written. Cancellation
+/// after that point reports `FS_CANCELLED` but leaves the new entry in place;
+/// nothing is unlinked because the pathname could now name another file.
+fn copy_file_at_until(
+    source: &Path,
+    destination: &Path,
+    cancelled: impl Fn() -> bool,
+) -> Result<(), FsError> {
+    if cancelled() {
+        return Err(FsError::new(Code::Cancelled));
+    }
+    let (source, metadata) = open_regular_source(source)?;
     #[cfg(windows)]
     require_disk_handle(&source)?;
     if metadata.len() > MAX_READ_BYTES as u64 {
         return Err(FsError::new(Code::Limit));
+    }
+    if cancelled() {
+        return Err(FsError::new(Code::Cancelled));
     }
 
     // Exclusive creation never opens an existing inode for writing, even if
@@ -1275,17 +1340,52 @@ fn copy_file_path(
     require_disk_handle(&destination)?;
     regular_file_metadata(&destination)?;
     // No unlink on failure: the pathname could now name someone else's file.
-    copy_bounded(source, destination, MAX_READ_BYTES)
+    copy_bounded_until(source, &destination, MAX_READ_BYTES, &cancelled)?;
+    // Apply permissions through the open descriptor, not a pathname that a
+    // concurrent rename could redirect. A failure here leaves the copied
+    // bytes and the creation-time permissions.
+    set_copy_permissions(&destination, metadata.permissions())
 }
 
-/// Stream at most `remaining` bytes with a fixed buffer and probe for growth.
-fn copy_bounded(
+/// Apply the source's permission bits to the new destination.
+fn set_copy_permissions(file: &File, permissions: fs::Permissions) -> Result<(), FsError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = permissions.mode() & 0o7777;
+        file.set_permissions(fs::Permissions::from_mode(mode))
+            .map_err(FsError::from)
+    }
+    #[cfg(not(unix))]
+    {
+        file.set_permissions(permissions).map_err(FsError::from)
+    }
+}
+
+/// Copy without replacing or removing a destination entry, including on error.
+fn copy_file_path(
+    cwd: &RefCell<WorkingDirectory>,
+    source: &str,
+    destination: &str,
+) -> Result<(), FsError> {
+    let source = validate_entry_path(source)?;
+    let destination = validate_entry_path(destination)?;
+    let (source, destination) = snapshot_copy_paths(&cwd.borrow(), source, destination)?;
+    copy_file_at(&source, &destination)
+}
+
+/// Stream at most `remaining` bytes, checking cancellation between chunks.
+fn copy_bounded_until(
     mut source: impl Read,
     mut destination: impl Write,
     mut remaining: usize,
+    cancelled: impl Fn() -> bool,
 ) -> Result<(), FsError> {
     let mut buffer = [0u8; 8192];
     loop {
+        if cancelled() {
+            return Err(FsError::new(Code::Cancelled));
+        }
         let available = remaining.clamp(1, buffer.len());
         match source.read(&mut buffer[..available]) {
             Ok(0) => return Ok(()),
@@ -1601,8 +1701,10 @@ fn build_native<'js>(
     )?;
 
     type EntryOperation = fn(&RefCell<WorkingDirectory>, &str, &str) -> Result<(), FsError>;
-    let operations: [(&str, EntryOperation); 2] =
-        [("renameSync", rename_path), ("copyFile", copy_file_path)];
+    let operations: [(&str, EntryOperation); 2] = [
+        ("renameSync", rename_path),
+        ("copyFileSync", copy_file_path),
+    ];
     for (name, operation) in operations {
         let cwd = Rc::clone(&cwd);
         native.set(
@@ -1909,7 +2011,7 @@ mod tests {
         let mut destination = [0; 4];
         let mut target = destination.as_mut_slice();
         let mut source = &b"abcde"[..];
-        let error = copy_bounded(&mut source, &mut target, 3).unwrap_err();
+        let error = copy_bounded_until(&mut source, &mut target, 3, || false).unwrap_err();
         assert_eq!(error.code(), "FS_LIMIT");
         assert_eq!(source, b"e");
         assert_eq!(destination, *b"abc\0");
@@ -2144,5 +2246,154 @@ mod tests {
         assert_eq!(validate("owned-file.txt"), "accepted");
         assert_eq!(validate(r"C:\owned-file.txt"), "accepted");
         assert_eq!(validate(r"\\?\C:\owned-file.txt"), "accepted");
+    }
+
+    fn copy_snapshot_cwd() -> WorkingDirectory {
+        let path = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\owned\cwd")
+        } else {
+            std::path::PathBuf::from("/owned-cwd")
+        };
+        WorkingDirectory::injected(Some(path))
+    }
+
+    #[test]
+    fn copy_snapshot_applies_prevalidation_before_resolution() {
+        use std::path::Path;
+
+        let cwd = copy_snapshot_cwd();
+        let result = snapshot_copy_paths_with(
+            &cwd,
+            Path::new("source"),
+            Path::new("destination"),
+            |source, _| {
+                if source == Path::new("source") {
+                    Err(FsError::new(Code::Path))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(result.unwrap_err().code(), "FS_PATH");
+    }
+
+    #[test]
+    fn copy_snapshot_revalidates_resolved_paths() {
+        use std::path::Path;
+
+        let cwd = copy_snapshot_cwd();
+        let result = snapshot_copy_paths_with(
+            &cwd,
+            Path::new("source"),
+            Path::new("destination"),
+            |source, _| {
+                if source == Path::new("source") {
+                    Ok(())
+                } else {
+                    Err(FsError::new(Code::Path))
+                }
+            },
+        );
+        assert_eq!(result.unwrap_err().code(), "FS_PATH");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_copy_snapshot_validates_original_and_resolved_operands() {
+        use std::path::{Path, PathBuf};
+
+        // Exercise the production snapshot helper, not a reimplementation.
+        // The caller performs entry validation exactly as `copy_file_path`
+        // and the asynchronous owner do.
+        fn snapshot(cwd: &WorkingDirectory, source: &str, destination: &str) -> &'static str {
+            let result = validate_entry_path(source).and_then(|source| {
+                let destination = validate_entry_path(destination)?;
+                snapshot_copy_paths(cwd, source, destination)
+            });
+            match result {
+                Ok(_) => "accepted",
+                Err(error) => error.code(),
+            }
+        }
+
+        let cwd = WorkingDirectory::injected(Some(PathBuf::from(r"C:\owned\cwd")));
+        assert_eq!(
+            snapshot(&cwd, "owned-source.txt", "owned-destination.txt"),
+            "accepted"
+        );
+        assert_eq!(
+            snapshot(
+                &cwd,
+                r"C:\owned-source.txt",
+                r"\\?\C:\owned-destination.txt"
+            ),
+            "accepted"
+        );
+
+        // Drive-less rooted paths join to an absolute path under this cwd, so
+        // only the original-operand validation rejects them. Cover both
+        // operand positions.
+        for path in [
+            r"\rooted",
+            r"\rooted\file",
+            "C:relative",
+            "NUL",
+            "con.txt",
+            "source:stream",
+            "source.",
+            "source ",
+        ] {
+            assert_eq!(
+                snapshot(&cwd, path, "owned-destination.txt"),
+                "FS_PATH",
+                "{path}"
+            );
+            assert_eq!(
+                snapshot(&cwd, "owned-source.txt", path),
+                "FS_PATH",
+                "{path}"
+            );
+        }
+        for path in [
+            r"\\server\share\file",
+            r"\\?\UNC\server\share\file",
+            r"\\.\pipe\neo-fs-test",
+            r"\\?\GLOBALROOT\Device\Null",
+        ] {
+            assert_eq!(
+                snapshot(&cwd, path, "owned-destination.txt"),
+                "FS_PATH",
+                "{path}"
+            );
+            assert_eq!(
+                snapshot(&cwd, "owned-source.txt", path),
+                "FS_PATH",
+                "{path}"
+            );
+        }
+
+        // The runtime cwd can itself contribute a restricted component. The
+        // original operands are clean here, so only the resolved validation
+        // rejects the joined path.
+        for (cwd_path, label) in [
+            (r"C:\owned\CON", "reserved device"),
+            (r"\\?\C:\owned\source.", "trailing dot"),
+            (r"\\?\C:\owned\source ", "trailing space"),
+            (r"\\?\C:\owned\source:stream", "stream"),
+        ] {
+            let cwd = WorkingDirectory::injected(Some(PathBuf::from(cwd_path)));
+            assert_eq!(
+                snapshot(&cwd, "owned-source.txt", "owned-destination.txt"),
+                "FS_PATH",
+                "{label}"
+            );
+        }
+
+        // A normal verbatim cwd with a clean tail remains accepted.
+        let cwd = WorkingDirectory::injected(Some(PathBuf::from(r"\\?\C:\owned\cwd")));
+        assert_eq!(
+            snapshot(&cwd, "owned-source.txt", "owned-destination.txt"),
+            "accepted"
+        );
     }
 }
