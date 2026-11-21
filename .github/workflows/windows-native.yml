@@ -1,22 +1,22 @@
 name: Windows native
 
-# Hosted Windows run 44845110559 at 51f3994 passed the targeted 58-test gate.
-# Run 44936430027 at 2703526 failed in the neojs-core filesystem suite before
-# any mkdir test passed on Windows; the escaped error was FS_NOT_FOUND
-# ("filesystem path does not exist"). Run 44943444444 at 8475b21 reported
-# FS_ALREADY_EXISTS for the async recursive mkdir below an intermediate regular
-# file; non-recursive cases stayed within FS_NOT_FOUND/FS_NOT_DIRECTORY, and the
-# sync recursive case was computed but not logged. This workflow now also runs
-# the neojs-core filesystem suite (41 Windows-selected integration tests) and
-# one pure validation unit test (100 selected in total), including Windows-only
-# metadata/directory, fail-closed reparse, and mkdir coverage; this revised
-# extension has not run on Windows yet. The mkdir diagnostic logs sanitized
-# missing-parent and intermediate-file codes before asserting them, with fixed
-# labels and no path; the non-recursive result is restricted to FS_NOT_FOUND or
-# FS_NOT_DIRECTORY, and the recursive result also accepts the observed
-# FS_ALREADY_EXISTS. Reaching a hosted runner does not establish organization
-# eligibility or billing; see eng/ci/README.md for the run results and the
-# unverified extension.
+# Hosted Windows run 44956915195 at cb685999c1e0b4b449428467ed2062e0fdbfb47b
+# passed the targeted 100-test gate. The same gate passed 99 tests at c23a21b
+# (run 44949569504) and 97 tests at 1cc7384 (run 44945036146). Run 44845110559
+# at 51f3994 passed the earlier 58-test gate. Run 44936430027 at 2703526 failed
+# before any mkdir test passed, and run 44943444444 at 8475b21 reported
+# FS_ALREADY_EXISTS for async recursive mkdir below an intermediate regular
+# file; those failures led to the fixed-label diagnostics now in the suite.
+# This workflow runs the neojs-core filesystem suite (41 Windows-selected
+# integration tests) and one pure validation unit test (100 selected in total),
+# including Windows-only metadata/directory, fail-closed reparse, and mkdir
+# coverage. The current rename revision has not run on Windows. The mkdir
+# diagnostic logs sanitized missing-parent and intermediate-file codes before
+# asserting them, with fixed labels and no path; the non-recursive result is
+# restricted to FS_NOT_FOUND or FS_NOT_DIRECTORY, and the recursive result also
+# accepts the observed FS_ALREADY_EXISTS. Reaching a hosted runner does not
+# establish organization eligibility or billing; see eng/ci/README.md for the
+# run results and the current revision status.
 
 on:
   workflow_dispatch:
@@ -26,9 +26,9 @@ on:
         required: false
         type: boolean
         default: false
-  # pull_request: deliberately not enabled yet. A PR trigger would queue the
-  # extended gate on every pull request before the filesystem suite passes on
-  # Windows. Enable it only after that suite passes once; see eng/ci/README.md.
+  # pull_request: deliberately not enabled yet. The extended gate has passed
+  # once, but the current rename revision has not run. Enabling it is a separate
+  # reviewed change after the current revision passes; see eng/ci/README.md.
 
 permissions:
   contents: read

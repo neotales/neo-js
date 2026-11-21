@@ -7,53 +7,34 @@ is `.github/workflows/windows-native.yml`; the script it calls is
 `eng/ci/test-windows-ci-check.ps1`. The same checks can be reproduced on a
 Windows machine without GitHub Actions.
 
-> **Status: the 58-test targeted gate passed; the filesystem extension is
-> unverified and has no passing `mkdir` test.** Run
+> **Status: the targeted 100-test gate passed at `cb685999`; the current
+> rename revision has not run on native Windows.** Run
+> [44956915195](https://github.com/neotales/neo-js/actions/runs/44956915195) at
+> `cb685999c1e0b4b449428467ed2062e0fdbfb47b` passed the targeted gate: the two
+> registry suites (`8` and `9` tests), `neojs-core --test process` (`9`),
+> `neojs-core --test fs` (`41`), the filtered validation unit test (`1`),
+> `neojs --test process` (`19`), `neojs --test process_stdio` (`6`), and
+> `neojs-os --test os` (`7`), followed by the workspace `--no-run` compile.
+> The same targeted gate passed `99` tests at
+> [44949569504](https://github.com/neotales/neo-js/actions/runs/44949569504) on
+> `c23a21b` and `97` tests at
+> [44945036146](https://github.com/neotales/neo-js/actions/runs/44945036146) on
+> `1cc7384`. The full workspace test execution was not enabled.
+>
+> Earlier history: run
 > [44845110559](https://github.com/neotales/neo-js/actions/runs/44845110559) at
-> `51f3994` passed the targeted gate: the two registry suites (`8` and `9`
-> tests), `neojs-core --test process` (`9`), `neojs --test process` (`19`),
-> `neojs --test process_stdio` (`6`), and `neojs-os --test os` (`7`), followed
-> by the workspace `--no-run` compile. The full workspace test execution was
-> not enabled.
->
-> The earlier runs
-> [44841666909](https://github.com/neotales/neo-js/actions/runs/44841666909) at
-> `72ed60b` and
-> [44836480297](https://github.com/neotales/neo-js/actions/runs/44836480297)
-> failed before that pass. In `44841666909`,
-> `neojs/tests/process_stdio.rs` failed on the initial-cwd comparison, which
-> `51f3994` corrected. Reaching a hosted runner does not establish organization
-> eligibility or billing beyond the runs recorded here.
->
+> `51f3994` passed the earlier 58-test gate before the filesystem extension.
 > Run [44936430027](https://github.com/neotales/neo-js/actions/runs/44936430027)
-> at `2703526` reached a hosted Windows runner and failed in
-> `neojs-core --test fs`, in
-> `directory_creation_is_asynchronous_and_sync_forms_still_throw`, with an
-> escaped `Error: filesystem path does not exist` (`FS_NOT_FOUND`). The failure
-> output did not name the assertion. The old shared test required
-> `FS_NOT_DIRECTORY` only for the case where a regular file is an intermediate
-> component, which the module docs scope to Unix; the escaped code is consistent
-> with that case but this is not confirmed. **No `mkdir` test has passed on
-> native Windows.**
->
-> Run [44943444444](https://github.com/neotales/neo-js/actions/runs/44943444444)
+> at `2703526` failed in `neojs-core --test fs` before any `mkdir` test passed,
+> and run [44943444444](https://github.com/neotales/neo-js/actions/runs/44943444444)
 > at `8475b21` reported `FS_ALREADY_EXISTS` for the async recursive `mkdir`
-> below an intermediate regular file. The non-recursive cases stayed within
-> `FS_NOT_FOUND`/`FS_NOT_DIRECTORY`. The sync recursive case was computed but
-> not logged because the diagnostic logged after its assertions; the filesystem
-> suite has not passed on native Windows.
+> below an intermediate regular file. Those failures led to the fixed-label
+> diagnostics described below. Reaching a hosted runner does not establish
+> organization eligibility or billing beyond the runs recorded here.
 >
-> This change removes the Unix-only expectation from the shared test, labels
-> every `mkdir` case, and adds a Windows-only diagnostic for a missing parent
-> and an intermediate regular file (sync, async, and recursive). It records the
-> sanitized observed outcomes before asserting them; the non-recursive
-> intermediate-file result is restricted to `FS_NOT_FOUND` or
-> `FS_NOT_DIRECTORY`, and the recursive result also accepts the observed
-> `FS_ALREADY_EXISTS`. The filesystem suite is now `41` Windows-selected
-> integration tests, plus one filtered pure validation unit test (`100` selected
-> in total). This revised suite has not been dispatched, so it is not evidence
-> that the filesystem path passes on Windows. The previous 58-test result
-> remains the only passing native Windows evidence.
+> The filesystem suite is `41` Windows-selected integration tests, plus one
+> filtered pure validation unit test (`100` selected in total). The current
+> rename revision (`db8d784`) has not run on native Windows.
 
 ## Runner environment
 
@@ -61,11 +42,11 @@ The repository is public (`neotales/neo-js`). The workflow targets
 `windows-latest`, a GitHub-hosted standard runner, and does not use a
 self-hosted or Linux runner label.
 
-The only trigger is `workflow_dispatch`. A `pull_request` trigger is
-deliberately not active yet: one manual dispatch has passed the 58-test gate,
-but this branch's filesystem extension has not passed, so a PR trigger would
-queue the extended gate on every pull request before it has. Enable it after the
-extended gate has one successful manual dispatch, in a reviewed change.
+The only trigger is `workflow_dispatch`. The extended gate has one successful
+manual dispatch (run `44956915195`), but the current rename revision has not
+run and a `pull_request` trigger remains a separate reviewed change. Enabling
+it before the current revision passes would queue the extended gate on every
+pull request without current evidence.
 
 Public repositories are normally eligible for GitHub-hosted standard runners,
 but eligibility for this organization, Actions enablement, spending limits, and
@@ -185,11 +166,11 @@ pwsh -File eng/ci/windows-native.ps1 -FullWorkspace
 
 It is also available from the workflow's `workflow_dispatch` input
 `full_workspace_tests`. It is off by default because the full workspace suite
-has never run on Windows; only the 58-test targeted set has passed, and this
-branch's filesystem extension has not passed (run `44936430027` failed before
-any `mkdir` test passed). The first full run is expected to expose further
-failures, and turning that on for every pull request would conflate "the native
-build works" with "every unverified Windows behavior is correct".
+has never run on Windows; the targeted gate has passed `100` tests at
+`cb685999`. The current rename revision has not run on native Windows. The
+first full run is expected to expose further failures, and turning that on for
+every pull request would conflate "the native build works" with "every
+unverified Windows behavior is correct".
 
 Compiling the workspace compiles the native MSVC dependencies, including the
 bundled QuickJS C sources used by `rquickjs`, the bundled SQLite C sources used
@@ -398,8 +379,8 @@ pull request into a stuck check.
   distinguished from a slow runner without repository administration access.
 - **Actions disabled or over budget:** the workflow does not start. There is no
   fallback to the Linux self-hosted pool.
-- **`windows-latest` image drift:** the label floats. The 58-test run succeeded
-  on the floating image, but the image is not pinned. Pin it
+- **`windows-latest` image drift:** the label floats. The 100-test run at
+  `cb685999` succeeded on the floating image, but the image is not pinned. Pin it
   (`windows-2025` or the then-current stable image) in a separate change before
   treating a later result as comparable.
 - **MSRV drift:** `Cargo.lock` and `Cargo.toml` are pinned, but a transitive

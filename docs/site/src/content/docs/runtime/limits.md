@@ -9,8 +9,14 @@ The runtime drives QuickJS jobs and asynchronous filesystem work during
 [managed module evaluation](/runtime/loading/#managed-module-evaluation).
 It has no general external event loop. TypeScript support erases types
 without checking them or producing source maps. The loader rejects constructs
-that need a transform. Among the CLI's host modules, only `neo:fs.readFile` and
-`neo:fs.writeFile` are asynchronous. The callback guards in
+that need a transform. Asynchronous filesystem work is the `neo:fs` worker
+operations: `readFile`, `writeFile`, `writeText`, `stat`, `lstat`, `readDir`,
+`mkdir`, `remove`, and `rename` run on the bounded worker pool during managed
+module evaluation; their `Sync` counterparts and `readText`, `copyFile`, and
+`exists` block. The [filesystem guide](/guides/modules/fs/#migrate-asynchronous-operations)
+owns the current list, outstanding-operation limit, and cancellation rules.
+A started operation may outlive a failed turn and its side effects are not
+rolled back. The callback guards in
 [`neo:test` and `neo:assert`](/guides/modules/testing/) reject Promise returns.
 `neo:toml` and `neo:yaml` parse text only: neither has a file loader, expands
 no alias or variable, and reads no environment.
