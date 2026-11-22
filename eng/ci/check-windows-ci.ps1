@@ -19,13 +19,13 @@
     cargo command: `& cargo '+1.87.0' @Arguments` inside Invoke-Cargo. It
     rejects direct cargo calls, dynamic command expressions, shell/dynamic
     wrappers, and cargo aliases/functions. It also requires exactly one
-    full-shape `neojs-core --test fs` invocation and one exact filtered pure
-    validation unit test, both as direct statements in the CheckOnly else
-    block. It rejects duplicates, extra arguments such as --list or --no-run,
-    wrong packages, filters, functions, script blocks, loops, and conditional
-    placement. This is a source/AST guarantee; it does not attest the cargo
-    binary on PATH, cargo's subprocesses, or runtime test counts (the gate
-    separately checks the validator's libtest summary).
+    full-shape `neojs-core --test fs` invocation and exactly one invocation of
+    each of two exact filtered pure unit tests, all as direct statements in
+    the CheckOnly else block. It rejects duplicates, extra arguments such as
+    --list or --no-run, wrong packages, filters, functions, script blocks,
+    loops, and conditional placement. This is a source/AST guarantee; it does
+    not attest the cargo binary on PATH, cargo's subprocesses, or runtime test
+    counts (the gate separately checks each filter's libtest summary).
 #>
 [CmdletBinding()]
 param()
@@ -481,8 +481,8 @@ if ($failures.Count -eq 0) {
                 $node -is [System.Management.Automation.Language.CommandAst] -and
                 $node.GetCommandName() -eq 'Invoke-Cargo'
             }, $true)
-        if ($invokeCargoCalls.Count -ne 10) {
-            Add-Failure "expected 10 Invoke-Cargo calls, found $($invokeCargoCalls.Count)"
+        if ($invokeCargoCalls.Count -ne 11) {
+            Add-Failure "expected 11 Invoke-Cargo calls, found $($invokeCargoCalls.Count)"
         }
 
         $checkOnlyIfs = @($ast.FindAll({
@@ -501,8 +501,11 @@ if ($failures.Count -eq 0) {
 
         $filesystemShape = @('test', '--locked', '--target', '$Target', '-p', 'neojs-core', '--test', 'fs')
         $validationShape = @('test', '--locked', '--target', '$Target', '-p', 'neojs-core', '--lib', '--', 'fs::tests::windows_copy_paths_are_rejected_before_io', '--exact')
+        $snapshotTestName = 'fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands'
+        $snapshotShape = @('test', '--locked', '--target', '$Target', '-p', 'neojs-core', '--lib', '--', $snapshotTestName, '--exact')
         $filesystemCalls = @()
         $validationCalls = @()
+        $snapshotCalls = @()
         foreach ($call in $invokeCargoCalls) {
             if ($call.CommandElements.Count -ne 2) {
                 Add-Failure "Invoke-Cargo call is not an explicit array: $($call.Extent.Text)"
@@ -564,9 +567,16 @@ if ($failures.Count -eq 0) {
                 }
             }
             $mentionsFilesystem = $isTest -and $mentionsFilesystem
-            $mentionsValidation = $isTest -and ($values -contains '--lib')
-            if ($mentionsFilesystem -or $mentionsValidation) {
-                $candidateKind = if ($mentionsFilesystem) { 'filesystem suite' } else { 'validation unit test' }
+            $mentionsSnapshot = $false
+            foreach ($value in $values) {
+                if ($value.Contains($snapshotTestName)) {
+                    $mentionsSnapshot = $true
+                    break
+                }
+            }
+            $mentionsValidation = $isTest -and ($values -contains '--lib') -and -not $mentionsSnapshot
+            if ($mentionsFilesystem -or $mentionsValidation -or $mentionsSnapshot) {
+                $candidateKind = if ($mentionsFilesystem) { 'filesystem suite' } elseif ($mentionsSnapshot) { 'copy-snapshot unit test' } else { 'validation unit test' }
                 if ($values -contains '--list') {
                     Add-Failure "$candidateKind invocation must not use --list: $($call.Extent.Text)"
                 }
@@ -577,11 +587,21 @@ if ($failures.Count -eq 0) {
 
             $isFilesystem = $isTest -and (Test-ArgumentShape -Actual $values -Expected $filesystemShape)
             $isValidation = $isTest -and (Test-ArgumentShape -Actual $values -Expected $validationShape)
-            if (-not $isFilesystem -and -not $isValidation) {
+            $isSnapshot = $isTest -and (Test-ArgumentShape -Actual $values -Expected $snapshotShape)
+            if ($mentionsSnapshot -and -not $isSnapshot) {
+                # A second snapshot-named call must not hide behind the one
+                # valid call: any candidate naming the test must have the one
+                # exact shape, so extra arguments such as --ignored, --list,
+                # --no-run, --nocapture, or another filter are rejected even
+                # when the total Invoke-Cargo count is unchanged.
+                Add-Failure "copy-snapshot unit test invocation must have the exact argument shape: $($call.Extent.Text)"
+                continue
+            }
+            if (-not $isFilesystem -and -not $isValidation -and -not $isSnapshot) {
                 continue
             }
 
-            $kind = if ($isFilesystem) { 'filesystem suite' } else { 'validation unit test' }
+            $kind = if ($isFilesystem) { 'filesystem suite' } elseif ($isSnapshot) { 'copy-snapshot unit test' } else { 'validation unit test' }
             $pipeline = $call.Parent
             $block = if ($null -ne $pipeline) { $pipeline.Parent } else { $null }
             if ($null -eq $checkOnlyElse -or
@@ -614,12 +634,18 @@ if ($failures.Count -eq 0) {
             if ($isValidation) {
                 $validationCalls += $call
             }
+            if ($isSnapshot) {
+                $snapshotCalls += $call
+            }
         }
         if ($filesystemCalls.Count -ne 1) {
             Add-Failure "expected exactly one unconditional test -p neojs-core --test fs invocation with the exact argument shape, found $($filesystemCalls.Count)"
         }
         if ($validationCalls.Count -ne 1) {
             Add-Failure "expected exactly one exact validation unit test invocation, found $($validationCalls.Count)"
+        }
+        if ($snapshotCalls.Count -ne 1) {
+            Add-Failure "expected exactly one exact copy-snapshot unit test invocation, found $($snapshotCalls.Count)"
         }
     }
 }

@@ -7,19 +7,27 @@ is `.github/workflows/windows-native.yml`; the script it calls is
 `eng/ci/test-windows-ci-check.ps1`. The same checks can be reproduced on a
 Windows machine without GitHub Actions.
 
-> **Status: the targeted 100-test gate passed at `cb685999`; the current
-> rename revision has not run on native Windows.** Run
-> [44956915195](https://github.com/neotales/neo-js/actions/runs/44956915195) at
-> `cb685999c1e0b4b449428467ed2062e0fdbfb47b` passed the targeted gate: the two
+> **Status: the targeted 101-test gate passed at `89b966c`; this proposed
+> 102-test revision has not been dispatched on native Windows.** Run
+> [44964164697](https://github.com/neotales/neo-js/actions/runs/44964164697) at
+> `89b966c1382513518cb022f8007d4f9984b24ded` passed the targeted gate: the two
 > registry suites (`8` and `9` tests), `neojs-core --test process` (`9`),
-> `neojs-core --test fs` (`41`), the filtered validation unit test (`1`),
+> `neojs-core --test fs` (`42`), the filtered validation unit test (`1`),
 > `neojs --test process` (`19`), `neojs --test process_stdio` (`6`), and
 > `neojs-os --test os` (`7`), followed by the workspace `--no-run` compile.
-> The same targeted gate passed `99` tests at
-> [44949569504](https://github.com/neotales/neo-js/actions/runs/44949569504) on
-> `c23a21b` and `97` tests at
-> [44945036146](https://github.com/neotales/neo-js/actions/runs/44945036146) on
-> `1cc7384`. The full workspace test execution was not enabled.
+> This revision adds a second exact filtered pure unit test
+> (`windows_copy_snapshot_validates_original_and_resolved_operands`), which
+> would select `102` tests; it has not been dispatched, so there is no run
+> result for it.
+>
+> Earlier successes: run
+> [44956915195](https://github.com/neotales/neo-js/actions/runs/44956915195) at
+> `cb685999` passed `100` tests (including `41` `neojs-core --test fs` tests
+> and the one filtered validation unit test); run
+> [44949569504](https://github.com/neotales/neo-js/actions/runs/44949569504) at
+> `c23a21b` passed `99`; and run
+> [44945036146](https://github.com/neotales/neo-js/actions/runs/44945036146) at
+> `1cc7384` passed `97`. The full workspace test execution was not enabled.
 >
 > Earlier history: run
 > [44845110559](https://github.com/neotales/neo-js/actions/runs/44845110559) at
@@ -32,9 +40,12 @@ Windows machine without GitHub Actions.
 > diagnostics described below. Reaching a hosted runner does not establish
 > organization eligibility or billing beyond the runs recorded here.
 >
-> The filesystem suite is `41` Windows-selected integration tests, plus one
-> filtered pure validation unit test (`100` selected in total). The current
-> rename revision (`db8d784`) has not run on native Windows.
+> The filesystem suite is `42` Windows-selected integration tests, plus two
+> exact filtered pure unit tests. The `101`-test run at `89b966c` executed the
+> filesystem suite and the first of those filters. This revision adds the
+> second filter, so the proposed gate selects `102` tests at source level;
+> because it has not been dispatched, none of that is evidence the second
+> filter passed on Windows.
 
 ## Runner environment
 
@@ -42,17 +53,18 @@ The repository is public (`neotales/neo-js`). The workflow targets
 `windows-latest`, a GitHub-hosted standard runner, and does not use a
 self-hosted or Linux runner label.
 
-The only trigger is `workflow_dispatch`. The extended gate has one successful
-manual dispatch (run `44956915195`), but the current rename revision has not
-run and a `pull_request` trigger remains a separate reviewed change. Enabling
-it before the current revision passes would queue the extended gate on every
-pull request without current evidence.
+The only trigger is `workflow_dispatch`. The targeted gate has successful
+manual dispatches, most recently run `44964164697` at `89b966c` (`101` tests),
+but this proposed `102`-test revision has not been dispatched and a
+`pull_request` trigger remains a separate reviewed change. Enabling it before
+the current revision passes would queue the extended gate on every pull request
+without current evidence.
 
 Public repositories are normally eligible for GitHub-hosted standard runners,
 but eligibility for this organization, Actions enablement, spending limits, and
-concurrency limits are all outside the repository checkout. All three recorded
-dispatches reached a hosted Windows runner; that does not establish eligibility
-or billing beyond those runs. If hosted Windows becomes unavailable, the manual
+concurrency limits are all outside the repository checkout. The recorded
+dispatches reached a hosted Windows runner; that does not establish
+eligibility or billing beyond those runs. If hosted Windows becomes unavailable, the manual
 run will queue or fail; it will not silently fall back to a Linux runner.
 
 The separate self-hosted runner pool advertises only `linux-amd64` and
@@ -116,15 +128,16 @@ It then runs, in order. Every command includes the explicit target:
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test process`                                      | 9             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --test fs`                                           | 42            |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --lib -- fs::tests::windows_copy_paths_are_rejected_before_io --exact` | 1 selected    |
+| `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-core --lib -- fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands --exact` | 1 selected    |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs --test process`                                           | 19            |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs --test process_stdio`                                     | 6             |
 | `cargo +1.87.0 test --locked --target x86_64-pc-windows-msvc -p neojs-os --test os`                                             | 7             |
 | `cargo +1.87.0 test --workspace --locked --target x86_64-pc-windows-msvc --no-run`                                              | compiles all workspace test targets, runs none |
 
-The filtered validation row is not accepted just because Cargo exits zero: the
-script captures its output and requires the libtest summary `running 1 test`
-and `1 passed; 0 failed`. A filter that selects zero tests, or more than one,
-fails the gate.
+Neither filtered unit-test row is accepted just because Cargo exits zero: for
+each one the script captures that invocation's output and requires the libtest
+summary `running 1 test` and `1 passed; 0 failed`, plus the exact test name. A
+filter that selects zero tests, or more than one, fails the gate.
 
 The counts are source-level counts after applying `cfg` gates; they are not a
 claim that those tests passed. `neojs/tests/process.rs` contains 22 tests, of
@@ -146,16 +159,17 @@ and `copyFileSync` and checks no-clobber; and one is a gated basic round trip.
 The previous Windows-only integration test that passed
 root, namespace, UNC, device, and stream names to `copyFile` was removed; those
 cases now run in the pure validation unit test
-`fs::tests::windows_copy_paths_are_rejected_before_io`. That is the exact
-`--lib -- ... --exact` filter the native gate invokes today. A second no-I/O
-test, `fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands`,
+`fs::tests::windows_copy_paths_are_rejected_before_io`. A second no-I/O test,
+`fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands`,
 drives the production `snapshot_copy_paths` helper for both original and
-resolved operands. This branch does not add an invocation for that newer test,
-so the existing exact-filtered native gate will not execute it. Both tests
-parse paths only and perform no filesystem I/O. No junction is created and no
-privileged directory link or host path outside the temp directory is touched.
-The targeted suites total 101 Windows-selected tests when this branch's
-filesystem suite and the existing validation unit test are included.
+resolved operands. The native gate invokes each test as its own exact
+`--lib -- ... --exact` filter and requires the one-test libtest summary for
+each. Both tests parse paths only and perform no filesystem I/O. No junction is
+created and no privileged directory link or host path outside the temp
+directory is touched. Across its invocations the targeted gate selects 102
+tests at source level (`8 + 9 + 9 + 42 + 1 + 1 + 19 + 6 + 7`). That is a
+source-level count, not a pass count, and this proposed revision has not run
+on Windows.
 
 The filesystem suite invocation does not add `--nocapture`. The Windows `mkdir`
 diagnostic writes its sanitized fixed-label codes directly to the process
@@ -171,9 +185,10 @@ pwsh -File eng/ci/windows-native.ps1 -FullWorkspace
 
 It is also available from the workflow's `workflow_dispatch` input
 `full_workspace_tests`. It is off by default because the full workspace suite
-has never run on Windows; the targeted gate has passed `100` tests at
-`cb685999`. The current rename revision has not run on native Windows. The
-first full run is expected to expose further failures, and turning that on for
+has never run on Windows; the targeted gate passed `100` tests at `cb685999`
+and `101` tests at `89b966c` (run `44964164697`). This proposed `102`-test
+revision has not run on native Windows. The first full run is expected to
+expose further failures, and turning that on for
 every pull request would conflate "the native build works" with "every
 unverified Windows behavior is correct".
 
@@ -216,16 +231,22 @@ checks:
   aliases or functions are rejected. A path-qualified cargo is rejected even
   when it replaces the wrapper;
 - every `Invoke-Cargo` call must contain exactly one `--target` followed by
-  `$Target`; exactly ten calls must exist. Exactly one call must have the
+  `$Target`; exactly eleven calls must exist. Exactly one call must have the
   complete `test --locked --target $Target -p neojs-core --test fs` argument
   shape, with no extra arguments such as `--list`, `--no-run`, or a filter.
-  Exactly one corresponding call must have the complete
+  Exactly one call must have the complete
   `test --locked --target $Target -p neojs-core --lib -- fs::tests::windows_copy_paths_are_rejected_before_io --exact`
-  shape. Both must be direct statements in the `else` block of the
-  `-CheckOnly` guard and must not be inside a function, script block, `if`, or
-  loop. At runtime, the validator's captured output must report `running 1
-  test` and `1 passed; 0 failed`; a zero-test or multi-test match fails the
-  gate;
+  shape, and exactly one call must have the complete
+  `test --locked --target $Target -p neojs-core --lib -- fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands --exact`
+  shape. Any call that names the snapshot test must have exactly that shape:
+  a second snapshot-named invocation with an extra argument such as
+  `--ignored`, `--list`, `--no-run`, `--nocapture`, or a trailing filter is
+  rejected even when one valid snapshot call exists and the total call count
+  is unchanged. All three shapes must be direct statements in the `else` block
+  of the `-CheckOnly` guard and must not be inside a function, script block,
+  `if`, or loop. At runtime, each filtered unit test's captured output must
+  report `running 1 test` and `1 passed; 0 failed`; a zero-test or multi-test
+  match fails the gate;
 - `neojs-core/tests/winregistry_windows.rs` exists, still reserves
   `HKCU\Software\neo-js-tests-*`, and does not mention `HKLM`,
   `HKEY_LOCAL_MACHINE`, or `HKEY_USERS`. This is the platform-independent
@@ -286,6 +307,21 @@ dependency. Rejected mutations:
 - a validation unit test invocation under `if ($false)`;
 - a validation unit test invocation moved outside the `CheckOnly` else;
 - a validation unit test invocation inside an uninvoked function;
+- a missing copy-snapshot unit test invocation;
+- a duplicate copy-snapshot unit test invocation;
+- a copy-snapshot unit test invocation with `--no-run`;
+- a copy-snapshot unit test invocation with `--list`;
+- a malformed duplicate copy-snapshot invocation with `--ignored`, replacing
+  an unrelated call so the total remains eleven and one valid snapshot call
+  remains; the self-test also asserts no call-count failure is reported;
+- a malformed duplicate copy-snapshot invocation with `--nocapture`, replacing
+  an unrelated call so the total remains eleven and one valid snapshot call
+  remains; the self-test also asserts no call-count failure is reported;
+- a copy-snapshot unit test invocation with a bogus filter;
+- a copy-snapshot unit test invocation with the wrong package;
+- a copy-snapshot unit test invocation under `if ($false)`;
+- a copy-snapshot unit test invocation moved outside the `CheckOnly` else;
+- a copy-snapshot unit test invocation inside an uninvoked function;
 - a cargo alias;
 - a floating action ref;
 - a policy-rejected block `with: toolchain: 1.87.0` on
@@ -365,8 +401,8 @@ PR trigger is enabled later, because that code is untrusted.
 
 ## Enabling pull requests
 
-After the extended gate has one successful manual dispatch, add the PR trigger
-in a separate reviewed change:
+After the current revision passes a manual dispatch, add the PR trigger in a
+separate reviewed change:
 
 ```yaml
 on:
@@ -385,7 +421,8 @@ pull request into a stuck check.
 - **Actions disabled or over budget:** the workflow does not start. There is no
   fallback to the Linux self-hosted pool.
 - **`windows-latest` image drift:** the label floats. The 100-test run at
-  `cb685999` succeeded on the floating image, but the image is not pinned. Pin it
+  `cb685999` and the 101-test run at `89b966c` succeeded on the floating image,
+  but the image is not pinned. Pin it
   (`windows-2025` or the then-current stable image) in a separate change before
   treating a later result as comparable.
 - **MSRV drift:** `Cargo.lock` and `Cargo.toml` are pinned, but a transitive

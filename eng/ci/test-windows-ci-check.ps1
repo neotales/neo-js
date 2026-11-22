@@ -17,8 +17,10 @@
     Covered bypasses: direct cargo, Windows path-qualified cargo, Windows and
     Unix path-qualified shells, an environment-expanded cargo command, a
     path-qualified wrapper command, a missing --target, and missing,
-    duplicated, no-run, list, wrong-package, conditional, outside-else, or
-    uninvoked-function neojs-core filesystem and validation invocations, a
+    duplicated, no-run, list, wrong-package, extra-argument, conditional,
+    outside-else, or uninvoked-function neojs-core filesystem, validation, and
+    copy-snapshot invocations (a malformed snapshot-named duplicate is
+    rejected even when one valid call and the same total call count remain), a
     cargo alias, a floating action ref, policy-rejected `with:` blocks on
     dtolnay including quoted keys, extra `release`/`workflow_call` triggers,
     column-zero comments
@@ -126,7 +128,8 @@ function Assert-Rejected {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string]$Root,
-        [Parameter(Mandatory = $true)][string[]]$Expected
+        [Parameter(Mandatory = $true)][string[]]$Expected,
+        [string[]]$Forbidden = @()
     )
 
     try {
@@ -143,6 +146,12 @@ function Assert-Rejected {
     foreach ($diagnostic in $Expected) {
         if (-not $result.Output.Contains($diagnostic)) {
             [void]$failures.Add("$Name`: missing expected diagnostic '$diagnostic': $($result.Output)")
+            return
+        }
+    }
+    foreach ($diagnostic in $Forbidden) {
+        if ($result.Output.Contains($diagnostic)) {
+            [void]$failures.Add("$Name`: unexpectedly included forbidden diagnostic '$diagnostic': $($result.Output)")
             return
         }
     }
@@ -231,12 +240,13 @@ try {
 
     $filesystemCall = "        Invoke-Cargo @('test', '--locked', '--target', `$Target, '-p', 'neojs-core', '--test', 'fs')"
     $validationCall = "        Invoke-Cargo @('test', '--locked', '--target', `$Target, '-p', 'neojs-core', '--lib', '--', 'fs::tests::windows_copy_paths_are_rejected_before_io', '--exact')"
+    $snapshotCall = "        Invoke-Cargo @('test', '--locked', '--target', `$Target, '-p', 'neojs-core', '--lib', '--', 'fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands', '--exact')"
 
     $missingFilesystemRoot = New-Fixture -Name 'missing-filesystem-suite'
     $missingFilesystemScript = Join-Path $missingFilesystemRoot 'eng/ci/windows-native.ps1'
     Replace-First -Path $missingFilesystemScript -Find $filesystemCall -Replacement '        # removed by mutation self-test'
     Assert-Rejected -Name 'missing neojs-core filesystem suite' -Root $missingFilesystemRoot -Expected @(
-        'expected 10 Invoke-Cargo calls, found 9',
+        'expected 11 Invoke-Cargo calls, found 10',
         'expected exactly one unconditional test -p neojs-core --test fs invocation with the exact argument shape, found 0'
     )
 
@@ -244,7 +254,7 @@ try {
     $duplicateFilesystemScript = Join-Path $duplicateFilesystemRoot 'eng/ci/windows-native.ps1'
     Insert-AfterLine -Path $duplicateFilesystemScript -Line $filesystemCall -Insert $filesystemCall
     Assert-Rejected -Name 'duplicate neojs-core filesystem suite' -Root $duplicateFilesystemRoot -Expected @(
-        'expected 10 Invoke-Cargo calls, found 11',
+        'expected 11 Invoke-Cargo calls, found 12',
         'expected exactly one unconditional test -p neojs-core --test fs invocation with the exact argument shape, found 2'
     )
 
@@ -298,7 +308,7 @@ try {
     $missingValidationScript = Join-Path $missingValidationRoot 'eng/ci/windows-native.ps1'
     Replace-First -Path $missingValidationScript -Find $validationCall -Replacement '        # removed by mutation self-test'
     Assert-Rejected -Name 'missing validation unit test' -Root $missingValidationRoot -Expected @(
-        'expected 10 Invoke-Cargo calls, found 9',
+        'expected 11 Invoke-Cargo calls, found 10',
         'expected exactly one exact validation unit test invocation, found 0'
     )
 
@@ -306,7 +316,7 @@ try {
     $duplicateValidationScript = Join-Path $duplicateValidationRoot 'eng/ci/windows-native.ps1'
     Insert-AfterLine -Path $duplicateValidationScript -Line $validationCall -Insert $validationCall
     Assert-Rejected -Name 'duplicate validation unit test' -Root $duplicateValidationRoot -Expected @(
-        'expected 10 Invoke-Cargo calls, found 11',
+        'expected 11 Invoke-Cargo calls, found 12',
         'expected exactly one exact validation unit test invocation, found 2'
     )
 
@@ -363,6 +373,98 @@ try {
         'validation unit test invocation must not be inside a function',
         'validation unit test invocation must be a direct statement in the CheckOnly else block'
     )
+
+    $missingSnapshotRoot = New-Fixture -Name 'missing-copy-snapshot-unit-test'
+    $missingSnapshotScript = Join-Path $missingSnapshotRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $missingSnapshotScript -Find $snapshotCall -Replacement '        # removed by mutation self-test'
+    Assert-Rejected -Name 'missing copy-snapshot unit test' -Root $missingSnapshotRoot -Expected @(
+        'expected 11 Invoke-Cargo calls, found 10',
+        'expected exactly one exact copy-snapshot unit test invocation, found 0'
+    )
+
+    $duplicateSnapshotRoot = New-Fixture -Name 'duplicate-copy-snapshot-unit-test'
+    $duplicateSnapshotScript = Join-Path $duplicateSnapshotRoot 'eng/ci/windows-native.ps1'
+    Insert-AfterLine -Path $duplicateSnapshotScript -Line $snapshotCall -Insert $snapshotCall
+    Assert-Rejected -Name 'duplicate copy-snapshot unit test' -Root $duplicateSnapshotRoot -Expected @(
+        'expected 11 Invoke-Cargo calls, found 12',
+        'expected exactly one exact copy-snapshot unit test invocation, found 2'
+    )
+
+    $noRunSnapshotRoot = New-Fixture -Name 'no-run-copy-snapshot-unit-test'
+    $noRunSnapshotScript = Join-Path $noRunSnapshotRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $noRunSnapshotScript -Find "'fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands', '--exact')" -Replacement "'fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands', '--exact', '--no-run')"
+    Assert-Rejected -Name 'no-run copy-snapshot unit test' -Root $noRunSnapshotRoot -Expected @(
+        'copy-snapshot unit test invocation must not use --no-run',
+        'expected exactly one exact copy-snapshot unit test invocation, found 0'
+    )
+
+    $listSnapshotRoot = New-Fixture -Name 'list-copy-snapshot-unit-test'
+    $listSnapshotScript = Join-Path $listSnapshotRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $listSnapshotScript -Find "'fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands', '--exact')" -Replacement "'fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands', '--exact', '--list')"
+    Assert-Rejected -Name 'list copy-snapshot unit test' -Root $listSnapshotRoot -Expected @(
+        'copy-snapshot unit test invocation must not use --list',
+        'expected exactly one exact copy-snapshot unit test invocation, found 0'
+    )
+
+    $bogusSnapshotRoot = New-Fixture -Name 'bogus-copy-snapshot-filter'
+    $bogusSnapshotScript = Join-Path $bogusSnapshotRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $bogusSnapshotScript -Find 'fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands' -Replacement 'fs::tests::bogus_snapshot_filter'
+    Assert-Rejected -Name 'bogus copy-snapshot filter' -Root $bogusSnapshotRoot -Expected @(
+        'expected exactly one exact copy-snapshot unit test invocation, found 0'
+    )
+
+    $snapshotWrongPackageRoot = New-Fixture -Name 'wrong-copy-snapshot-package'
+    $snapshotWrongPackageScript = Join-Path $snapshotWrongPackageRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $snapshotWrongPackageScript -Find "'-p', 'neojs-core', '--lib', '--', 'fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands'" -Replacement "'-p', 'neojs-other', '--lib', '--', 'fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands'"
+    Assert-Rejected -Name 'wrong copy-snapshot package' -Root $snapshotWrongPackageRoot -Expected @(
+        'expected exactly one exact copy-snapshot unit test invocation, found 0'
+    )
+
+    $conditionalSnapshotRoot = New-Fixture -Name 'conditional-copy-snapshot-unit-test'
+    $conditionalSnapshotScript = Join-Path $conditionalSnapshotRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $conditionalSnapshotScript -Find $snapshotCall -Replacement ("        if (`$false) {`n" + $snapshotCall + "`n        }")
+    Assert-Rejected -Name 'conditional copy-snapshot unit test' -Root $conditionalSnapshotRoot -Expected @(
+        'copy-snapshot unit test invocation must not be conditional',
+        'copy-snapshot unit test invocation must be a direct statement in the CheckOnly else block'
+    )
+
+    $outsideSnapshotRoot = New-Fixture -Name 'outside-copy-snapshot-unit-test'
+    $outsideSnapshotScript = Join-Path $outsideSnapshotRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $outsideSnapshotScript -Find $snapshotCall -Replacement '        # moved outside by mutation self-test'
+    Insert-AfterLine -Path $outsideSnapshotScript -Line 'Push-Location $repoRoot' -Insert $snapshotCall
+    Assert-Rejected -Name 'outside copy-snapshot unit test' -Root $outsideSnapshotRoot -Expected @(
+        'copy-snapshot unit test invocation must be a direct statement in the CheckOnly else block'
+    )
+
+    $uninvokedSnapshotRoot = New-Fixture -Name 'uninvoked-copy-snapshot-unit-test'
+    $uninvokedSnapshotScript = Join-Path $uninvokedSnapshotRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $uninvokedSnapshotScript -Find $snapshotCall -Replacement ("        function Invoke-UnusedSnapshot {`n" + $snapshotCall + "`n        }")
+    Assert-Rejected -Name 'uninvoked copy-snapshot function' -Root $uninvokedSnapshotRoot -Expected @(
+        'copy-snapshot unit test invocation must not be inside a function',
+        'copy-snapshot unit test invocation must be a direct statement in the CheckOnly else block'
+    )
+
+    # Keep the total at 11 calls: replace an unrelated invocation with a
+    # malformed duplicate of the snapshot test, one valid snapshot call still
+    # present. Exact-shape rejection must fire rather than being hidden by the
+    # valid call.
+    $processCall = "        Invoke-Cargo @('test', '--locked', '--target', `$Target, '-p', 'neojs-core', '--test', 'process')"
+    $ignoredSnapshotRoot = New-Fixture -Name 'ignored-duplicate-copy-snapshot-unit-test'
+    $ignoredSnapshotScript = Join-Path $ignoredSnapshotRoot 'eng/ci/windows-native.ps1'
+    Replace-First -Path $ignoredSnapshotScript -Find $processCall -Replacement "        Invoke-Cargo @('test', '--locked', '--target', `$Target, '-p', 'neojs-core', '--lib', '--', 'fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands', '--exact', '--ignored')"
+    Assert-Rejected -Name 'ignored duplicate copy-snapshot unit test' -Root $ignoredSnapshotRoot -Expected @(
+        'copy-snapshot unit test invocation must have the exact argument shape',
+        '--ignored'
+    ) -Forbidden @('expected 11 Invoke-Cargo calls')
+
+    $nocaptureSnapshotRoot = New-Fixture -Name 'nocapture-duplicate-copy-snapshot-unit-test'
+    $nocaptureSnapshotScript = Join-Path $nocaptureSnapshotRoot 'eng/ci/windows-native.ps1'
+    $winregistryCall = "        Invoke-Cargo @('test', '--locked', '--target', `$Target, '-p', 'neojs-core', '--test', 'winregistry', '--', '--test-threads=1')"
+    Replace-First -Path $nocaptureSnapshotScript -Find $winregistryCall -Replacement "        Invoke-Cargo @('test', '--locked', '--target', `$Target, '-p', 'neojs-core', '--lib', '--', 'fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands', '--exact', '--nocapture')"
+    Assert-Rejected -Name 'nocapture duplicate copy-snapshot unit test' -Root $nocaptureSnapshotRoot -Expected @(
+        'copy-snapshot unit test invocation must have the exact argument shape',
+        '--nocapture'
+    ) -Forbidden @('expected 11 Invoke-Cargo calls')
 
     $aliasRoot = New-Fixture -Name 'cargo-alias'
     $aliasScript = Join-Path $aliasRoot 'eng/ci/windows-native.ps1'

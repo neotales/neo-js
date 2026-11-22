@@ -1,16 +1,21 @@
 name: Windows native
 
-# Hosted Windows run 44956915195 at cb685999c1e0b4b449428467ed2062e0fdbfb47b
-# passed the targeted 100-test gate. The same gate passed 99 tests at c23a21b
-# (run 44949569504) and 97 tests at 1cc7384 (run 44945036146). Run 44845110559
-# at 51f3994 passed the earlier 58-test gate. Run 44936430027 at 2703526 failed
-# before any mkdir test passed, and run 44943444444 at 8475b21 reported
-# FS_ALREADY_EXISTS for async recursive mkdir below an intermediate regular
-# file; those failures led to the fixed-label diagnostics now in the suite.
-# This workflow runs the neojs-core filesystem suite (41 Windows-selected
-# integration tests) and one pure validation unit test (100 selected in total),
-# including Windows-only metadata/directory, fail-closed reparse, and mkdir
-# coverage. The current rename revision has not run on Windows. The mkdir
+# Hosted Windows run 44964164697 at 89b966c1382513518cb022f8007d4f9984b24ded
+# passed the targeted 101-test gate (including the 42-test filesystem suite
+# and the one filtered validation unit test). This revision proposes a second
+# exact filtered pure unit test (102 selected source-level) and has not been
+# dispatched. Earlier: run 44956915195 at cb685999 passed 100 tests, run
+# 44949569504 at c23a21b passed 99, run 44945036146 at 1cc7384 passed 97, and
+# run 44845110559 at 51f3994 passed the earlier 58-test gate. Run 44936430027
+# at 2703526 failed before any mkdir test passed, and run 44943444444 at
+# 8475b21 reported FS_ALREADY_EXISTS for async recursive mkdir below an
+# intermediate regular file; those failures led to the fixed-label diagnostics
+# now in the suite.
+# This workflow is configured to run the neojs-core filesystem suite (42
+# Windows-selected integration tests) and two exact filtered pure unit tests
+# (102 selected source-level across its invocations), including Windows-only
+# metadata/directory, fail-closed reparse, and mkdir coverage. Only the first
+# of the two filtered unit tests has run on Windows. The mkdir
 # diagnostic logs sanitized missing-parent and intermediate-file codes before
 # asserting them, with fixed labels and no path; the non-recursive result is
 # restricted to FS_NOT_FOUND or FS_NOT_DIRECTORY, and the recursive result also
@@ -26,9 +31,10 @@ on:
         required: false
         type: boolean
         default: false
-  # pull_request: deliberately not enabled yet. The extended gate has passed
-  # once, but the current rename revision has not run. Enabling it is a separate
-  # reviewed change after the current revision passes; see eng/ci/README.md.
+  # pull_request: deliberately not enabled yet. The targeted gate has passed
+  # on manual dispatches, but this proposed 102-test revision has not run.
+  # Enabling it is a separate reviewed change after the current revision
+  # passes; see eng/ci/README.md.
 
 permissions:
   contents: read

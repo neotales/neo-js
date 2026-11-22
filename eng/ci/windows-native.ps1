@@ -8,8 +8,9 @@
     checks that the host is a 64-bit Windows x64 process with the pinned MSVC
     Rust toolchain and the x86_64-pc-windows-msvc standard library, refuses to
     start with stale registry fixtures, runs the Windows registry, process, and
-    filesystem suites with the pure copy-path validation unit test, and
-    compiles every workspace test target.
+    filesystem suites with the two pure no-I/O unit tests (copy-path
+    validation and copy-snapshot validation), and compiles every workspace
+    test target.
 
     Every cargo command passes --target x86_64-pc-windows-msvc explicitly. The
     rustc host check alone is not treated as proof that cargo would build for
@@ -171,6 +172,14 @@ try {
             $validatorText -notmatch 'test result: ok\. 1 passed; 0 failed;' -or
             $validatorText -notmatch [regex]::Escape('fs::tests::windows_copy_paths_are_rejected_before_io')) {
             throw "the pure validation unit test filter did not run exactly one test:`n$validatorText"
+        }
+        Invoke-Cargo @('test', '--locked', '--target', $Target, '-p', 'neojs-core', '--lib', '--', 'fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands', '--exact')
+        # Exit zero is not enough: require libtest's own one-test summary.
+        $snapshotText = ($script:LastCargoOutput | Out-String)
+        if ($snapshotText -notmatch '(?m)^running 1 test\r?$' -or
+            $snapshotText -notmatch 'test result: ok\. 1 passed; 0 failed;' -or
+            $snapshotText -notmatch [regex]::Escape('fs::tests::windows_copy_snapshot_validates_original_and_resolved_operands')) {
+            throw "the pure copy-snapshot unit test filter did not run exactly one test:`n$snapshotText"
         }
         Invoke-Cargo @('test', '--locked', '--target', $Target, '-p', 'neojs', '--test', 'process')
         Invoke-Cargo @('test', '--locked', '--target', $Target, '-p', 'neojs', '--test', 'process_stdio')
