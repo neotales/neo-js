@@ -2300,7 +2300,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_copy_snapshot_validates_original_and_resolved_operands() {
-        use std::path::{Path, PathBuf};
+        use std::path::PathBuf;
 
         // Exercise the production snapshot helper, not a reimplementation.
         // The caller performs entry validation exactly as `copy_file_path`
